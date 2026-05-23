@@ -1,0 +1,13 @@
+# Virtual Environment
+.venv/
+
+# Python compiled files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Testing and caching
+.pytest_cache/
+.system_generated/
+.gemini/
