@@ -1,5 +1,5 @@
 import torch
-from core.quantization import (
+from .quantization import (
     quantize_to_int8,
     dequantize_from_int8,
     quantize_to_int4_packed,

@@ -53,7 +53,7 @@ def quantize_to_int4_packed(tensor: torch.Tensor, seq_dim: int = -2, quant_dim: 
     quantized = torch.round((tensor - min_vals) / scales).clamp(0, 15).to(torch.uint8)
     
     # Pack using Triton Custom GPU Kernel with PyTorch Fallback
-    from core.triton_kernels import triton_pack_int4
+    from .triton_kernels import triton_pack_int4
     packed = triton_pack_int4(quantized, seq_dim=seq_dim)
     
     return packed, scales, min_vals
@@ -63,7 +63,7 @@ def dequantize_from_int4_packed(packed: torch.Tensor, scales: torch.Tensor, min_
     Unpack packed uint8 tensor and dequantize to FP16/original precision.
     """
     # Unpack using Triton Custom GPU Kernel with PyTorch Fallback
-    from core.triton_kernels import triton_unpack_int4
+    from .triton_kernels import triton_unpack_int4
     unpacked = triton_unpack_int4(packed, scales.dtype, seq_dim=seq_dim)
     
     # Dequantize
@@ -192,7 +192,7 @@ def quantize_to_1bit_packed(tensor: torch.Tensor, seq_dim: int = -2, quant_dim: 
     scales = torch.clamp(scales, min=1e-8)
     
     # Binarize and pack
-    from core.triton_kernels import triton_pack_1bit
+    from .triton_kernels import triton_pack_1bit
     packed = triton_pack_1bit(tensor, seq_dim=seq_dim)
     
     return packed, scales
@@ -201,7 +201,7 @@ def dequantize_from_1bit_packed(packed: torch.Tensor, scales: torch.Tensor, seq_
     """
     Unpack packed uint8 1-bit tensor and scale back to original precision.
     """
-    from core.triton_kernels import triton_unpack_1bit
+    from .triton_kernels import triton_unpack_1bit
     unpacked = triton_unpack_1bit(packed, scales.dtype, seq_dim=seq_dim)
     
     # Map binary sign [0, 1] back to [-1.0, 1.0] and multiply by scales
