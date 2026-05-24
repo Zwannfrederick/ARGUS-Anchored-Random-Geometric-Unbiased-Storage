@@ -1,0 +1,32 @@
+# Use official vLLM OpenAI production base image
+FROM vllm/vllm-openai:latest
+
+# Install compiler headers and developer tools for fast custom Triton JIT compile
+USER root
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    ninja-build \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set working directory
+WORKDIR /workspace
+
+# Copy packages
+COPY setup.py /workspace/setup.py
+COPY pyproject.toml /workspace/pyproject.toml
+COPY README.md /workspace/README.md
+COPY argus_cache /workspace/argus_cache
+COPY argus_vllm_models.py /workspace/argus_vllm_models.py
+
+# Install ARGUS library in editable/production mode
+RUN pip install --no-cache-dir -e .
+
+# Expose standard port
+EXPOSE 8000
+
+# Set environment variables
+ENV PYTHONUNBUFFERED=1
+
+# Intercept and inject ARGUS, then run OpenAI API server
+ENTRYPOINT ["python3", "-c", "import argus_vllm_models; argus_vllm_models.inject_argus_to_vllm(); import sys; import subprocess; subprocess.run(['python3', '-m', 'vllm.entrypoints.openai.api_server'] + sys.argv[1:])"]

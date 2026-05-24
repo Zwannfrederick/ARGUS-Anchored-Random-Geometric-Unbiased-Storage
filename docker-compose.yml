@@ -1,0 +1,52 @@
+version: "3.8"
+
+services:
+  saas-gpt-service:
+    build:
+      context: .
+      dockerfile: Dockerfile.vllm
+    container_name: argus-saas-gpt
+    environment:
+      - CUDA_VISIBLE_DEVICES=0
+      - HF_TOKEN=${HF_TOKEN}
+    volumes:
+      - ~/.cache/huggingface:/root/.cache/huggingface
+    ports:
+      - "8001:8000"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    command: >
+      --model meta-llama/Meta-Llama-3-8B-Instruct
+      --trust-remote-code
+      --max-model-len 8192
+    restart: unless-stopped
+
+  health-gpt-service:
+    build:
+      context: .
+      dockerfile: Dockerfile.vllm
+    container_name: argus-health-gpt
+    environment:
+      - CUDA_VISIBLE_DEVICES=1
+      - HF_TOKEN=${HF_TOKEN}
+    volumes:
+      - ~/.cache/huggingface:/root/.cache/huggingface
+    ports:
+      - "8002:8000"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    command: >
+      --model clinicalbert/BioGPT-Large-Clinical-FineTuned
+      --trust-remote-code
+      --max-model-len 4096
+    restart: unless-stopped

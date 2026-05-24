@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=61.0.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "argus_cache"
+version = "0.1.0"
+description = "ARGUS: Anchored Random Geometric Unbiased Storage - Advanced Dynamic Quantized KV Cache"
+readme = "README.md"
+authors = [
+    { name = "Muhammed Emin Çelik" }
+]
+license = { text = "Apache-2.0" }
+requires-python = ">=3.8"
+dependencies = [
+    "torch>=2.0.0",
+    "triton>=2.0.0",
+    "transformers>=4.38.0",
+    "matplotlib",
+    "pytest"
+]

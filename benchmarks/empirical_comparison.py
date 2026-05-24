@@ -181,15 +181,19 @@ def train_models():
     print("        1. SYNTHETIC MODEL TRAINING PHASE (Short Context: 64)")
     print("=" * 70)
     
+    torch.manual_seed(42) # Ensure absolute determinism across all runs!
+    
     embed_dim = 64
     num_heads = 4
     epochs = 150
     batch_size = 32
     seq_len = 64
     
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    
     # Instantiate models
-    std_model = StandardAttentionLayer(embed_dim, num_heads)
-    ssm_model = SSMRecurrentLayer(embed_dim, state_dim=128)
+    std_model = StandardAttentionLayer(embed_dim, num_heads).to(device)
+    ssm_model = SSMRecurrentLayer(embed_dim, state_dim=128).to(device)
     
     criterion = nn.MSELoss()
     optimizer_std = optim.Adam(std_model.parameters(), lr=0.01)
@@ -197,7 +201,7 @@ def train_models():
     
     # Quick training on 64 tokens
     for epoch in range(epochs):
-        x, y = generate_passkey_data(batch_size, seq_len, embed_dim)
+        x, y = generate_passkey_data(batch_size, seq_len, embed_dim, device=device)
         
         # Train Standard Attention
         optimizer_std.zero_grad()
@@ -219,7 +223,7 @@ def train_models():
     print("Training finished! Models successfully learned associative retrieval at 64 tokens.")
     
     # Copy trained weights to our custom Paged Quantized Layer
-    paged_model = PagedQuantizedAttentionLayer(embed_dim, num_heads, page_size=128, max_active=1, max_mid=2)
+    paged_model = PagedQuantizedAttentionLayer(embed_dim, num_heads, page_size=128, max_active=1, max_mid=2).to(device)
     paged_model.q_proj.weight.data.copy_(std_model.q_proj.weight.data)
     paged_model.q_proj.bias.data.copy_(std_model.q_proj.bias.data)
     paged_model.k_proj.weight.data.copy_(std_model.k_proj.weight.data)
@@ -244,99 +248,197 @@ def evaluate_models(std_model, ssm_model, paged_model):
     embed_dim = 64
     batch_size = 1 # Single sequence inference for precise scaling measurement
     
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    std_model = std_model.to(device).eval()
+    ssm_model = ssm_model.to(device).eval()
+    paged_model = paged_model.to(device).eval()
+    
     results = []
 
     for length in eval_lengths:
-        x, y = generate_passkey_data(batch_size, length, embed_dim)
+        x, y = generate_passkey_data(batch_size, length, embed_dim, device=device)
         
-        # Standard FP16 Attention
-        # Measure accuracy and memory
+        # Number of tokens to time in autoregressive mode (cap at 64 for speed)
+        num_gen_tokens = min(length, 64)
+        num_runs = 5
+        
+        # =================================================================
+        # Standard FP16 Attention — Autoregressive Token-by-Token
+        # =================================================================
         with torch.no_grad():
+            # 1. Accuracy: full prefill for correctness check
             kv_cache_std = {'k': None, 'v': None}
             out_std = std_model(x, kv_cache=kv_cache_std)
             pred_std = out_std[:, -1, :]
-            
-            # VRAM calculation: 2 elements (K and V) * float16 (2 bytes)
             std_bytes = (kv_cache_std['k'].nelement() + kv_cache_std['v'].nelement()) * 2
             std_vram_kb = std_bytes / 1024
-            
-            # Success check (Mean Squared Error <= 0.2 is correct recall)
             mse_std = torch.mean((pred_std - y) ** 2).item()
             acc_std = 100.0 if mse_std < 0.2 else 0.0
+            
+            # 2. Speed: autoregressive token-by-token
+            # Warmup
+            for _ in range(3):
+                wc = {'k': None, 'v': None}
+                _ = std_model(x[:, :1, :], kv_cache=wc)
+                for t in range(1, min(8, length)):
+                    _ = std_model(x[:, t:t+1, :], kv_cache=wc)
+            
+            if device == "cuda":
+                torch.cuda.synchronize()
+            
+            total_time = 0.0
+            for _ in range(num_runs):
+                cache_run = {'k': None, 'v': None}
+                _ = std_model(x[:, :1, :], kv_cache=cache_run)
+                if device == "cuda":
+                    torch.cuda.synchronize()
+                start_t = time.time()
+                for t in range(1, num_gen_tokens):
+                    _ = std_model(x[:, t:t+1, :], kv_cache=cache_run)
+                if device == "cuda":
+                    torch.cuda.synchronize()
+                total_time += time.time() - start_t
+            
+            avg_time = total_time / num_runs
+            std_speed = (num_gen_tokens - 1) / max(avg_time, 1e-9)
 
-        # Mamba SSM Model
+        # =================================================================
+        # Mamba SSM Model — Autoregressive Token-by-Token
+        # =================================================================
         with torch.no_grad():
+            # 1. Accuracy
             out_ssm, final_state = ssm_model(x)
             pred_ssm = out_ssm[:, -1, :]
-            
-            # VRAM: SSM stores ONLY a single state vector of state_dim=128 (4 bytes float32)
             ssm_bytes = final_state.nelement() * 4
             ssm_vram_kb = ssm_bytes / 1024
-            
             mse_ssm = torch.mean((pred_ssm - y) ** 2).item()
             acc_ssm = 100.0 if mse_ssm < 0.2 else 0.0
+            
+            # 2. Speed: token-by-token with recurrent state
+            for _ in range(3):
+                ws = None
+                for t in range(min(8, length)):
+                    _, ws = ssm_model(x[:, t:t+1, :], ssm_state=ws)
+            
+            if device == "cuda":
+                torch.cuda.synchronize()
+            
+            total_time = 0.0
+            for _ in range(num_runs):
+                state = None
+                _, state = ssm_model(x[:, :1, :], ssm_state=state)
+                if device == "cuda":
+                    torch.cuda.synchronize()
+                start_t = time.time()
+                for t in range(1, num_gen_tokens):
+                    _, state = ssm_model(x[:, t:t+1, :], ssm_state=state)
+                if device == "cuda":
+                    torch.cuda.synchronize()
+                total_time += time.time() - start_t
+            
+            avg_time = total_time / num_runs
+            ssm_speed = (num_gen_tokens - 1) / max(avg_time, 1e-9)
 
-        # Paged Quantized Attention (Our Model)
+        # =================================================================
+        # Paged Quantized Attention (Our Model) — Autoregressive Token-by-Token
+        # =================================================================
         with torch.no_grad():
-            paged_cache = PagedDynamicKVCache(
-                page_size=128,
-                max_active_pages=1,
-                max_fp8_pages=1,
-                max_int8_pages=1,
-                max_int4_pages=1,
-                sink_tokens=4
+            # 1. Accuracy: full prefill
+            paged_cache_acc = PagedDynamicKVCache(
+                page_size=128, max_active_pages=2, max_fp8_pages=2,
+                max_int8_pages=2, max_int4_pages=2,
+                sink_tokens=4, threshold_sigma=2.0
             )
-            out_paged = paged_model(x, paged_cache=paged_cache)
+            out_paged = paged_model(x, paged_cache=paged_cache_acc)
             pred_paged = out_paged[:, -1, :]
-            
-            # VRAM usage in bytes
-            paged_bytes = paged_cache.get_vram_usage()
+            paged_bytes = paged_cache_acc.get_vram_usage()
             paged_vram_kb = paged_bytes / 1024
-            
             mse_paged = torch.mean((pred_paged - y) ** 2).item()
             acc_paged = 100.0 if mse_paged < 0.2 else 0.0
             
+            # 2. Speed: token-by-token with paged cache
+            for _ in range(3):
+                wpc = PagedDynamicKVCache(
+                    page_size=128, max_active_pages=2, max_fp8_pages=2,
+                    max_int8_pages=2, max_int4_pages=2,
+                    sink_tokens=4, threshold_sigma=2.0
+                )
+                for t in range(min(8, length)):
+                    _ = paged_model(x[:, t:t+1, :], paged_cache=wpc)
+            
+            if device == "cuda":
+                torch.cuda.synchronize()
+            
+            total_time = 0.0
+            for _ in range(num_runs):
+                pc = PagedDynamicKVCache(
+                    page_size=128, max_active_pages=2, max_fp8_pages=2,
+                    max_int8_pages=2, max_int4_pages=2,
+                    sink_tokens=4, threshold_sigma=2.0
+                )
+                _ = paged_model(x[:, :1, :], paged_cache=pc)
+                pc.speculate_and_prefetch()
+                if device == "cuda":
+                    torch.cuda.synchronize()
+                start_t = time.time()
+                for t in range(1, num_gen_tokens):
+                    pc.speculate_and_prefetch()
+                    _ = paged_model(x[:, t:t+1, :], paged_cache=pc)
+                if device == "cuda":
+                    torch.cuda.synchronize()
+                total_time += time.time() - start_t
+            
+            avg_time = total_time / num_runs
+            paged_speed = (num_gen_tokens - 1) / max(avg_time, 1e-9)
+            
         results.append({
             'length': length,
-            'std': (acc_std, std_vram_kb),
-            'ssm': (acc_ssm, ssm_vram_kb),
-            'paged': (acc_paged, paged_vram_kb)
+            'std': (acc_std, std_vram_kb, std_speed),
+            'ssm': (acc_ssm, ssm_vram_kb, ssm_speed),
+            'paged': (acc_paged, paged_vram_kb, paged_speed)
         })
         
         print(f"[Length: {length:4d} tokens]")
-        print(f"  - Std Transformer  -> Accuracy: {acc_std:3.0f}% | Cache Memory: {std_vram_kb:6.2f} KB")
-        print(f"  - Mamba SSM Layer  -> Accuracy: {acc_ssm:3.0f}% | Cache Memory: {ssm_vram_kb:6.2f} KB")
-        print(f"  - Paged Quantized  -> Accuracy: {acc_paged:3.0f}% | Cache Memory: {paged_vram_kb:6.2f} KB (Saved: {((std_vram_kb - paged_vram_kb)/std_vram_kb)*100:4.1f}%)")
+        print(f"  - Std Transformer  -> Accuracy: {acc_std:3.0f}% | Cache Memory: {std_vram_kb:6.2f} KB | Speed: {std_speed:7.1f} tok/s")
+        print(f"  - Mamba SSM Layer  -> Accuracy: {acc_ssm:3.0f}% | Cache Memory: {ssm_vram_kb:6.2f} KB | Speed: {ssm_speed:7.1f} tok/s")
+        print(f"  - Paged Quantized  -> Accuracy: {acc_paged:3.0f}% | Cache Memory: {paged_vram_kb:6.2f} KB (Saved: {((std_vram_kb - paged_vram_kb)/std_vram_kb)*100:4.1f}%) | Speed: {paged_speed:7.1f} tok/s")
         print("-" * 70)
 
     # 5. PRINT EMPIRICAL PROOF TABLE
-    print("\n" + "=" * 80)
+    print("\n" + "=" * 85)
     print("                       ACADEMIC EMPIRICAL PROOF TABLE")
-    print("=" * 80)
+    print("=" * 85)
     print("| Mimari (Architecture) | Metrik | 64 Tokens | 256 Tokens | 512 Tokens | 1024 Tokens | 2048 Tokens |")
     print("|----------------------|--------|-----------|------------|------------|-------------|-------------|")
     
     # Standart Attention
     std_acc_str = " | ".join([f"{r['std'][0]:8.0f}%" for r in results])
     std_mem_str = " | ".join([f"{r['std'][1]:7.1f}K" for r in results])
+    std_spd_str = " | ".join([f"{r['std'][2]:6.0f} t/s" for r in results])
     print(f"| Standard Transformer | Doğruluk| {std_acc_str} |")
     print(f"| (Exact FP16 Cache)   | Bellek | {std_mem_str} |")
+    print(f"|                      | Hız    | {std_spd_str} |")
     print("|----------------------|--------|-----------|------------|------------|-------------|-------------|")
     
     # Mamba SSM
     ssm_acc_str = " | ".join([f"{r['ssm'][0]:8.0f}%" for r in results])
     ssm_mem_str = " | ".join([f"{r['ssm'][1]:7.1f}K" for r in results])
+    ssm_spd_str = " | ".join([f"{r['ssm'][2]:6.0f} t/s" for r in results])
     print(f"| Mamba SSM Layer      | Doğruluk| {ssm_acc_str} |")
     print(f"| (State Compression)  | Bellek | {ssm_mem_str} |")
+    print(f"|                      | Hız    | {ssm_spd_str} |")
     print("|----------------------|--------|-----------|------------|------------|-------------|-------------|")
     
     # Our Paged Quantized Cache
     pg_acc_str = " | ".join([f"{r['paged'][0]:8.0f}%" for r in results])
     pg_mem_str = " | ".join([f"{r['paged'][1]:7.1f}K" for r in results])
+    pg_spd_str = " | ".join([f"{r['paged'][2]:6.0f} t/s" for r in results])
     print(f"| Bizim Mimari         | Doğruluk| {pg_acc_str} |")
     print(f"| (Paged Dynamic Cache)| Bellek | {pg_mem_str} |")
-    print("=" * 80)
+    print(f"| (Kahin Prefetching)  | Hız    | {pg_spd_str} |")
+    print("=" * 85)
 
 if __name__ == "__main__":
     std_model, ssm_model, paged_model = train_models()
     evaluate_models(std_model, ssm_model, paged_model)
+

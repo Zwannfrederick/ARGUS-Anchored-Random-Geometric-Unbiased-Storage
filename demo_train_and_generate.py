@@ -8,8 +8,8 @@ import os
 # Add parent directory to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from core.memory_manager import PagedDynamicKVCache
-from models.attention_wrapper import PagedDynamicQuantizedCache
+from argus_cache.core.memory_manager import PagedDynamicKVCache
+from argus_cache.models.attention_wrapper import PagedDynamicQuantizedCache
 
 # =====================================================================
 # QAT COMPRESSION NOISE SIMULATOR FOR TRAINING RESILIENCE
@@ -270,6 +270,17 @@ def generate_text(model, mode, cache=None, ssm_state=None, prompt="zwann", gen_l
     current_tokens = string_to_tensor(prompt, device)
     generated = prompt
     
+    # Helper function to apply character-level repetition penalty
+    def get_penalized_argmax(logits, current_generated):
+        next_token_logits = logits[:, -1, :].clone()  # Keep batch dim: [B, vocab]
+        # Penalize recently generated characters (sliding window of 15) to prevent repetition loops
+        recent_chars = current_generated[-15:]
+        for char in recent_chars:
+            if char in char_to_ix:
+                char_idx = char_to_ix[char]
+                next_token_logits[:, char_idx] -= 1.5
+        return torch.argmax(next_token_logits, dim=-1)  # Returns [B]
+    
     # If using transformer cache, initialize it
     # We will do incremental generation (token-by-token) to verify dynamic cache operation!
     state = ssm_state
@@ -280,51 +291,76 @@ def generate_text(model, mode, cache=None, ssm_state=None, prompt="zwann", gen_l
             model_cache = {}
             # Warmup with prompt
             logits, _ = model(current_tokens, cache=model_cache)
-            next_token = torch.argmax(logits[:, -1, :], dim=-1)
+            next_token = get_penalized_argmax(logits, generated)
             generated += ix_to_char[next_token.item()]
             
             # Generate next tokens autoregressively
             for _ in range(gen_len - 1):
                 next_token_tensor = next_token.unsqueeze(0)
                 logits, _ = model(next_token_tensor, cache=model_cache)
-                next_token = torch.argmax(logits[:, -1, :], dim=-1)
+                next_token = get_penalized_argmax(logits, generated)
                 generated += ix_to_char[next_token.item()]
                 
         elif mode == "ssm":
             # Recurrent sequence scan
             logits, state = model(current_tokens, ssm_state=state)
-            next_token = torch.argmax(logits[:, -1, :], dim=-1)
+            next_token = get_penalized_argmax(logits, generated)
             generated += ix_to_char[next_token.item()]
             
             for _ in range(gen_len - 1):
                 next_token_tensor = next_token.unsqueeze(0)
                 logits, state = model(next_token_tensor, ssm_state=state)
-                next_token = torch.argmax(logits[:, -1, :], dim=-1)
+                next_token = get_penalized_argmax(logits, generated)
                 generated += ix_to_char[next_token.item()]
                 
         elif mode == "paged_quantized":
             # Powered by our 5-tier Paged Cache!
-            # Using very small page size = 4 to showcase compression transitions instantly!
-            # Page progression: active (1 page FP16) -> fp8 (1 page) -> int8 (1 page) -> int4 (1 page) -> int2 archive
+            from core.dashboard import render_dashboard
+            import time
+            
             paged_cache = PagedDynamicQuantizedCache(
-                page_size=4,
+                page_size=8,
                 max_active_pages=1,
                 max_fp8_pages=1,
                 max_int8_pages=1,
                 max_int4_pages=1
             )
             
+            # Clear terminal at start of live dashboard
+            sys.stdout.write("\033[2J\033[H")
+            sys.stdout.flush()
+            
             # Warmup with prompt
             logits, _ = model(current_tokens, cache=paged_cache)
-            next_token = torch.argmax(logits[:, -1, :], dim=-1)
+            next_token = get_penalized_argmax(logits, generated)
             generated += ix_to_char[next_token.item()]
             
+            # Show initial dashboard
+            render_dashboard(paged_cache, step=0, mode="paged_quantized", text_output=generated)
+            time.sleep(0.1)
+            
             # Generate autoregressively
-            for _ in range(gen_len - 1):
+            for step in range(1, gen_len):
                 next_token_tensor = next_token.unsqueeze(0)
+                
+                # Dynamic Swap Out showcase at step 20 (Guard activated!)
+                if step == 20:
+                    paged_cache.swap_out_to_host()
+                    render_dashboard(paged_cache, step=step, mode="paged_quantized (Swapped Out)", text_output=generated)
+                    time.sleep(0.8) # Let the user see the "SWAPPED OUT" state
+                    
+                # Auto Prefetching prediction
+                paged_cache.speculate_and_prefetch()
+                
                 logits, _ = model(next_token_tensor, cache=paged_cache)
-                next_token = torch.argmax(logits[:, -1, :], dim=-1)
+                next_token = get_penalized_argmax(logits, generated)
                 generated += ix_to_char[next_token.item()]
+                
+                # Fetch layer 0 stats
+                c = paged_cache.layer_caches[0]
+                render_dashboard(paged_cache, step=step, mode="paged_quantized", text_output=generated, 
+                                 prefetch_hits=c.prefetch_hits, prefetch_misses=c.prefetch_misses)
+                time.sleep(0.1) # Smooth progression delay
                 
             # Log cache stats at the end of generation
             c = paged_cache.layer_caches[0]
