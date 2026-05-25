@@ -1,8 +1,8 @@
 # ⚡ ARGUS: Anchored Random Geometric Unbiased Storage
 
-[![PyPI version](https://img.shields.io/pypi/v/argus-cache.svg)](https://pypi.org/project/argus-cache/)
+[![PyPI version](https://img.shields.io/pypi/v/argus_cache.svg)](https://pypi.org/project/argus_cache/)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
-[![Supported Python Versions](https://img.shields.io/pypi/pyversions/argus-cache.svg)](https://pypi.org/project/argus-cache/)
+[![Supported Python Versions](https://img.shields.io/pypi/pyversions/argus_cache.svg)](https://pypi.org/project/argus_cache/)
 
 **ARGUS** is an academic-grade, production-ready **7-Tier Paged Dynamic Quantized KV Cache Manager** for long-context Transformers. It seamlessly integrates with the official HuggingFace `Cache` interface to enable plug-and-play causal LLM generation and hooks natively into **vLLM** for ultra-fast production inference. 
 
