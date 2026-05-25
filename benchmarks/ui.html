@@ -439,14 +439,14 @@
             background: rgba(11, 10, 21, 0.45);
             border: 1px solid var(--card-border);
             border-radius: 12px;
-            padding: 14px 16px;
+            padding: 14px 16px 35px 16px; /* Generous bottom padding to prevent scroll clipping */
             flex: 1;
             overflow-y: auto;
             font-size: 13.5px;
             line-height: 1.6;
             white-space: pre-wrap;
             position: relative;
-            height: 0; /* Forces flex parent to constrain height and trigger scrolling */
+            min-height: 150px; /* Guarantees a solid baseline height so it never squishes too much */
         }
 
         /* Sleek custom scrollbars for results and logs */
