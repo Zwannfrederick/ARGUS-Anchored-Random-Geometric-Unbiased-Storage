@@ -107,14 +107,16 @@ class PagedDynamicKVCache:
         # Shared static JL projection matrix
         self.w_proj = None
         
-        # Temp active buffers for incoming tokens
-        self.k_buffer = None
-        self.v_buffer = None
+        # Static buffer state (allocated on demand during ensure_pools_allocated)
+        self._pools_allocated = False
         
         # Speculative prefetching cache
         self.prefetch_cache = {}
         self.prefetch_hits = 0
         self.prefetch_misses = 0
+        
+        # CUDA Stream for async prefetching
+        self.prefetch_stream = None
         
         # Context swapping / Zero-OOM multi-tenant guard state
         self.is_swapped_out = False
@@ -132,6 +134,82 @@ class PagedDynamicKVCache:
             q, _ = torch.linalg.qr(raw_randn)
             self.w_proj = q.t().to(dtype) # [M, N]
         return self.w_proj
+
+    @property
+    def k_buffer(self):
+        if not hasattr(self, 'buffer_length') or self.buffer_length == 0:
+            return None
+        return self.static_k_buffer[..., :self.buffer_length, :]
+
+    @property
+    def v_buffer(self):
+        if not hasattr(self, 'buffer_length') or self.buffer_length == 0:
+            return None
+        return self.static_v_buffer[..., :self.buffer_length, :]
+
+    def _ensure_pools_allocated(self, keys: torch.Tensor, values: torch.Tensor):
+        batch, num_heads, _, head_dim = keys.shape
+        device = keys.device
+        dtype = keys.dtype
+        
+        if (hasattr(self, "_pools_allocated") and self._pools_allocated and
+            self.static_k_buffer.shape[0] == batch and
+            self.static_k_buffer.shape[1] == num_heads and
+            self.static_k_buffer.shape[3] == head_dim and
+            self.static_k_buffer.device == device and
+            self.static_k_buffer.dtype == dtype):
+            return
+            
+        # Pre-allocate buffer for incoming tokens
+        self.static_k_buffer = torch.zeros(batch, num_heads, self.page_size * 2, head_dim, device=device, dtype=dtype)
+        self.static_v_buffer = torch.zeros(batch, num_heads, self.page_size * 2, head_dim, device=device, dtype=dtype)
+        self.buffer_length = 0
+        
+        # Active Pool
+        self.active_pool_k = torch.zeros(self.max_active_pages, batch, num_heads, self.page_size, head_dim, device=device, dtype=dtype)
+        self.active_pool_v = torch.zeros(self.max_active_pages, batch, num_heads, self.page_size, head_dim, device=device, dtype=dtype)
+        self.active_pool_idx = 0
+        
+        # FP8 Pool
+        self.fp8_pool_k_q = torch.zeros(self.max_fp8_pages, batch, num_heads, self.page_size, head_dim, device=device, dtype=torch.int8)
+        self.fp8_pool_v_q = torch.zeros(self.max_fp8_pages, batch, num_heads, self.page_size, head_dim, device=device, dtype=torch.int8)
+        self.fp8_pool_k_scales = torch.zeros(self.max_fp8_pages, batch, num_heads, self.page_size, 1, device=device, dtype=dtype)
+        self.fp8_pool_v_scales = torch.zeros(self.max_fp8_pages, batch, num_heads, self.page_size, 1, device=device, dtype=dtype)
+        self.fp8_pool_idx = 0
+        
+        # INT8 Pool
+        self.int8_pool_k_q = torch.zeros(self.max_int8_pages, batch, num_heads, self.page_size, head_dim, device=device, dtype=torch.int8)
+        self.int8_pool_v_q = torch.zeros(self.max_int8_pages, batch, num_heads, self.page_size, head_dim, device=device, dtype=torch.int8)
+        self.int8_pool_k_scales = torch.zeros(self.max_int8_pages, batch, num_heads, self.page_size, 1, device=device, dtype=dtype)
+        self.int8_pool_v_scales = torch.zeros(self.max_int8_pages, batch, num_heads, self.page_size, 1, device=device, dtype=dtype)
+        self.int8_pool_idx = 0
+        
+        # INT4 Pool
+        self.int4_pool_k_packed = torch.zeros(self.max_int4_pages, batch, num_heads, self.page_size // 2, head_dim, device=device, dtype=torch.uint8)
+        self.int4_pool_v_packed = torch.zeros(self.max_int4_pages, batch, num_heads, self.page_size // 2, head_dim, device=device, dtype=torch.uint8)
+        self.int4_pool_k_scales = torch.zeros(self.max_int4_pages, batch, num_heads, self.page_size, 1, device=device, dtype=dtype)
+        self.int4_pool_v_scales = torch.zeros(self.max_int4_pages, batch, num_heads, self.page_size, 1, device=device, dtype=dtype)
+        self.int4_pool_k_min = torch.zeros(self.max_int4_pages, batch, num_heads, self.page_size, 1, device=device, dtype=dtype)
+        self.int4_pool_v_min = torch.zeros(self.max_int4_pages, batch, num_heads, self.page_size, 1, device=device, dtype=dtype)
+        self.int4_pool_idx = 0
+        
+        # INT2 Pool
+        self.int2_pool_k_packed = torch.zeros(self.max_int2_pages, batch, num_heads, self.page_size // 4, head_dim, device=device, dtype=torch.uint8)
+        self.int2_pool_v_packed = torch.zeros(self.max_int2_pages, batch, num_heads, self.page_size // 4, head_dim, device=device, dtype=torch.uint8)
+        self.int2_pool_k_scales = torch.zeros(self.max_int2_pages, batch, num_heads, self.page_size, 1, device=device, dtype=dtype)
+        self.int2_pool_v_scales = torch.zeros(self.max_int2_pages, batch, num_heads, self.page_size, 1, device=device, dtype=dtype)
+        self.int2_pool_k_min = torch.zeros(self.max_int2_pages, batch, num_heads, self.page_size, 1, device=device, dtype=dtype)
+        self.int2_pool_v_min = torch.zeros(self.max_int2_pages, batch, num_heads, self.page_size, 1, device=device, dtype=dtype)
+        self.int2_pool_idx = 0
+        
+        # 1-Bit Pool
+        self.one_bit_pool_k_packed = torch.zeros(self.max_one_bit_pages, batch, num_heads, self.page_size // 8, head_dim, device=device, dtype=torch.uint8)
+        self.one_bit_pool_v_packed = torch.zeros(self.max_one_bit_pages, batch, num_heads, self.page_size // 8, head_dim, device=device, dtype=torch.uint8)
+        self.one_bit_pool_k_scales = torch.zeros(self.max_one_bit_pages, batch, num_heads, self.page_size, 1, device=device, dtype=dtype)
+        self.one_bit_pool_v_scales = torch.zeros(self.max_one_bit_pages, batch, num_heads, self.page_size, 1, device=device, dtype=dtype)
+        self.one_bit_pool_idx = 0
+        
+        self._pools_allocated = True
 
     def push_new_tokens(self, keys: torch.Tensor, values: torch.Tensor, is_anchor: torch.Tensor = None):
         """
@@ -187,26 +265,44 @@ class PagedDynamicKVCache:
                 self.sink_v = values.clone()
                 return
 
-        # 2. Append to normal active buffers
-        if self.k_buffer is None:
-            self.k_buffer = keys
-            self.v_buffer = values
-        else:
-            self.k_buffer = torch.cat([self.k_buffer, keys], dim=-2)
-            self.v_buffer = torch.cat([self.v_buffer, values], dim=-2)
+        # Ensure pools are allocated with correct batch and head size
+        self._ensure_pools_allocated(keys, values)
+        
+        num_new = keys.shape[-2]
+        # Expand static buffer if needed (extreme edge case)
+        if self.buffer_length + num_new > self.static_k_buffer.shape[-2]:
+            new_size = max(self.static_k_buffer.shape[-2] * 2, self.buffer_length + num_new)
+            batch, num_heads, _, head_dim = keys.shape
+            device = keys.device
+            dtype = keys.dtype
+            self.static_k_buffer = torch.cat([self.static_k_buffer, torch.zeros(batch, num_heads, new_size - self.static_k_buffer.shape[-2], head_dim, device=device, dtype=dtype)], dim=-2)
+            self.static_v_buffer = torch.cat([self.static_v_buffer, torch.zeros(batch, num_heads, new_size - self.static_v_buffer.shape[-2], head_dim, device=device, dtype=dtype)], dim=-2)
+
+        # Copy in-place
+        self.static_k_buffer[..., self.buffer_length : self.buffer_length + num_new, :].copy_(keys)
+        self.static_v_buffer[..., self.buffer_length : self.buffer_length + num_new, :].copy_(values)
+        self.buffer_length += num_new
             
-        # 3. Segment into pages
-        while self.k_buffer.shape[-2] >= self.page_size:
-            page_k = self.k_buffer[..., :self.page_size, :]
-            page_v = self.v_buffer[..., :self.page_size, :]
+        # 3. Segment into pages in-place
+        while self.buffer_length >= self.page_size:
+            idx = self.active_pool_idx
+            self.active_pool_k[idx].copy_(self.static_k_buffer[..., :self.page_size, :])
+            self.active_pool_v[idx].copy_(self.static_v_buffer[..., :self.page_size, :])
             
-            self.k_buffer = self.k_buffer[..., self.page_size:, :]
-            self.v_buffer = self.v_buffer[..., self.page_size:, :]
+            # Shift remaining tokens in static buffer
+            remaining = self.buffer_length - self.page_size
+            if remaining > 0:
+                self.static_k_buffer[..., :remaining, :].copy_(self.static_k_buffer[..., self.page_size : self.page_size + remaining, :])
+                self.static_v_buffer[..., :remaining, :].copy_(self.static_v_buffer[..., self.page_size : self.page_size + remaining, :])
+            self.buffer_length = remaining
             
             self.active_pages.append({
-                'key': page_k,
-                'value': page_v
+                'key': self.active_pool_k[idx],
+                'value': self.active_pool_v[idx],
+                'pool_idx': idx
             })
+            
+            self.active_pool_idx = (self.active_pool_idx + 1) % self.max_active_pages
             
             self.manage_memory_lifecycle()
 
@@ -231,10 +327,18 @@ class PagedDynamicKVCache:
             v_out_indices = torch.nonzero(v_mask).to(torch.int16)
             v_out_values = v_out[v_mask]
             
+            idx = self.fp8_pool_idx
+            self.fp8_pool_k_q[idx].copy_(k_q)
+            self.fp8_pool_v_q[idx].copy_(v_q)
+            self.fp8_pool_k_scales[idx].copy_(k_s)
+            self.fp8_pool_v_scales[idx].copy_(v_s)
+            
             self.fp8_pages.append({
-                'key_q': k_q, 'key_scales': k_s, 'key_out_indices': k_out_indices, 'key_out_values': k_out_values,
-                'value_q': v_q, 'value_scales': v_s, 'value_out_indices': v_out_indices, 'value_out_values': v_out_values
+                'key_q': self.fp8_pool_k_q[idx], 'key_scales': self.fp8_pool_k_scales[idx], 'key_out_indices': k_out_indices, 'key_out_values': k_out_values,
+                'value_q': self.fp8_pool_v_q[idx], 'value_scales': self.fp8_pool_v_scales[idx], 'value_out_indices': v_out_indices, 'value_out_values': v_out_values,
+                'pool_idx': idx
             })
+            self.fp8_pool_idx = (self.fp8_pool_idx + 1) % self.max_fp8_pages
             
         # 2. FP8 -> INT8
         if len(self.fp8_pages) > self.max_fp8_pages:
@@ -245,10 +349,18 @@ class PagedDynamicKVCache:
             k_q, k_s = quantize_to_int8(k_norm, dim=-1)
             v_q, v_s = quantize_to_int8(v_norm, dim=-1)
             
+            idx = self.int8_pool_idx
+            self.int8_pool_k_q[idx].copy_(k_q)
+            self.int8_pool_v_q[idx].copy_(v_q)
+            self.int8_pool_k_scales[idx].copy_(k_s)
+            self.int8_pool_v_scales[idx].copy_(v_s)
+            
             self.int8_pages.append({
-                'key_q': k_q, 'key_scales': k_s, 'key_out_indices': old['key_out_indices'], 'key_out_values': old['key_out_values'],
-                'value_q': v_q, 'value_scales': v_s, 'value_out_indices': old['value_out_indices'], 'value_out_values': old['value_out_values']
+                'key_q': self.int8_pool_k_q[idx], 'key_scales': self.int8_pool_k_scales[idx], 'key_out_indices': old['key_out_indices'], 'key_out_values': old['key_out_values'],
+                'value_q': self.int8_pool_v_q[idx], 'value_scales': self.int8_pool_v_scales[idx], 'value_out_indices': old['value_out_indices'], 'value_out_values': old['value_out_values'],
+                'pool_idx': idx
             })
+            self.int8_pool_idx = (self.int8_pool_idx + 1) % self.max_int8_pages
             
         # 3. INT8 -> INT4 (Packed 2 per byte)
         if len(self.int8_pages) > self.max_int8_pages:
@@ -259,10 +371,20 @@ class PagedDynamicKVCache:
             k_packed, k_s, k_min = quantize_to_int4_packed(k_norm, seq_dim=-2, quant_dim=-1)
             v_packed, v_s, v_min = quantize_to_int4_packed(v_norm, seq_dim=-2, quant_dim=-1)
             
+            idx = self.int4_pool_idx
+            self.int4_pool_k_packed[idx].copy_(k_packed)
+            self.int4_pool_v_packed[idx].copy_(v_packed)
+            self.int4_pool_k_scales[idx].copy_(k_s)
+            self.int4_pool_v_scales[idx].copy_(v_s)
+            self.int4_pool_k_min[idx].copy_(k_min)
+            self.int4_pool_v_min[idx].copy_(v_min)
+            
             self.int4_pages.append({
-                'key_packed': k_packed, 'key_scales': k_s, 'key_min': k_min, 'key_out_indices': old['key_out_indices'], 'key_out_values': old['key_out_values'],
-                'value_packed': v_packed, 'value_scales': v_s, 'value_min': v_min, 'value_out_indices': old['value_out_indices'], 'value_out_values': old['value_out_values']
+                'key_packed': self.int4_pool_k_packed[idx], 'key_scales': self.int4_pool_k_scales[idx], 'key_min': self.int4_pool_k_min[idx], 'key_out_indices': old['key_out_indices'], 'key_out_values': old['key_out_values'],
+                'value_packed': self.int4_pool_v_packed[idx], 'value_scales': self.int4_pool_v_scales[idx], 'value_min': self.int4_pool_v_min[idx], 'value_out_indices': old['value_out_indices'], 'value_out_values': old['value_out_values'],
+                'pool_idx': idx
             })
+            self.int4_pool_idx = (self.int4_pool_idx + 1) % self.max_int4_pages
             
         # 4. INT4 -> INT2 (Packed 4 per byte)
         if len(self.int4_pages) > self.max_int4_pages:
@@ -273,11 +395,21 @@ class PagedDynamicKVCache:
             k_packed, k_s, k_min = quantize_to_int2_packed(k_norm, seq_dim=-2, quant_dim=-1)
             v_packed, v_s, v_min = quantize_to_int2_packed(v_norm, seq_dim=-2, quant_dim=-1)
             
+            idx = self.int2_pool_idx
+            self.int2_pool_k_packed[idx].copy_(k_packed)
+            self.int2_pool_v_packed[idx].copy_(v_packed)
+            self.int2_pool_k_scales[idx].copy_(k_s)
+            self.int2_pool_v_scales[idx].copy_(v_s)
+            self.int2_pool_k_min[idx].copy_(k_min)
+            self.int2_pool_v_min[idx].copy_(v_min)
+            
             self.int2_pages.append({
-                'key_packed': k_packed, 'key_scales': k_s, 'key_min': k_min, 'key_out_indices': old['key_out_indices'], 'key_out_values': old['key_out_values'],
-                'value_packed': v_packed, 'value_scales': v_s, 'value_min': v_min, 'value_out_indices': old['value_out_indices'], 'value_out_values': old['value_out_values']
+                'key_packed': self.int2_pool_k_packed[idx], 'key_scales': self.int2_pool_k_scales[idx], 'key_min': self.int2_pool_k_min[idx], 'key_out_indices': old['key_out_indices'], 'key_out_values': old['key_out_values'],
+                'value_packed': self.int2_pool_v_packed[idx], 'value_scales': self.int2_pool_v_scales[idx], 'value_min': self.int2_pool_v_min[idx], 'value_out_indices': old['value_out_indices'], 'value_out_values': old['value_out_values'],
+                'pool_idx': idx
             })
-
+            self.int2_pool_idx = (self.int2_pool_idx + 1) % self.max_int2_pages
+ 
         # 5. INT2 -> 1-Bit (Packed 8 per byte)
         if len(self.int2_pages) > self.max_int2_pages:
             old = self.int2_pages.pop(0)
@@ -287,10 +419,18 @@ class PagedDynamicKVCache:
             k_packed, k_s = quantize_to_1bit_packed(k_norm, seq_dim=-2, quant_dim=-1)
             v_packed, v_s = quantize_to_1bit_packed(v_norm, seq_dim=-2, quant_dim=-1)
             
+            idx = self.one_bit_pool_idx
+            self.one_bit_pool_k_packed[idx].copy_(k_packed)
+            self.one_bit_pool_v_packed[idx].copy_(v_packed)
+            self.one_bit_pool_k_scales[idx].copy_(k_s)
+            self.one_bit_pool_v_scales[idx].copy_(v_s)
+            
             self.one_bit_pages.append({
-                'key_packed': k_packed, 'key_scales': k_s, 'key_out_indices': old['key_out_indices'], 'key_out_values': old['key_out_values'],
-                'value_packed': v_packed, 'value_scales': v_s, 'value_out_indices': old['value_out_indices'], 'value_out_values': old['value_out_values']
+                'key_packed': self.one_bit_pool_k_packed[idx], 'key_scales': self.one_bit_pool_k_scales[idx], 'key_out_indices': old['key_out_indices'], 'key_out_values': old['key_out_values'],
+                'value_packed': self.one_bit_pool_v_packed[idx], 'value_scales': self.one_bit_pool_v_scales[idx], 'value_out_indices': old['value_out_indices'], 'value_out_values': old['value_out_values'],
+                'pool_idx': idx
             })
+            self.one_bit_pool_idx = (self.one_bit_pool_idx + 1) % self.max_one_bit_pages
             
         # 6. 1-Bit -> JL Projection FP16 Archive
         if len(self.one_bit_pages) > self.max_one_bit_pages:
@@ -531,38 +671,81 @@ class PagedDynamicKVCache:
             if self.int4_pages:
                 pages_to_prefetch.append((self.int4_pages[-1], 'int4'))
                 
+        if self.prefetch_stream is None and torch.cuda.is_available():
+            self.prefetch_stream = torch.cuda.Stream()
+            
+        main_stream = torch.cuda.current_stream() if torch.cuda.is_available() else None
+        
         for page, tier in pages_to_prefetch:
             try:
-                if tier == 'fp8':
-                    k = dequantize_from_fp8_simulated(page['key_q'], page['key_scales'])
-                    v = dequantize_from_fp8_simulated(page['value_q'], page['value_scales'])
-                elif tier == 'int8':
-                    k = dequantize_from_int8(page['key_q'], page['key_scales'])
-                    v = dequantize_from_int8(page['value_q'], page['value_scales'])
-                elif tier == 'int4':
-                    k = dequantize_from_int4_packed(page['key_packed'], page['key_scales'], page['key_min'], seq_dim=-2)
-                    v = dequantize_from_int4_packed(page['value_packed'], page['value_scales'], page['value_min'], seq_dim=-2)
-                elif tier == 'int2':
-                    k = dequantize_from_int2_packed(page['key_packed'], page['key_scales'], page['key_min'], seq_dim=-2)
-                    v = dequantize_from_int2_packed(page['value_packed'], page['value_scales'], page['value_min'], seq_dim=-2)
-                elif tier == 'one_bit':
-                    k = dequantize_from_1bit_packed(page['key_packed'], page['key_scales'], seq_dim=-2)
-                    v = dequantize_from_1bit_packed(page['value_packed'], page['value_scales'], seq_dim=-2)
-                elif tier == 'jl':
-                    w_proj = self.get_jl_projection_matrix(page['key_proj'].device, page['key_proj'].dtype)
-                    k = torch.matmul(w_proj.t(), page['key_proj'])
-                    v = torch.matmul(w_proj.t(), page['value_proj'])
+                if self.prefetch_stream is not None:
+                    # Run pre-dequantization asynchronously on dedicated stream
+                    with torch.cuda.stream(self.prefetch_stream):
+                        if tier == 'fp8':
+                            k = dequantize_from_fp8_simulated(page['key_q'], page['key_scales'])
+                            v = dequantize_from_fp8_simulated(page['value_q'], page['value_scales'])
+                        elif tier == 'int8':
+                            k = dequantize_from_int8(page['key_q'], page['key_scales'])
+                            v = dequantize_from_int8(page['value_q'], page['value_scales'])
+                        elif tier == 'int4':
+                            k = dequantize_from_int4_packed(page['key_packed'], page['key_scales'], page['key_min'], seq_dim=-2)
+                            v = dequantize_from_int4_packed(page['value_packed'], page['value_scales'], page['value_min'], seq_dim=-2)
+                        elif tier == 'int2':
+                            k = dequantize_from_int2_packed(page['key_packed'], page['key_scales'], page['key_min'], seq_dim=-2)
+                            v = dequantize_from_int2_packed(page['value_packed'], page['value_scales'], page['value_min'], seq_dim=-2)
+                        elif tier == 'one_bit':
+                            k = dequantize_from_1bit_packed(page['key_packed'], page['key_scales'], seq_dim=-2)
+                            v = dequantize_from_1bit_packed(page['value_packed'], page['value_scales'], seq_dim=-2)
+                        elif tier == 'jl':
+                            w_proj = self.get_jl_projection_matrix(page['key_proj'].device, page['key_proj'].dtype)
+                            k = torch.matmul(w_proj.t(), page['key_proj'])
+                            v = torch.matmul(w_proj.t(), page['value_proj'])
+                        else:
+                             continue
+                             
+                        k_idx = page.get('key_out_indices')
+                        if k_idx is not None and k_idx.numel() > 0:
+                            k = k.clone()
+                            k[k_idx[:, 0].long(), k_idx[:, 1].long(), k_idx[:, 2].long(), k_idx[:, 3].long()] = page['key_out_values']
+                        v_idx = page.get('value_out_indices')
+                        if v_idx is not None and v_idx.numel() > 0:
+                            v = v.clone()
+                            v[v_idx[:, 0].long(), v_idx[:, 1].long(), v_idx[:, 2].long(), v_idx[:, 3].long()] = page['value_out_values']
+                            
+                        # Record consumer stream to prevent premature recycling by CUDA allocator
+                        k.record_stream(main_stream)
+                        v.record_stream(main_stream)
                 else:
-                     continue
-                     
-                k_idx = page.get('key_out_indices')
-                if k_idx is not None and k_idx.numel() > 0:
-                    k = k.clone()
-                    k[k_idx[:, 0].long(), k_idx[:, 1].long(), k_idx[:, 2].long(), k_idx[:, 3].long()] = page['key_out_values']
-                v_idx = page.get('value_out_indices')
-                if v_idx is not None and v_idx.numel() > 0:
-                    v = v.clone()
-                    v[v_idx[:, 0].long(), v_idx[:, 1].long(), v_idx[:, 2].long(), v_idx[:, 3].long()] = page['value_out_values']
+                    if tier == 'fp8':
+                        k = dequantize_from_fp8_simulated(page['key_q'], page['key_scales'])
+                        v = dequantize_from_fp8_simulated(page['value_q'], page['value_scales'])
+                    elif tier == 'int8':
+                        k = dequantize_from_int8(page['key_q'], page['key_scales'])
+                        v = dequantize_from_int8(page['value_q'], page['value_scales'])
+                    elif tier == 'int4':
+                        k = dequantize_from_int4_packed(page['key_packed'], page['key_scales'], page['key_min'], seq_dim=-2)
+                        v = dequantize_from_int4_packed(page['value_packed'], page['value_scales'], page['value_min'], seq_dim=-2)
+                    elif tier == 'int2':
+                        k = dequantize_from_int2_packed(page['key_packed'], page['key_scales'], page['key_min'], seq_dim=-2)
+                        v = dequantize_from_int2_packed(page['value_packed'], page['value_scales'], page['value_min'], seq_dim=-2)
+                    elif tier == 'one_bit':
+                        k = dequantize_from_1bit_packed(page['key_packed'], page['key_scales'], seq_dim=-2)
+                        v = dequantize_from_1bit_packed(page['value_packed'], page['value_scales'], seq_dim=-2)
+                    elif tier == 'jl':
+                        w_proj = self.get_jl_projection_matrix(page['key_proj'].device, page['key_proj'].dtype)
+                        k = torch.matmul(w_proj.t(), page['key_proj'])
+                        v = torch.matmul(w_proj.t(), page['value_proj'])
+                    else:
+                         continue
+                         
+                    k_idx = page.get('key_out_indices')
+                    if k_idx is not None and k_idx.numel() > 0:
+                        k = k.clone()
+                        k[k_idx[:, 0].long(), k_idx[:, 1].long(), k_idx[:, 2].long(), k_idx[:, 3].long()] = page['key_out_values']
+                    v_idx = page.get('value_out_indices')
+                    if v_idx is not None and v_idx.numel() > 0:
+                        v = v.clone()
+                        v[v_idx[:, 0].long(), v_idx[:, 1].long(), v_idx[:, 2].long(), v_idx[:, 3].long()] = page['value_out_values']
                      
                 self.prefetch_cache[id(page)] = (k, v)
             except Exception:

@@ -42,10 +42,11 @@ if TRITON_AVAILABLE:
 
     @triton.jit
     def triton_unpack_int4_kernel(
-        packed_ptr, unpacked_ptr, num_elements,
+        packed_ptr, unpacked_ptr, scales_ptr, min_vals_ptr,
+        num_elements, head_dim,
         BLOCK_SIZE: tl.constexpr
     ):
-        """Triton Kernel: Unpacks one uint8 into two 4-bit values."""
+        """Triton Kernel: Unpacks one uint8 into two 4-bit values and performs fused dequantization."""
         pid = tl.program_id(axis=0)
         block_start = pid * BLOCK_SIZE
         
@@ -63,8 +64,17 @@ if TRITON_AVAILABLE:
         mask_even = offsets_even < num_elements
         mask_odd = offsets_odd < num_elements
         
-        tl.store(unpacked_ptr + offsets_even, even_vals, mask=mask_even)
-        tl.store(unpacked_ptr + offsets_odd, odd_vals, mask=mask_odd)
+        # Fused scale and min loading per sequence/token (offsets // head_dim)
+        even_scale = tl.load(scales_ptr + (offsets_even // head_dim), mask=mask_even, other=1.0)
+        even_min = tl.load(min_vals_ptr + (offsets_even // head_dim), mask=mask_even, other=0.0)
+        even_dequant = even_vals.to(tl.float32) * even_scale + even_min
+        
+        odd_scale = tl.load(scales_ptr + (offsets_odd // head_dim), mask=mask_odd, other=1.0)
+        odd_min = tl.load(min_vals_ptr + (offsets_odd // head_dim), mask=mask_odd, other=0.0)
+        odd_dequant = odd_vals.to(tl.float32) * odd_scale + odd_min
+        
+        tl.store(unpacked_ptr + offsets_even, even_dequant, mask=mask_even)
+        tl.store(unpacked_ptr + offsets_odd, odd_dequant, mask=mask_odd)
 
     @triton.jit
     def triton_pack_1bit_kernel(
@@ -103,10 +113,11 @@ if TRITON_AVAILABLE:
 
     @triton.jit
     def triton_unpack_1bit_kernel(
-        packed_ptr, unpacked_ptr, num_elements,
+        packed_ptr, unpacked_ptr, scales_ptr,
+        num_elements, head_dim,
         BLOCK_SIZE: tl.constexpr
     ):
-        """Triton Kernel: Unpacks one uint8 into eight 1-bit values."""
+        """Triton Kernel: Unpacks one uint8 into eight 1-bit values and performs fused dequantization."""
         pid = tl.program_id(axis=0)
         block_start = pid * BLOCK_SIZE
         
@@ -115,25 +126,44 @@ if TRITON_AVAILABLE:
         
         packed = tl.load(packed_ptr + offsets_packed, mask=mask_packed, other=0)
         
-        b0 = packed & 0x01
-        b1 = (packed >> 1) & 0x01
-        b2 = (packed >> 2) & 0x01
-        b3 = (packed >> 3) & 0x01
-        b4 = (packed >> 4) & 0x01
-        b5 = (packed >> 5) & 0x01
-        b6 = (packed >> 6) & 0x01
-        b7 = (packed >> 7) & 0x01
+        b0 = (packed & 0x01).to(tl.float32)
+        b1 = ((packed >> 1) & 0x01).to(tl.float32)
+        b2 = ((packed >> 2) & 0x01).to(tl.float32)
+        b3 = ((packed >> 3) & 0x01).to(tl.float32)
+        b4 = ((packed >> 4) & 0x01).to(tl.float32)
+        b5 = ((packed >> 5) & 0x01).to(tl.float32)
+        b6 = ((packed >> 6) & 0x01).to(tl.float32)
+        b7 = ((packed >> 7) & 0x01).to(tl.float32)
         
         offsets_0 = block_start * 8 + tl.arange(0, BLOCK_SIZE) * 8
         
-        tl.store(unpacked_ptr + offsets_0, b0, mask=offsets_0 < num_elements)
-        tl.store(unpacked_ptr + (offsets_0 + 1), b1, mask=(offsets_0 + 1) < num_elements)
-        tl.store(unpacked_ptr + (offsets_0 + 2), b2, mask=(offsets_0 + 2) < num_elements)
-        tl.store(unpacked_ptr + (offsets_0 + 3), b3, mask=(offsets_0 + 3) < num_elements)
-        tl.store(unpacked_ptr + (offsets_0 + 4), b4, mask=(offsets_0 + 4) < num_elements)
-        tl.store(unpacked_ptr + (offsets_0 + 5), b5, mask=(offsets_0 + 5) < num_elements)
-        tl.store(unpacked_ptr + (offsets_0 + 6), b6, mask=(offsets_0 + 6) < num_elements)
-        tl.store(unpacked_ptr + (offsets_0 + 7), b7, mask=(offsets_0 + 7) < num_elements)
+        # Load scales dynamically per sequence element
+        s0 = tl.load(scales_ptr + (offsets_0 // head_dim), mask=offsets_0 < num_elements, other=1.0)
+        s1 = tl.load(scales_ptr + ((offsets_0 + 1) // head_dim), mask=(offsets_0 + 1) < num_elements, other=1.0)
+        s2 = tl.load(scales_ptr + ((offsets_0 + 2) // head_dim), mask=(offsets_0 + 2) < num_elements, other=1.0)
+        s3 = tl.load(scales_ptr + ((offsets_0 + 3) // head_dim), mask=(offsets_0 + 3) < num_elements, other=1.0)
+        s4 = tl.load(scales_ptr + ((offsets_0 + 4) // head_dim), mask=(offsets_0 + 4) < num_elements, other=1.0)
+        s5 = tl.load(scales_ptr + ((offsets_0 + 5) // head_dim), mask=(offsets_0 + 5) < num_elements, other=1.0)
+        s6 = tl.load(scales_ptr + ((offsets_0 + 6) // head_dim), mask=(offsets_0 + 6) < num_elements, other=1.0)
+        s7 = tl.load(scales_ptr + ((offsets_0 + 7) // head_dim), mask=(offsets_0 + 7) < num_elements, other=1.0)
+        
+        v0 = (b0 * 2.0 - 1.0) * s0
+        v1 = (b1 * 2.0 - 1.0) * s1
+        v2 = (b2 * 2.0 - 1.0) * s2
+        v3 = (b3 * 2.0 - 1.0) * s3
+        v4 = (b4 * 2.0 - 1.0) * s4
+        v5 = (b5 * 2.0 - 1.0) * s5
+        v6 = (b6 * 2.0 - 1.0) * s6
+        v7 = (b7 * 2.0 - 1.0) * s7
+        
+        tl.store(unpacked_ptr + offsets_0, v0, mask=offsets_0 < num_elements)
+        tl.store(unpacked_ptr + (offsets_0 + 1), v1, mask=(offsets_0 + 1) < num_elements)
+        tl.store(unpacked_ptr + (offsets_0 + 2), v2, mask=(offsets_0 + 2) < num_elements)
+        tl.store(unpacked_ptr + (offsets_0 + 3), v3, mask=(offsets_0 + 3) < num_elements)
+        tl.store(unpacked_ptr + (offsets_0 + 4), v4, mask=(offsets_0 + 4) < num_elements)
+        tl.store(unpacked_ptr + (offsets_0 + 5), v5, mask=(offsets_0 + 5) < num_elements)
+        tl.store(unpacked_ptr + (offsets_0 + 6), v6, mask=(offsets_0 + 6) < num_elements)
+        tl.store(unpacked_ptr + (offsets_0 + 7), v7, mask=(offsets_0 + 7) < num_elements)
 
 # =====================================================================
 # 2. PYTHON API WRAPPERS WITH AUTOMATIC FALLBACK
@@ -179,7 +209,7 @@ def triton_pack_int4(tensor: torch.Tensor, seq_dim: int = -2):
     
     return packed
 
-def triton_unpack_int4(packed: torch.Tensor, original_dtype: torch.dtype, seq_dim: int = -2):
+def triton_unpack_int4(packed: torch.Tensor, scales: torch.Tensor, min_vals: torch.Tensor, seq_dim: int = -2):
     """
     Interface for 4-bit unpacking on GPU using Triton, with PyTorch vector fallback.
     """
@@ -189,13 +219,12 @@ def triton_unpack_int4(packed: torch.Tensor, original_dtype: torch.dtype, seq_di
         
         unpacked_shape = list(packed.shape)
         unpacked_shape[seq_dim] = packed.shape[seq_dim] * 2
-        unpacked = torch.empty(unpacked_shape, dtype=torch.uint8, device=packed.device)
+        unpacked = torch.empty(unpacked_shape, dtype=scales.dtype, device=packed.device)
         
         if seq_dim == -2 or seq_dim == len(unpacked_shape) - 2:
             reshaped = unpacked.view(*unpacked_shape[:-2], packed.shape[-2], 2, unpacked_shape[-1])
             reshaped[..., 0, :] = even_vals
             reshaped[..., 1, :] = odd_vals
-            return unpacked
         else:
             num_dims = len(unpacked_shape)
             slice_even = [slice(None)] * num_dims
@@ -205,7 +234,8 @@ def triton_unpack_int4(packed: torch.Tensor, original_dtype: torch.dtype, seq_di
             
             unpacked[tuple(slice_even)] = even_vals
             unpacked[tuple(slice_odd)] = odd_vals
-            return unpacked
+            
+        return unpacked.to(scales.dtype) * scales + min_vals
 
     packed_shape = list(packed.shape)
     seq_len_packed = packed_shape[seq_dim]
@@ -213,13 +243,15 @@ def triton_unpack_int4(packed: torch.Tensor, original_dtype: torch.dtype, seq_di
     
     unpacked_shape = list(packed_shape)
     unpacked_shape[seq_dim] = seq_len_packed * 2
-    unpacked = torch.empty(unpacked_shape, dtype=torch.uint8, device=packed.device)
+    unpacked = torch.empty(unpacked_shape, dtype=scales.dtype, device=packed.device)
     
     BLOCK_SIZE = 1024
     grid = lambda meta: (triton.cdiv(num_elements // 2, meta['BLOCK_SIZE']),)
     
+    head_dim = packed.shape[-1]
+    
     triton_unpack_int4_kernel[grid](
-        packed, unpacked, num_elements,
+        packed, unpacked, scales, min_vals, num_elements, head_dim,
         BLOCK_SIZE=BLOCK_SIZE
     )
     
@@ -295,7 +327,7 @@ def triton_pack_1bit(tensor: torch.Tensor, seq_dim: int = -2):
     )
     return packed
 
-def triton_unpack_1bit(packed: torch.Tensor, original_dtype: torch.dtype, seq_dim: int = -2):
+def triton_unpack_1bit(packed: torch.Tensor, scales: torch.Tensor, seq_dim: int = -2):
     """
     Unpacks a 1-bit packed uint8 tensor along seq_dim.
     """
@@ -303,6 +335,7 @@ def triton_unpack_1bit(packed: torch.Tensor, original_dtype: torch.dtype, seq_di
         b0 = packed & 0x01
         b1 = (packed >> 1) & 0x01
         b2 = (packed >> 2) & 0x01
+        b3 = (packed >> 4) & 0x01 # wait, 1-bit shifts: b3 is packed >> 3
         b3 = (packed >> 3) & 0x01
         b4 = (packed >> 4) & 0x01
         b5 = (packed >> 5) & 0x01
@@ -323,7 +356,6 @@ def triton_unpack_1bit(packed: torch.Tensor, original_dtype: torch.dtype, seq_di
             reshaped[..., 5, :] = b5
             reshaped[..., 6, :] = b6
             reshaped[..., 7, :] = b7
-            return unpacked
         else:
             num_dims = len(unpacked_shape)
             slice_0 = [slice(None)] * num_dims
@@ -351,7 +383,8 @@ def triton_unpack_1bit(packed: torch.Tensor, original_dtype: torch.dtype, seq_di
             unpacked[tuple(slice_5)] = b5
             unpacked[tuple(slice_6)] = b6
             unpacked[tuple(slice_7)] = b7
-            return unpacked
+            
+        return (unpacked.to(scales.dtype) * 2.0 - 1.0) * scales
 
     packed_shape = list(packed.shape)
     seq_len_packed = packed_shape[seq_dim]
@@ -359,13 +392,15 @@ def triton_unpack_1bit(packed: torch.Tensor, original_dtype: torch.dtype, seq_di
     
     unpacked_shape = list(packed_shape)
     unpacked_shape[seq_dim] = seq_len_packed * 8
-    unpacked = torch.empty(unpacked_shape, dtype=torch.uint8, device=packed.device)
+    unpacked = torch.empty(unpacked_shape, dtype=scales.dtype, device=packed.device)
     
     BLOCK_SIZE = 1024
     grid = lambda meta: (triton.cdiv(num_elements // 8, meta['BLOCK_SIZE']),)
     
+    head_dim = packed.shape[-1]
+    
     triton_unpack_1bit_kernel[grid](
-        packed, unpacked, num_elements,
+        packed, unpacked, scales, num_elements, head_dim,
         BLOCK_SIZE=BLOCK_SIZE
     )
     return unpacked
