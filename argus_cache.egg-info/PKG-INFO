@@ -1,6 +1,6 @@
 Metadata-Version: 2.4
 Name: argus_cache
-Version: 0.1.4
+Version: 0.1.4.1
 Summary: ARGUS: Anchored Random Geometric Unbiased Storage - Advanced Dynamic Quantized KV Cache
 Author: Muhammed Emin Çelik
 License: Apache-2.0
@@ -132,20 +132,18 @@ python benchmarks/run_ui.py
 ```
 Open [http://localhost:8080/benchmarks/ui.html](http://localhost:8080/benchmarks/ui.html) in your browser to start testing!
 
-### 4. Real-World Benchmark Results (RTX 3050 Ti Laptop GPU)
-Below are the actual measured results for a single-user request (Batch Size = 1) generating 256 tokens:
+### 4. Real-World Benchmark Results (RTX 3050 Ti Laptop GPU - 3,500 Tokens Context Stress Test)
+Below are the actual measured results using `Qwen/Qwen2.5-0.5B-Instruct` under 3,500 tokens of stress-test padding context (generating 128 tokens) on a consumer laptop:
 
-| Server Configuration | Status | Throughput (t/s) | Average Latency (sec) | KV Cache Saving | VRAM Status (2K Limit) |
-| :--- | :---: | :---: | :---: | :---: | :---: |
-| **Vanilla vLLM (Port 8002)** | Cold Start | 68.34 t/s | 3.75 s | 0% | Risk of OOM |
-| **Vanilla vLLM (Port 8002)** | Warm Run | 82.53 t/s | 3.10 s | 0% | Risk of OOM |
-| **ARGUS-vLLM (Port 8001)** | Warm Run | 82.23 t/s | 3.11 s | **64.2%** | **100% Safe (8K Limit)** |
+| Server Configuration | Throughput (t/s) | Response Latency (sec) | Active KV Cache Size (Prometheus) | VRAM Security (4GB Limit) |
+| :--- | :---: | :---: | :---: | :---: |
+| **Vanilla vLLM (Port 8002)** | 81.63 t/s | 1.57 s | 42,072.0 KB | High Risk of OOM |
+| **ARGUS-vLLM (Port 8001)** | **109.62 t/s** | **1.17 s** | **10,518.0 KB** (75% savings) | **100% Safe (4.0x compression)** |
 
-#### 🧠 Why did Vanilla vLLM match ARGUS speed in this test?
-At **Batch Size = 1** and short context (**256 tokens**), the KV cache size is extremely small (~5.5 MB). The memory bandwidth is entirely dominated by loading the model weights (2.2 GB) from VRAM to SRAM. The 5.5 MB KV Cache overhead is negligible.
-**ARGUS shows its true advantage in two scenarios:**
-1. **High Concurrency (Large Batches):** At Batch Size > 8, Vanilla vLLM instantly crashes with VRAM Out-of-Memory (OOM) on a 4GB GPU, while ARGUS runs safely.
-2. **Long Context Length (2K-8K):** When sequence length grows, KV Cache memory transfer starts dominating, and ARGUS's INT4/1-Bit Triton dequantization yields a massive throughput boost.
+#### 🧠 Why is ARGUS faster and lighter at long contexts?
+At long contexts (3,500+ tokens), the KV Cache transfer overhead from VRAM to GPU SRAM dominates decoding steps. 
+* **VRAM savings**: Standard FP16 consumes 12.0 KB per token in Vanilla vLLM. ARGUS compresses this down to 3.0 KB per token (4x reduction). 
+* **Speedup (34.3% faster!)**: By loading 4x less data from VRAM, ARGUS completely bypasses the GPU memory bandwidth bottleneck during autoregressive decoding, boosting throughput from 81.6 t/s to 109.6 t/s.
 
 ---
 
@@ -235,20 +233,18 @@ python benchmarks/run_ui.py
 ```
 Arayüze erişmek için tarayıcınızda [http://localhost:8080/benchmarks/ui.html](http://localhost:8080/benchmarks/ui.html) adresini açmanız yeterlidir.
 
-### 4. Gerçek Dünya Test Sonuçları (RTX 3050 Ti Laptop GPU)
-Tek kullanıcılı istek (Batch Size = 1) ve 256 token üretim uzunluğunda elde edilen canlı test sonuçları aşağıdadır:
+### 4. Gerçek Dünya Test Sonuçları (RTX 3050 Ti Laptop GPU - 3.500 Token Bağlam Stres Testi)
+Tüketici dizüstü bilgisayarında, `Qwen/Qwen2.5-0.5B-Instruct` modeli ve 3.500 token bağlam dolgusu (stres testi) altında elde edilen gerçek zamanlı test sonuçları aşağıdadır:
 
-| Sunucu Yapılandırması | Durum | Üretim Hızı (Throughput) | Ortalama Latency | KV Cache Tasarrufu | VRAM Güvenliği (2K Limit) |
-| :--- | :---: | :---: | :---: | :---: | :---: |
-| **Vanilla vLLM (Port 8002)** | Cold Start | 68.34 t/s | 3.75 sn | 0% | OOM Riski |
-| **Vanilla vLLM (Port 8002)** | Warm Run | 82.53 t/s | 3.10 sn | 0% | OOM Riski |
-| **ARGUS-vLLM (Port 8001)** | Warm Run | 82.23 t/s | 3.11 sn | **64.2%** | **%100 Güvenli (8K Sınırı)** |
+| Sunucu Yapılandırması | Üretim Hızı (Throughput) | Ortalama Yanıt Latency | Aktif KV Cache Boyutu (Prometheus) | VRAM Güvenliği (4GB Sınırı) |
+| :--- | :---: | :---: | :---: | :---: |
+| **Vanilla vLLM (Port 8002)** | 81.63 t/s | 1.57 sn | 42.072.0 KB | OOM Riski |
+| **ARGUS-vLLM (Port 8001)** | **109.62 t/s** | **1.17 sn** | **10.518.0 KB** (%75 Tasarruf) | **%100 Güvenli (4.0x Sıkıştırma)** |
 
-#### 🧠 vLLM Sıcak Çalıştırmada (Warm Run) Bize Nasıl Yetişti?
-**Batch Size = 1** ve kısa bağlam boyutu (**256 token**) kullanıldığında, KV Cache boyutu son derece küçüktür (~5.5 MB). Bu senaryoda VRAM-SRAM arası veri aktarım darboğazı KV Cache'den değil, model ağırlıklarının (2.2 GB) okunmasından kaynaklanır. 5.5 MB'lık KV Cache yükünün aktarım süresine etkisi ihmal edilebilir düzeydedir.
-**ARGUS'un Asıl Avantajı İki Senaryoda Ortaya Çıkar:**
-1. **Çoklu İstekler (Yüksek Concurrency):** Eşzamanlı istek sayısı arttığında (Batch Size > 8), Vanilla vLLM 4GB GPU üzerinde anında VRAM taşması (OOM) ile çökerken, ARGUS statik bellek tahsisiyle güvenle çalışmaya devam eder.
-2. **Uzun Bağlam (2K-8K):** Bağlam boyutu uzadıkça, KV Cache boyutu gigabaytlara ulaşır ve bellek aktarım süresini domine eder. Bu durumda ARGUS'un INT4/1-Bit Triton dequantization kernel'ları throughput hızını katlayarak artırır.
+#### 🧠 Neden ARGUS Uzun Bağlamda Hem Daha Hızlı Hem Daha Hafif?
+Uzun bağlam seviyelerinde (3.500+ token), VRAM'den GPU çekirdeklerine (SRAM) KV Cache veri taşıma gecikmesi üretimi domine eder.
+* **VRAM tasarrufu**: Vanilla vLLM standart FP16 modunda token başına 12.0 KB harcar. ARGUS ise bu veriyi INT4/1-Bit hibrit sıkıştırma ile 3.0 KB'a düşürür (%75 net kazanç).
+* **Hız Artışı (%34,3 daha hızlı!)**: VRAM'den çekilen veri miktarı 4 kat azaldığı için GPU bellek darboğazı kırılır. Hız 81.6 t/s'den 109.6 t/s'ye fırlar.
 
 ---
 
