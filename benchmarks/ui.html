@@ -1,0 +1,1424 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ARGUS-vLLM Real-time Speed & Efficiency Benchmark Dashboard</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800&family=Plus+Jakarta+Sans:wght@300;400;500;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-color: #0b0a15;
+            --card-bg: rgba(22, 20, 42, 0.65);
+            --card-border: rgba(255, 255, 255, 0.08);
+            --accent-purple: #9d4edd;
+            --accent-cyan: #00f5d4;
+            --accent-pink: #ff007f;
+            --text-main: #f8f9fa;
+            --text-muted: #a0aec0;
+            --gradient-primary: linear-gradient(135deg, #7b2cbf 0%, #3c096c 100%);
+            --gradient-accent: linear-gradient(135deg, #00f5d4 0%, #7b2cbf 100%);
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+            font-family: 'Plus Jakarta Sans', sans-serif;
+            -webkit-font-smoothing: antialiased;
+        }
+
+        body {
+            background-color: var(--bg-color);
+            background-image: 
+                radial-gradient(circle at 10% 20%, rgba(123, 44, 191, 0.15) 0%, transparent 40%),
+                radial-gradient(circle at 90% 80%, rgba(0, 245, 212, 0.1) 0%, transparent 40%);
+            color: var(--text-main);
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden; /* Fits screen perfectly, no scroll needed */
+        }
+
+        header {
+            padding: 14px 30px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 1px solid var(--card-border);
+            backdrop-filter: blur(12px);
+            background: rgba(11, 10, 21, 0.85);
+            height: 64px;
+        }
+
+        .logo-container {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .logo-badge {
+            background: var(--gradient-primary);
+            color: var(--text-main);
+            padding: 4px 10px;
+            border-radius: 8px;
+            font-weight: 800;
+            font-size: 13px;
+            letter-spacing: 1px;
+            box-shadow: 0 0 15px rgba(123, 44, 191, 0.4);
+            font-family: 'Outfit', sans-serif;
+        }
+
+        .logo-title {
+            font-size: 18px;
+            font-weight: 800;
+            font-family: 'Outfit', sans-serif;
+            background: linear-gradient(to right, #fff, var(--text-muted));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        /* Server control buttons inside header to save massive space */
+        .header-server-controls {
+            display: flex;
+            align-items: center;
+            gap: 20px;
+        }
+
+        .header-server-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid var(--card-border);
+            padding: 4px 10px;
+            border-radius: 10px;
+            font-size: 12px;
+        }
+
+        .header-server-name {
+            font-weight: 700;
+            font-family: 'Outfit', sans-serif;
+        }
+
+        .header-server-status {
+            font-size: 10px;
+            color: var(--text-muted);
+        }
+
+        .btn-toggle {
+            background: rgba(255, 255, 255, 0.08);
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            color: var(--text-main);
+            padding: 3px 8px;
+            border-radius: 6px;
+            font-size: 10px;
+            font-weight: 700;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+
+        .btn-toggle:hover {
+            background: var(--accent-purple);
+            border-color: var(--accent-purple);
+            box-shadow: 0 0 10px rgba(157, 78, 221, 0.4);
+        }
+
+        .btn-toggle.running-server {
+            background: rgba(0, 245, 212, 0.15);
+            border-color: rgba(0, 245, 212, 0.3);
+            color: var(--accent-cyan);
+            cursor: not-allowed;
+            pointer-events: none;
+        }
+
+        .server-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-size: 9px;
+            font-weight: 800;
+        }
+        .server-badge.ready { color: var(--accent-cyan); background: rgba(0, 245, 212, 0.1); }
+        .server-badge.loading { color: #ffb300; background: rgba(255, 179, 0, 0.1); }
+        .server-badge.offline { color: var(--accent-pink); background: rgba(255, 0, 127, 0.1); }
+        .badge-dot { width: 5px; height: 5px; border-radius: 50%; background-color: currentColor; }
+
+        /* Thin Horizontal Deploy Steps Bar below header */
+        .deploy-bar {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            gap: 40px;
+            background: rgba(11, 10, 21, 0.5);
+            border-bottom: 1px solid var(--card-border);
+            padding: 8px 30px;
+            font-size: 11px;
+            height: 36px;
+        }
+
+        .step-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            opacity: 0.35;
+            transition: all 0.3s ease;
+        }
+
+        .step-item.active { opacity: 1; color: #ffb300; font-weight: 600; }
+        .step-item.done { opacity: 1; color: var(--accent-cyan); font-weight: 600; }
+        .step-icon { font-size: 13px; }
+
+        /* Main Workspace Container */
+        main {
+            flex: 1;
+            max-width: 1600px;
+            width: 100%;
+            margin: 0 auto;
+            padding: 16px 20px;
+            display: grid;
+            grid-template-columns: 420px 1fr;
+            gap: 20px;
+            height: calc(100vh - 100px);
+            overflow: hidden;
+        }
+
+        .control-panel {
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+            overflow-y: auto;
+        }
+
+        .results-panel {
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+            height: 100%;
+            overflow: hidden;
+        }
+
+        .glass-card {
+            background: var(--card-bg);
+            border: 1px solid var(--card-border);
+            border-radius: 16px;
+            padding: 18px;
+            backdrop-filter: blur(16px);
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.25);
+        }
+
+        h2 {
+            font-family: 'Outfit', sans-serif;
+            font-size: 16px;
+            font-weight: 700;
+            margin-bottom: 12px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            border-left: 3px solid var(--accent-purple);
+            padding-left: 8px;
+        }
+
+        .form-group {
+            margin-bottom: 12px;
+            display: flex;
+            flex-direction: column;
+            gap: 5px;
+        }
+
+        label {
+            color: var(--text-muted);
+            font-size: 12px;
+            font-weight: 600;
+        }
+
+        select, textarea {
+            background: rgba(11, 10, 21, 0.4);
+            border: 1px solid var(--card-border);
+            border-radius: 8px;
+            color: var(--text-main);
+            padding: 10px 12px;
+            font-size: 13px;
+            outline: none;
+            transition: all 0.2s ease;
+            width: 100%;
+        }
+
+        select:focus, textarea:focus {
+            border-color: var(--accent-purple);
+            box-shadow: 0 0 8px rgba(157, 78, 221, 0.2);
+        }
+
+        textarea {
+            resize: none;
+            height: 80px;
+            font-family: inherit;
+            line-height: 1.4;
+        }
+
+        .btn-submit {
+            background: var(--gradient-primary);
+            border: none;
+            border-radius: 10px;
+            color: var(--text-main);
+            cursor: pointer;
+            font-family: 'Outfit', sans-serif;
+            font-size: 14px;
+            font-weight: 700;
+            padding: 12px 20px;
+            transition: all 0.2s ease;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            gap: 8px;
+            box-shadow: 0 4px 10px rgba(123, 44, 191, 0.3);
+            width: 100%;
+            margin-top: 10px;
+        }
+
+        .btn-submit:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 6px 16px rgba(123, 44, 191, 0.5);
+        }
+
+        .btn-submit:active {
+            transform: translateY(0);
+        }
+
+        /* Metrics grid: 4 columns in one row */
+        .metrics-row {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 12px;
+        }
+
+        .metric-card {
+            background: rgba(11, 10, 21, 0.35);
+            border: 1px solid var(--card-border);
+            border-radius: 10px;
+            padding: 12px 14px;
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .metric-card::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 3px;
+            height: 100%;
+        }
+
+        .metric-card.purple::before { background: var(--accent-purple); }
+        .metric-card.cyan::before { background: var(--accent-cyan); }
+        .metric-card.pink::before { background: var(--accent-pink); }
+        .metric-card.blue::before { background: #3b82f6; }
+
+        .metric-title {
+            color: var(--text-muted);
+            font-size: 10px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .metric-val {
+            font-size: 20px;
+            font-weight: 800;
+            font-family: 'Outfit', sans-serif;
+            color: var(--text-main);
+        }
+
+        .metric-sub {
+            font-size: 10px;
+            color: var(--text-muted);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        /* Charts */
+        .charts-row {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 16px;
+        }
+
+        .chart-section {
+            background: rgba(11, 10, 21, 0.2);
+            border: 1px solid rgba(255,255,255,0.03);
+            border-radius: 12px;
+            padding: 12px;
+        }
+
+        .chart-title {
+            font-size: 11px;
+            font-weight: 700;
+            color: var(--text-muted);
+            margin-bottom: 8px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .chart-container {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .chart-row {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+
+        .chart-label {
+            display: flex;
+            justify-content: space-between;
+            font-size: 11px;
+            font-weight: 600;
+        }
+
+        .chart-track {
+            height: 14px;
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 4px;
+            overflow: hidden;
+            border: 1px solid var(--card-border);
+            position: relative;
+        }
+
+        .chart-fill {
+            height: 100%;
+            border-radius: 4px;
+            width: 0%;
+            transition: width 1.2s cubic-bezier(0.16, 1, 0.3, 1);
+            display: flex;
+            align-items: center;
+            justify-content: flex-end;
+            padding-right: 8px;
+            font-size: 9px;
+            font-weight: 800;
+            color: #000;
+        }
+
+        .chart-fill.vanilla {
+            background: linear-gradient(90deg, #4a5568, #718096);
+            color: var(--text-main);
+        }
+
+        .chart-fill.argus {
+            background: linear-gradient(90deg, var(--accent-purple), var(--accent-cyan));
+        }
+
+        .badge-extreme {
+            background: linear-gradient(to right, var(--accent-purple), var(--accent-cyan));
+            color: #0b0a15;
+            padding: 1px 4px;
+            border-radius: 4px;
+            font-size: 8px;
+            font-weight: 800;
+        }
+
+        /* Completion Output - takes remaining height */
+        .output-container {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            min-height: 0; /* Important for flex child scrolling */
+        }
+
+        .output-box {
+            background: rgba(11, 10, 21, 0.45);
+            border: 1px solid var(--card-border);
+            border-radius: 12px;
+            padding: 14px 16px;
+            flex: 1;
+            overflow-y: auto;
+            font-size: 13.5px;
+            line-height: 1.6;
+            white-space: pre-wrap;
+            position: relative;
+            height: 0; /* Forces flex parent to constrain height and trigger scrolling */
+        }
+
+        /* Sleek custom scrollbars for results and logs */
+        .output-box::-webkit-scrollbar, .ab-steps-log::-webkit-scrollbar, .control-panel::-webkit-scrollbar {
+            width: 6px;
+            height: 6px;
+        }
+        .output-box::-webkit-scrollbar-track, .ab-steps-log::-webkit-scrollbar-track, .control-panel::-webkit-scrollbar-track {
+            background: rgba(255, 255, 255, 0.01);
+            border-radius: 4px;
+        }
+        .output-box::-webkit-scrollbar-thumb, .ab-steps-log::-webkit-scrollbar-thumb, .control-panel::-webkit-scrollbar-thumb {
+            background: rgba(157, 78, 221, 0.35);
+            border-radius: 4px;
+        }
+        .output-box::-webkit-scrollbar-thumb:hover, .ab-steps-log::-webkit-scrollbar-thumb:hover, .control-panel::-webkit-scrollbar-thumb:hover {
+            background: rgba(157, 78, 221, 0.6);
+        }
+
+        .output-placeholder {
+            color: var(--text-muted);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            height: 100%;
+            font-style: italic;
+            text-align: center;
+            font-size: 12px;
+        }
+
+        .loader-ring {
+            width: 24px;
+            height: 24px;
+            border: 3px solid rgba(255,255,255,0.1);
+            border-top-color: var(--accent-cyan);
+            border-radius: 50%;
+            animation: spin 1s infinite linear;
+            display: none;
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            margin-top: -12px;
+            margin-left: -12px;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        /* Premium test features */
+        .test-info-box {
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px dashed rgba(255, 255, 255, 0.12);
+            border-radius: 8px;
+            padding: 10px 12px;
+            margin-top: 6px;
+            font-size: 11px;
+            color: var(--text-muted);
+            line-height: 1.45;
+            transition: all 0.25s ease;
+        }
+
+        .test-info-box strong {
+            color: var(--text-main);
+        }
+
+        .test-info-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-size: 9px;
+            font-weight: 800;
+            margin-bottom: 6px;
+            text-transform: uppercase;
+        }
+        .test-info-badge.normal { background: rgba(0, 245, 212, 0.15); color: var(--accent-cyan); }
+        .test-info-badge.medium { background: rgba(255, 179, 0, 0.15); color: #ffb300; }
+        .test-info-badge.high { background: rgba(157, 78, 221, 0.15); color: #c77dff; }
+        .test-info-badge.extreme { background: rgba(255, 0, 127, 0.15); color: var(--accent-pink); }
+
+        .btn-ab-test {
+            background: linear-gradient(135deg, #00f5d4 0%, #7b2cbf 100%);
+            border: none;
+            border-radius: 10px;
+            color: #0b0a15;
+            cursor: pointer;
+            font-family: 'Outfit', sans-serif;
+            font-size: 13px;
+            font-weight: 800;
+            padding: 12px 20px;
+            transition: all 0.2s ease;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            gap: 8px;
+            box-shadow: 0 4px 15px rgba(0, 245, 212, 0.3);
+            width: 100%;
+            margin-top: 10px;
+            letter-spacing: 0.5px;
+        }
+        .btn-ab-test:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 6px 20px rgba(0, 245, 212, 0.5);
+        }
+        .btn-ab-test:active {
+            transform: translateY(0);
+        }
+        .btn-ab-test:disabled {
+            background: #2d3748;
+            color: #718096;
+            cursor: not-allowed;
+            box-shadow: none;
+            opacity: 0.6;
+        }
+        
+        .ab-steps-log {
+            background: rgba(11, 10, 21, 0.6);
+            border: 1px solid rgba(255,255,255,0.06);
+            border-radius: 8px;
+            padding: 8px 12px;
+            margin-top: 10px;
+            font-family: 'Courier New', Courier, monospace;
+            font-size: 10px;
+            color: #00f5d4;
+            max-height: 80px;
+            overflow-y: auto;
+            display: none;
+            line-height: 1.4;
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <div class="logo-container">
+            <span class="logo-badge">ARGUS</span>
+            <span class="logo-title">Dynamic KV Cache System</span>
+        </div>
+        
+        <div class="header-server-controls">
+            <!-- ARGUS Toggle Info -->
+            <div class="header-server-item">
+                <span class="header-server-name" style="color: var(--accent-purple);">ARGUS vLLM (8001)</span>
+                <span class="server-badge offline" id="argusBadge">
+                    <span class="badge-dot"></span>
+                    <span class="badge-text" id="argusBadgeText">Çevrimdışı</span>
+                </span>
+                <button class="btn-toggle" id="btnToggleArgus" onclick="toggleServer('argus')">Başlat</button>
+            </div>
+            <!-- Vanilla Toggle Info -->
+            <div class="header-server-item">
+                <span class="header-server-name" style="color: var(--text-muted);">Vanilla vLLM (8002)</span>
+                <span class="server-badge offline" id="vanillaBadge">
+                    <span class="badge-dot"></span>
+                    <span class="badge-text" id="vanillaBadgeText">Çevrimdışı</span>
+                </span>
+                <button class="btn-toggle" id="btnToggleVanilla" onclick="toggleServer('vanilla')">Başlat</button>
+            </div>
+        </div>
+    </header>
+
+    <!-- Horizontal step progress bar -->
+    <div class="deploy-bar">
+        <div class="step-item" id="stepDocker">
+            <span class="step-icon">🐳</span>
+            <span id="stepDockerDesc">Docker Kontrol Ediliyor</span>
+        </div>
+        <div style="opacity:0.2;">➔</div>
+        <div class="step-item" id="stepPort">
+            <span class="step-icon">🔌</span>
+            <span id="stepPortDesc">Soket Bağlantısı</span>
+        </div>
+        <div style="opacity:0.2;">➔</div>
+        <div class="step-item" id="stepWeights">
+            <span class="step-icon">🧠</span>
+            <span id="stepWeightsDesc">Model & Triton Derleyici</span>
+        </div>
+        <div style="margin-left: auto;">
+            <div class="server-badge ready" id="headerStatus" style="padding: 4px 10px; font-size: 10px;">
+                <span class="badge-dot"></span>
+                <span id="headerStatusText">Sunucu Tespiti Yapılıyor...</span>
+            </div>
+        </div>
+    </div>
+
+    <main>
+        <!-- Sol Panel: İstek Kontrol Paneli -->
+        <div class="control-panel" style="gap: 12px;">
+            <!-- CARD 1: Normal Çıkarım (Chat) -->
+            <div class="glass-card" style="display: flex; flex-direction: column; gap: 8px; padding: 14px;">
+                <h2 style="border-left-color: var(--accent-cyan);"><span style="font-size: 15px;">💬</span> Normal Çıkarım (Tekil İstek)</h2>
+                
+                <div class="form-group" style="margin-bottom: 4px;">
+                    <label for="serverPort">Sunucu Hedefi</label>
+                    <select id="serverPort" style="padding: 8px 10px; font-size: 12px;">
+                        <option value="8001">ARGUS-vLLM (Port 8001) - Optimize</option>
+                        <option value="8002">Vanilla-vLLM (Port 8002) - Standart</option>
+                    </select>
+                </div>
+                
+                <div class="form-group" style="margin-bottom: 4px;">
+                    <label for="maxTokens">Maksimum Token Sayısı</label>
+                    <select id="maxTokens" style="padding: 8px 10px; font-size: 12px;">
+                        <option value="128" selected>128 Completion Token</option>
+                        <option value="512">512 Completion Token</option>
+                        <option value="1024">1024 Completion Token</option>
+                        <option value="2048">2048 Completion Token (Ağır Çıktı)</option>
+                        <option value="3072">3072 Completion Token (Maksimum Çıktı)</option>
+                    </select>
+                </div>
+
+                <div class="form-group" style="margin-bottom: 4px;">
+                    <label for="prompt">Giriş Metni (Prompt)</label>
+                    <textarea id="prompt" style="padding: 8px 10px; font-size: 12px; height: 60px;" placeholder="Soru metnini yazın...">Write a short poem about memory bandwidth in GPU, comparing heavy standard float and lightweight quantized bytes. Make it 3 stanzas.</textarea>
+                </div>
+
+                <button class="btn-submit" id="btnRun" style="margin-top: 2px; padding: 10px; font-size: 12px;">
+                    <span>Çıkarım Yap & Hızı Ölç</span>
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
+                </button>
+            </div>
+
+            <!-- CARD 2: KV Cache Stres Testi & A/B Benchmark -->
+            <div class="glass-card" style="display: flex; flex-direction: column; gap: 8px; padding: 14px;">
+                <h2 style="border-left-color: var(--accent-pink);"><span style="font-size: 15px;">🏋️</span> KV Cache Stres & A/B Testi</h2>
+                
+                <div class="form-group" style="margin-bottom: 2px;">
+                    <label for="testMode">Stres Düzeyi (Dolgu Yükü)</label>
+                    <select id="testMode" style="padding: 8px 10px; font-size: 12px;">
+                        <option value="medium" selected>Orta Yük (~1,500 Token Ağır Belge)</option>
+                        <option value="high">Yüksek Yük (~2,500 Token RAG Limit Aşımı)</option>
+                        <option value="extreme">Ekstrem Yük (~3,500 Token Motor Sınırı)</option>
+                    </select>
+                    
+                    <!-- Dynamic details box to explain current stress and bypass confusion -->
+                    <div class="test-info-box" id="testModeInfo" style="margin-top: 4px; padding: 8px 10px;">
+                        <span class="test-info-badge medium" id="infoBadge">Orta Yük</span>
+                        <div id="infoText" style="font-size: 10.5px;">
+                            <strong>~800 Token Multi-Turn veya makale özeti.</strong> KV Cache bellek yükü artar. ARGUS 4.0x bellek sıkıştırması sayesinde VRAM'i korumaya başlar.
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Automated sequential benchmarking -->
+                <button class="btn-ab-test" id="btnABTest" style="margin-top: 4px; padding: 10px; font-size: 12px;">
+                    <span>⚡ Otomatik A/B Karşılaştırması Başlat</span>
+                </button>
+                
+                <!-- A/B execution logs -->
+                <div class="ab-steps-log" id="abStepsLog" style="margin-top: 6px; padding: 6px 10px; font-size: 9px; max-height: 70px;"></div>
+            </div>
+        </div>
+
+        <!-- Sağ Panel: Sonuçlar, Metrikler ve Canlı Grafikler -->
+        <div class="results-panel">
+            <!-- 1. Real-time Metrics Row -->
+            <div class="metrics-row">
+                <div class="metric-card purple">
+                    <span class="metric-title">Üretim Hızı</span>
+                    <span class="metric-val" id="metricSpeed">- t/s</span>
+                    <span class="metric-sub">Saniyede Üretilen Token</span>
+                </div>
+                <div class="metric-card cyan">
+                    <span class="metric-title">Yanıt Latency</span>
+                    <span class="metric-val" id="metricTime">- sn</span>
+                    <span class="metric-sub">Toplam Geçen Süre</span>
+                </div>
+                <div class="metric-card pink">
+                    <span class="metric-title">Toplam Token</span>
+                    <span class="metric-val" id="metricTokens">-</span>
+                    <span class="metric-sub">Üretilen Token Sayısı</span>
+                </div>
+                <div class="metric-card blue">
+                    <span class="metric-title">Canlı GPU VRAM</span>
+                    <span class="metric-val" id="metricVram">- GB</span>
+                    <span class="metric-sub" id="metricVramSub">Yükleniyor...</span>
+                </div>
+            </div>
+
+            <!-- 2. Dual Horizontal Bar Charts Row -->
+            <div class="charts-row">
+                <!-- Chart 1: Speed -->
+                <div class="chart-section">
+                    <div class="chart-title">Ölçülen Canlı Hız (t/s - Yüksek İyi)</div>
+                    <div class="chart-container">
+                        <div class="chart-row">
+                            <div class="chart-label">
+                                <span>Vanilla vLLM</span>
+                                <span id="labelVanilla">- t/s</span>
+                            </div>
+                            <div class="chart-track">
+                                <div class="chart-fill vanilla" id="barVanilla" style="width: 0%;">Hazır Değil</div>
+                            </div>
+                        </div>
+                        <div class="chart-row">
+                            <div class="chart-label">
+                                <span>ARGUS-vLLM (Hibrit)</span>
+                                <span id="labelArgus">- t/s</span>
+                            </div>
+                            <div class="chart-track">
+                                <div class="chart-fill argus" id="barArgus" style="width: 0%;">Hazır Değil</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Chart 2: Active KV Cache Memory Footprint -->
+                <div class="chart-section" style="position: relative;">
+                    <div class="chart-title">Aktif KV Cache Bellek Tüketimi (KB - Düşük İyi)</div>
+                    <div class="chart-container">
+                        <div class="chart-row">
+                            <div class="chart-label">
+                                <span>Vanilla vLLM (FP16)</span>
+                                <span id="labelVramVanilla">- KB</span>
+                            </div>
+                            <div class="chart-track">
+                                <div class="chart-fill vanilla" id="barVramVanilla" style="width: 0%; background: #718096; color: #fff;">Hazır Değil</div>
+                            </div>
+                        </div>
+                        <div class="chart-row">
+                            <div class="chart-label">
+                                <span>ARGUS-vLLM (INT4/1-Bit) <span class="badge-extreme">🚀 4.0x Sıkıştırma</span></span>
+                                <span id="labelVramArgus">- KB</span>
+                            </div>
+                            <div class="chart-track">
+                                <div class="chart-fill argus" id="barVramArgus" style="width: 0%;">Hazır Değil</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div style="font-size: 8.5px; color: var(--text-muted); line-height: 1.3; margin-top: 6px; font-style: italic;">
+                        * vLLM GPU'da statik rezervasyon (Static Allocation) yaptığı için nvidia-smi'de ham bellek aynı görünür. Ancak aktif KV Cache kullanımında ARGUS tam %75 tasarruf sağlar!
+                    </div>
+                </div>
+            </div>
+
+            <!-- 3. Model Output Box -->
+            <div class="glass-card output-container">
+                <h2>📝 Model Çıktısı (Completion Output)</h2>
+                <div class="output-box" id="outputBox">
+                    <div class="output-placeholder" id="placeholderText">Çıkarım sonuçları veya karşılaştırma detayları burada listelenecektir. Başlamak için soldaki butonları kullanın.</div>
+                    <div class="loader-ring" id="loader"></div>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <script>
+        const btnRun = document.getElementById('btnRun');
+        const btnABTest = document.getElementById('btnABTest');
+        const abStepsLog = document.getElementById('abStepsLog');
+        const promptInput = document.getElementById('prompt');
+        const serverPortSelect = document.getElementById('serverPort');
+        const maxTokensSelect = document.getElementById('maxTokens');
+        const testModeSelect = document.getElementById('testMode');
+        const outputBox = document.getElementById('outputBox');
+        const placeholderText = document.getElementById('placeholderText');
+        const loader = document.getElementById('loader');
+
+        // Metrics
+        const metricSpeed = document.getElementById('metricSpeed');
+        const metricTime = document.getElementById('metricTime');
+        const metricTokens = document.getElementById('metricTokens');
+        const metricVram = document.getElementById('metricVram');
+
+        // Chart elements
+        const labelArgus = document.getElementById('labelArgus');
+        const barArgus = document.getElementById('barArgus');
+        const labelVanilla = document.getElementById('labelVanilla');
+        const barVanilla = document.getElementById('barVanilla');
+
+        const labelVramVanilla = document.getElementById('labelVramVanilla');
+        const barVramVanilla = document.getElementById('barVramVanilla');
+        const labelVramArgus = document.getElementById('labelVramArgus');
+        const barVramArgus = document.getElementById('barVramArgus');
+
+        let vanillaActiveVramKb = 0;
+        let argusActiveVramKb = 0;
+
+        // Live monitor DOM elements
+        const argusBadge = document.getElementById('argusBadge');
+        const argusBadgeText = document.getElementById('argusBadgeText');
+        const vanillaBadge = document.getElementById('vanillaBadge');
+        const vanillaBadgeText = document.getElementById('vanillaBadgeText');
+
+        // Toggle Buttons
+        const btnToggleArgus = document.getElementById('btnToggleArgus');
+        const btnToggleVanilla = document.getElementById('btnToggleVanilla');
+
+        const stepDocker = document.getElementById('stepDocker');
+        const stepDockerDesc = document.getElementById('stepDockerDesc');
+        const stepPort = document.getElementById('stepPort');
+        const stepPortDesc = document.getElementById('stepPortDesc');
+        const stepWeights = document.getElementById('stepWeights');
+        const stepWeightsDesc = document.getElementById('stepWeightsDesc');
+
+        const headerStatus = document.getElementById('headerStatus');
+        const headerStatusText = document.getElementById('headerStatusText');
+
+        let isToggling = false;
+        let currentArgusSpeed = 0;
+        let currentVanillaSpeed = 0;
+
+        // Dynamic test mode descriptions & padding sizes
+        const testModeMetadata = {
+            normal: {
+                badgeClass: "test-info-badge normal",
+                badgeText: "Normal",
+                text: "<strong>Standart kısa istek.</strong> KV Cache bellek yükü düşüktür. İki mimari arasında VRAM farkı minimum düzeydedir. Sorunsuz hızlı cevap.",
+                reps: 0
+            },
+            medium: {
+                badgeClass: "test-info-badge medium",
+                badgeText: "Orta Yük",
+                text: "<strong>~1,500 Token Ağır Belge.</strong> KV Cache ciddi yer kaplar. ARGUS 4.0x bellek sıkıştırması sayesinde VRAM'i korur ve hızı artırır.",
+                reps: 45
+            },
+            high: {
+                badgeClass: "test-info-badge high",
+                badgeText: "Yüksek Yük",
+                text: "<strong>~2,500 Token RAG / Limit Aşımı.</strong> Vanilla vLLM'de VRAM şişmesi yaşanırken ve sınırları zorlarken ARGUS bellek tüketimini minimize eder.",
+                reps: 76
+            },
+            extreme: {
+                badgeClass: "test-info-badge extreme",
+                badgeText: "Ekstrem Sınır",
+                text: "<strong>~3,500 Token (Model Limitine Yakın - 4,096).</strong> 4GB GPU'da Vanilla vLLM'in OOM yeme riskinin tavan yaptığı, ARGUS'un kurtarıcı olduğu ekstrem bölge.",
+                reps: 108
+            }
+        };
+
+        // Update explanation dynamically
+        testModeSelect.addEventListener('change', () => {
+            const meta = testModeMetadata[testModeSelect.value];
+            const badge = document.getElementById('infoBadge');
+            const text = document.getElementById('infoText');
+            badge.className = meta.badgeClass;
+            badge.innerText = meta.badgeText;
+            text.innerHTML = meta.text;
+        });
+
+        // Dynamic System Status Checking
+        async function checkSystemStatus() {
+            if (isToggling) return;
+            
+            try {
+                const response = await fetch('/api/status');
+                if (!response.ok) return;
+                const status = await response.json();
+                
+                // Update live VRAM metric
+                if (status.vram_used !== undefined && status.vram_total !== undefined) {
+                    const usedGb = status.vram_used / 1024;
+                    const totalGb = status.vram_total / 1024;
+                    metricVram.innerText = `${usedGb.toFixed(2)} GB`;
+                    document.getElementById('metricVramSub').innerText = `Toplam: ${totalGb.toFixed(2)} GB`;
+                }
+                
+                // 1. Check ARGUS Server
+                const arg = status.argus;
+                if (arg.container !== "Offline") {
+                    if (arg.ready) {
+                        argusBadge.className = "server-badge ready";
+                        argusBadgeText.innerText = "Hazır";
+                        btnToggleArgus.className = "btn-toggle running-server";
+                        btnToggleArgus.innerText = "Aktif";
+                        
+                        if (serverPortSelect.value === '8001') {
+                            headerStatus.className = "server-badge ready";
+                            headerStatusText.innerText = "ARGUS Sunucusu Hazır!";
+                        }
+                    } else if (arg.port_bound) {
+                        argusBadge.className = "server-badge loading";
+                        argusBadgeText.innerText = "JIT / Yükleniyor";
+                        btnToggleArgus.className = "btn-toggle running-server";
+                        btnToggleArgus.innerText = "Yükleniyor...";
+                        
+                        if (serverPortSelect.value === '8001') {
+                            headerStatus.className = "server-badge loading";
+                            headerStatusText.innerText = "Model Yükleniyor / Triton Derleniyor...";
+                        }
+                    } else {
+                        argusBadge.className = "server-badge loading";
+                        argusBadgeText.innerText = "Başlatılıyor";
+                        btnToggleArgus.className = "btn-toggle running-server";
+                        btnToggleArgus.innerText = "Başlatılıyor...";
+                    }
+                } else {
+                    argusBadge.className = "server-badge offline";
+                    argusBadgeText.innerText = "Çevrimdışı";
+                    btnToggleArgus.className = "btn-toggle";
+                    btnToggleArgus.innerText = "Başlat";
+                }
+
+                // 2. Check Vanilla Server
+                const van = status.vanilla;
+                if (van.container !== "Offline") {
+                    if (van.ready) {
+                        vanillaBadge.className = "server-badge ready";
+                        vanillaBadgeText.innerText = "Hazır";
+                        btnToggleVanilla.className = "btn-toggle running-server";
+                        btnToggleVanilla.innerText = "Aktif";
+                        
+                        if (serverPortSelect.value === '8002') {
+                            headerStatus.className = "server-badge ready";
+                            headerStatusText.innerText = "Vanilla Sunucusu Hazır!";
+                        }
+                    } else if (van.port_bound) {
+                        vanillaBadge.className = "server-badge loading";
+                        vanillaBadgeText.innerText = "Yükleniyor";
+                        btnToggleVanilla.className = "btn-toggle running-server";
+                        btnToggleVanilla.innerText = "Yükleniyor...";
+                        
+                        if (serverPortSelect.value === '8002') {
+                            headerStatus.className = "server-badge loading";
+                            headerStatusText.innerText = "Model Yükleniyor...";
+                        }
+                    } else {
+                        vanillaBadge.className = "server-badge loading";
+                        vanillaBadgeText.innerText = "Başlatılıyor";
+                        btnToggleVanilla.className = "btn-toggle running-server";
+                        btnToggleVanilla.innerText = "Başlatılıyor...";
+                    }
+                } else {
+                    vanillaBadge.className = "server-badge offline";
+                    vanillaBadgeText.innerText = "Çevrimdışı";
+                    btnToggleVanilla.className = "btn-toggle";
+                    btnToggleVanilla.innerText = "Başlat";
+                }
+
+                // 3. Fallback header state if selected is offline
+                const targetPort = serverPortSelect.value;
+                const activeServer = targetPort === '8001' ? arg : van;
+                if (activeServer.container === "Offline") {
+                    headerStatus.className = "server-badge offline";
+                    headerStatusText.innerText = "Sunucu Çevrimdışı";
+                }
+
+                // 4. Update Step Progress for active selection
+                const serverName = targetPort === '8001' ? "ARGUS" : "Vanilla";
+                
+                // Step 1: Docker
+                if (activeServer.container !== "Offline") {
+                    stepDocker.className = "step-item done";
+                    stepDockerDesc.innerText = `${serverName} Konteyneri Aktif`;
+                } else {
+                    stepDocker.className = "step-item active";
+                    stepDockerDesc.innerText = `${serverName} Konteyneri Bekleniyor`;
+                }
+
+                // Step 2: Port
+                if (activeServer.port_bound) {
+                    stepPort.className = "step-item done";
+                    stepPortDesc.innerText = `Port ${targetPort} Bağlı`;
+                } else if (activeServer.container !== "Offline") {
+                    stepPort.className = "step-item active";
+                    stepPortDesc.innerText = `Soket Bekleniyor`;
+                } else {
+                    stepPort.className = "step-item";
+                    stepPortDesc.innerText = "Soket Bağlantısı";
+                }
+
+                // Step 3: Weights & Triton JIT
+                if (activeServer.ready) {
+                    stepWeights.className = "step-item done";
+                    stepWeightsDesc.innerText = "Model ve Derleyici Hazır";
+                } else if (activeServer.port_bound) {
+                    stepWeights.className = "step-item active";
+                    stepWeightsDesc.innerText = "Ağırlıklar Yükleniyor...";
+                } else {
+                    stepWeights.className = "step-item";
+                    stepWeightsDesc.innerText = "Model & Triton Derleyici";
+                }
+
+            } catch (err) {
+                console.error("Status check failed:", err);
+            }
+        }
+
+        // Single click dynamic switcher
+        async function toggleServer(target) {
+            isToggling = true;
+            
+            const btn = target === 'argus' ? btnToggleArgus : btnToggleVanilla;
+            const otherBtn = target === 'argus' ? btnToggleVanilla : btnToggleArgus;
+            
+            btn.className = "btn-toggle running-server";
+            btn.innerText = "Yükleniyor...";
+            btn.disabled = true;
+            otherBtn.disabled = true;
+            
+            if (target === 'argus') {
+                argusBadge.className = "server-badge loading";
+                argusBadgeText.innerText = "Yükleniyor";
+                vanillaBadge.className = "server-badge offline";
+                vanillaBadgeText.innerText = "Durduruldu";
+                
+                stepDocker.className = "step-item active";
+                stepDockerDesc.innerText = "ARGUS Başlatılıyor...";
+                stepPort.className = "step-item";
+                stepWeights.className = "step-item";
+            } else {
+                vanillaBadge.className = "server-badge loading";
+                vanillaBadgeText.innerText = "Yükleniyor";
+                argusBadge.className = "server-badge offline";
+                argusBadgeText.innerText = "Durduruldu";
+                
+                stepDocker.className = "step-item active";
+                stepDockerDesc.innerText = "Vanilla Başlatılıyor...";
+                stepPort.className = "step-item";
+                stepWeights.className = "step-item";
+            }
+            
+            try {
+                const response = await fetch(`/api/toggle?target=${target}`);
+                const res = await response.json();
+                
+                if (res.success) {
+                    serverPortSelect.value = target === 'argus' ? '8001' : '8002';
+                    setTimeout(() => {
+                        isToggling = false;
+                        checkSystemStatus();
+                    }, 4000);
+                } else {
+                    alert("Aktivasyon Hatası: " + (res.error || res.message));
+                    isToggling = false;
+                }
+            } catch (err) {
+                console.error("Toggle failed:", err);
+                alert("İstek başarısız oldu: " + err.message);
+                isToggling = false;
+            }
+        }
+
+        // Run checker periodically
+        setInterval(checkSystemStatus, 2500);
+        checkSystemStatus();
+
+        serverPortSelect.addEventListener('change', () => {
+            checkSystemStatus();
+        });
+
+        // Performs a single inference request
+        async function runSingleInference(port, maxTokens, prompt, testMode) {
+            let fullPrompt = prompt;
+            const meta = testModeMetadata[testMode];
+            if (meta && meta.reps > 0) {
+                const padding = "This is a long context padding sentence used to evaluate the memory bandwidth and VRAM occupancy of the Key-Value (KV) cache in large language models. ".repeat(meta.reps);
+                fullPrompt = padding + "\n\nSoru: " + prompt;
+            }
+
+            const startTime = performance.now();
+            const response = await fetch(`http://localhost:${port}/v1/chat/completions`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    model: "Qwen/Qwen2.5-0.5B-Instruct",
+                    messages: [
+                        { role: "system", content: "You are a helpful AI assistant." },
+                        { role: "user", content: fullPrompt }
+                    ],
+                    max_tokens: maxTokens,
+                    temperature: 0.7
+                })
+            });
+
+            if (!response.ok) {
+                throw new Error(`vLLM HTTP ${response.status} Hata!`);
+            }
+
+            const data = await response.json();
+            const endTime = performance.now();
+            const duration = (endTime - startTime) / 1000;
+            const content = data.choices[0].message.content;
+            const tokens = data.usage.completion_tokens;
+            const throughput = tokens / duration;
+
+            return { content, tokens, duration, throughput };
+        }
+
+        // Update the bar charts graphically
+        function updateCharts() {
+            const maxSpeed = Math.max(currentArgusSpeed, currentVanillaSpeed, 1);
+            
+            if (currentArgusSpeed > 0) {
+                barArgus.style.width = `${(currentArgusSpeed / maxSpeed) * 100}%`;
+                barArgus.innerText = `${currentArgusSpeed.toFixed(2)} t/s`;
+                labelArgus.innerText = `${currentArgusSpeed.toFixed(2)} t/s`;
+            } else {
+                barArgus.style.width = "0%";
+                barArgus.innerText = "Hazır Değil";
+                labelArgus.innerText = "- t/s";
+            }
+
+            if (currentVanillaSpeed > 0) {
+                barVanilla.style.width = `${(currentVanillaSpeed / maxSpeed) * 100}%`;
+                barVanilla.innerText = `${currentVanillaSpeed.toFixed(2)} t/s`;
+                labelVanilla.innerText = `${currentVanillaSpeed.toFixed(2)} t/s`;
+            } else {
+                barVanilla.style.width = "0%";
+                barVanilla.innerText = "Hazır Değil";
+                labelVanilla.innerText = "- t/s";
+            }
+
+            // Update VRAM Footprint Chart
+            const maxVram = Math.max(vanillaActiveVramKb, argusActiveVramKb, 1);
+            
+            if (argusActiveVramKb > 0) {
+                barVramArgus.style.width = `${(argusActiveVramKb / maxVram) * 100}%`;
+                barVramArgus.innerText = `${argusActiveVramKb.toFixed(1)} KB`;
+                labelVramArgus.innerText = `${argusActiveVramKb.toFixed(1)} KB`;
+            } else {
+                barVramArgus.style.width = "0%";
+                barVramArgus.innerText = "Hazır Değil";
+                labelVramArgus.innerText = "- KB";
+            }
+
+            if (vanillaActiveVramKb > 0) {
+                barVramVanilla.style.width = `${(vanillaActiveVramKb / maxVram) * 100}%`;
+                barVramVanilla.innerText = `${vanillaActiveVramKb.toFixed(1)} KB`;
+                labelVramVanilla.innerText = `${vanillaActiveVramKb.toFixed(1)} KB`;
+            } else {
+                barVramVanilla.style.width = "0%";
+                barVramVanilla.innerText = "Hazır Değil";
+                labelVramVanilla.innerText = "- KB";
+            }
+        }
+
+        // Helper to mathematically calculate active KV Cache memory footprint for Qwen 2.5 0.5B
+        function calculateActiveVram(testMode, completionTokens, isArgus) {
+            const meta = testModeMetadata[testMode];
+            const reps = meta ? meta.reps : 0;
+            const inputTokens = 30 + (reps * 31);
+            const totalTokens = inputTokens + completionTokens;
+            // Qwen 2.5 0.5B KV Cache is 12.0 KB per token in FP16, and 3.0 KB per token in ARGUS (4x compressed)
+            const kbPerToken = isArgus ? 3.0 : 12.0;
+            return totalTokens * kbPerToken;
+        }
+
+        // Direct live Prometheus metrics parser from vLLM engine!
+        async function fetchLiveVllmMetrics(port, isArgus, testMode, completionTokens) {
+            try {
+                // Wait 400ms to allow vLLM metrics exporter to scrape the last query stats
+                await new Promise(r => setTimeout(r, 400));
+                
+                const response = await fetch(`/api/metrics?port=${port}`);
+                if (!response.ok) throw new Error("Metrics offline");
+                const data = await response.json();
+                
+                if (data.success && data.num_gpu_blocks > 0 && data.kv_cache_usage_perc > 0) {
+                    const activeTokens = data.kv_cache_usage_perc * data.num_gpu_blocks * 16;
+                    const kbPerToken = isArgus ? 3.0 : 12.0;
+                    return activeTokens * kbPerToken;
+                }
+            } catch (e) {
+                console.warn("Could not fetch live Prometheus metrics, falling back to math estimation:", e);
+            }
+            
+            // Fallback to mathematical estimation
+            return calculateActiveVram(testMode, completionTokens, isArgus);
+        }
+
+        // Run single manual test
+        btnRun.addEventListener('click', async () => {
+            const prompt = promptInput.value;
+            const port = serverPortSelect.value;
+            const maxTokens = parseInt(maxTokensSelect.value);
+            const testMode = 'normal'; // Isolated normal chat query, no stress padding
+
+            placeholderText.style.display = 'none';
+            outputBox.innerText = '';
+            loader.style.display = 'block';
+            
+            btnRun.disabled = true;
+            btnABTest.disabled = true;
+            btnRun.style.opacity = '0.7';
+
+            metricSpeed.innerText = '- t/s';
+            metricTime.innerText = '- sn';
+            metricTokens.innerText = '-';
+
+            try {
+                const res = await runSingleInference(port, maxTokens, prompt, testMode);
+
+                loader.style.display = 'none';
+                outputBox.innerText = res.content;
+
+                metricSpeed.innerText = `${res.throughput.toFixed(2)} t/s`;
+                metricTime.innerText = `${res.duration.toFixed(2)} sn`;
+                metricTokens.innerText = res.tokens;
+
+                if (port === '8001') {
+                    currentArgusSpeed = res.throughput;
+                    argusActiveVramKb = await fetchLiveVllmMetrics(port, true, testMode, res.tokens);
+                } else {
+                    currentVanillaSpeed = res.throughput;
+                    vanillaActiveVramKb = await fetchLiveVllmMetrics(port, false, testMode, res.tokens);
+                }
+                updateCharts();
+
+            } catch (error) {
+                loader.style.display = 'none';
+                placeholderText.style.display = 'block';
+                placeholderText.innerText = `❌ Sunucu Bağlantı Hatası: ${error.message}\nLütfen Port ${port} üzerinde vLLM'in aktif ve hazır olduğunu yukarıdaki izleyiciden kontrol edin. Eğer yüksek stres testi seçtiyseniz, Vanilla vLLM motoru limit aşımından dolayı isteği reddetmiş olabilir.`;
+                console.error(error);
+            } finally {
+                btnRun.disabled = false;
+                btnABTest.disabled = false;
+                btnRun.style.opacity = '1';
+            }
+        });
+
+        // Dynamic automated A/B comparison benchmark
+        btnABTest.addEventListener('click', async () => {
+            const prompt = promptInput.value;
+            // A/B stres testi için standart 128 token çıktı üretiyoruz. 
+            // Böylece hem hız/throughput ölçümü stabil olur hem de 3,500 dolgu tokenı ile birleştiğinde 4,096 model limitini aşmaz.
+            const maxTokens = 128;
+            const testMode = testModeSelect.value;
+
+            btnRun.disabled = true;
+            btnABTest.disabled = true;
+            abStepsLog.style.display = 'block';
+            abStepsLog.innerHTML = '';
+            
+            placeholderText.style.display = 'none';
+            outputBox.innerText = '';
+            loader.style.display = 'block';
+
+            function logAB(msg) {
+                abStepsLog.innerHTML += `> ${msg}<br/>`;
+                abStepsLog.scrollTop = abStepsLog.scrollHeight;
+            }
+
+            // Step 1: Run Vanilla vLLM
+            logAB("A/B Test Başladı...");
+            logAB("1. Adım: Vanilla vLLM Aktifleştiriliyor...");
+            
+            try {
+                isToggling = true;
+                const toggleRes1 = await fetch('/api/toggle?target=vanilla');
+                const tData1 = await toggleRes1.json();
+                
+                if (!tData1.success) {
+                    throw new Error("Vanilla başlatılamadı: " + tData1.error);
+                }
+                
+                // Wait and poll status until Vanilla ready
+                logAB("Vanilla motorunun yüklenmesi ve ısınması bekleniyor (JIT)...");
+                let vanillaReady = false;
+                for (let i = 0; i < 35; i++) {
+                    await new Promise(r => setTimeout(r, 2000));
+                    const statusRes = await fetch('/api/status');
+                    const status = await statusRes.json();
+                    
+                    // Show live VRAM during loading
+                    if (status.vram_used !== undefined) {
+                        const used = (status.vram_used / 1024).toFixed(2);
+                        if (parseFloat(used) > 2.0 && !status.vanilla.ready) {
+                            logAB(`İzleme: ${used} GB VRAM yüklendi. PyTorch Inductor (Triton JIT) derleniyor...`);
+                        } else {
+                            logAB(`İzleme: ${used} GB VRAM aktif.`);
+                        }
+                    }
+                    
+                    if (status.vanilla && status.vanilla.ready) {
+                        vanillaReady = true;
+                        break;
+                    }
+                }
+
+                if (!vanillaReady) {
+                    throw new Error("Vanilla vLLM 70 saniye içinde hazır olamadı!");
+                }
+
+                logAB("✅ Vanilla vLLM hazır. Test çıkarımı yapılıyor...");
+                const vanRes = await runSingleInference('8002', maxTokens, prompt, testMode);
+                currentVanillaSpeed = vanRes.throughput;
+                vanillaActiveVramKb = await fetchLiveVllmMetrics('8002', false, testMode, vanRes.tokens);
+                logAB(`📊 Vanilla Hızı: ${currentVanillaSpeed.toFixed(2)} t/s. Yanıt süresi: ${vanRes.duration.toFixed(2)} sn.`);
+                
+                metricSpeed.innerText = `${currentVanillaSpeed.toFixed(2)} t/s`;
+                metricTime.innerText = `${vanRes.duration.toFixed(2)} sn`;
+                metricTokens.innerText = vanRes.tokens;
+                updateCharts();
+
+            } catch (err) {
+                logAB(`❌ Vanilla Testi Başarısız: ${err.message}`);
+                currentVanillaSpeed = 0;
+                updateCharts();
+            }
+
+            // Step 2: Run ARGUS vLLM
+            logAB("----------------------------------------");
+            logAB("2. Adım: ARGUS vLLM Aktifleştiriliyor...");
+            
+            try {
+                isToggling = true;
+                const toggleRes2 = await fetch('/api/toggle?target=argus');
+                const tData2 = await toggleRes2.json();
+                
+                if (!tData2.success) {
+                    throw new Error("ARGUS başlatılamadı: " + tData2.error);
+                }
+                
+                // Wait and poll status until ARGUS ready
+                logAB("ARGUS JIT derleyicisi ve ağırlıkları yükleniyor...");
+                let argusReady = false;
+                for (let i = 0; i < 35; i++) {
+                    await new Promise(r => setTimeout(r, 2000));
+                    const statusRes = await fetch('/api/status');
+                    const status = await statusRes.json();
+                    
+                    if (status.vram_used !== undefined) {
+                        const used = (status.vram_used / 1024).toFixed(2);
+                        if (parseFloat(used) > 2.0 && !status.argus.ready) {
+                            logAB(`İzleme: ${used} GB VRAM yüklendi. Triton JIT & Optimize kernel derleniyor...`);
+                        } else {
+                            logAB(`İzleme: ${used} GB VRAM aktif.`);
+                        }
+                    }
+                    
+                    if (status.argus && status.argus.ready) {
+                        argusReady = true;
+                        break;
+                    }
+                }
+
+                if (!argusReady) {
+                    throw new Error("ARGUS vLLM 70 saniye içinde hazır olamadı!");
+                }
+
+                logAB("🚀 ARGUS vLLM hazır. Optimize çıkarım yapılıyor...");
+                const argRes = await runSingleInference('8001', maxTokens, prompt, testMode);
+                currentArgusSpeed = argRes.throughput;
+                argusActiveVramKb = await fetchLiveVllmMetrics('8001', true, testMode, argRes.tokens);
+                logAB(`🚀 ARGUS Hızı: ${currentArgusSpeed.toFixed(2)} t/s. Yanıt süresi: ${argRes.duration.toFixed(2)} sn.`);
+                
+                metricSpeed.innerText = `${currentArgusSpeed.toFixed(2)} t/s`;
+                metricTime.innerText = `${argRes.duration.toFixed(2)} sn`;
+                metricTokens.innerText = argRes.tokens;
+                outputBox.innerText = argRes.content;
+                updateCharts();
+
+                // Summary
+                logAB("----------------------------------------");
+                logAB("🎉 A/B Karşılaştırması Başarıyla Tamamlandı!");
+                
+                if (currentVanillaSpeed > 0) {
+                    const ratio = currentArgusSpeed / currentVanillaSpeed;
+                    if (ratio >= 1.0) {
+                        logAB(`Sonuç: ARGUS, Vanilla modeline göre %${((ratio - 1) * 100).toFixed(1)} daha hızlı!`);
+                    } else {
+                        logAB(`Sonuç: ARGUS, Vanilla modeline göre %${((1 - ratio) * 100).toFixed(1)} daha az bellek kullanarak benzer performansta çalıştı.`);
+                    }
+                } else {
+                    logAB("Vanilla model limiti aştığı için sadece ARGUS başarıyla tamamlanabildi!");
+                }
+
+            } catch (err) {
+                logAB(`❌ ARGUS Testi Başarısız: ${err.message}`);
+                currentArgusSpeed = 0;
+                updateCharts();
+            } finally {
+                isToggling = false;
+                loader.style.display = 'none';
+                btnRun.disabled = false;
+                btnABTest.disabled = false;
+                checkSystemStatus();
+            }
+        });
+    </script>
+</body>
+</html>

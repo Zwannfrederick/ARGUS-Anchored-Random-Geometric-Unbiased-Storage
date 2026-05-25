@@ -1,0 +1,5 @@
+# Vanilla vLLM — NO ARGUS patch, pure stock vLLM OpenAI server
+FROM vllm/vllm-openai:latest
+
+EXPOSE 8000
+ENV PYTHONUNBUFFERED=1

@@ -639,14 +639,10 @@ class PagedDynamicKVCache:
         if scale is None:
             scale = 1.0 / math.sqrt(head_dim)
             
-        # Detect if we should use Enterprise Mode or Consumer Mode
-        is_enterprise = False
-        if torch.cuda.is_available():
-            device_name = torch.cuda.get_device_name(0).lower()
-            if ("a100" in device_name or "h100" in device_name or "l4" in device_name or 
-                "t4" in device_name or "a10" in device_name or "v100" in device_name or 
-                torch.cuda.get_device_properties(0).total_memory > 12 * 1024**3):
-                is_enterprise = True
+        # Vectorized Attention is always faster on GPU than slow Python loops,
+        # and 32MB memory allocation is completely safe on 4GB VRAM.
+        is_enterprise = q.is_cuda
+
 
         # Automatic Swap-In Safeguard
         if self.is_swapped_out:

@@ -6,7 +6,7 @@ import os
 # Add parent directory to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from models.attention_wrapper import PagedDynamicQuantizedCache
+from argus_cache.models.attention_wrapper import PagedDynamicQuantizedCache
 
 def run_real_llama_test():
     print("=" * 80)

@@ -9,10 +9,11 @@ services:
     environment:
       - CUDA_VISIBLE_DEVICES=0
       - HF_TOKEN=${HF_TOKEN}
+      - VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
     volumes:
       - ~/.cache/huggingface:/root/.cache/huggingface
     ports:
-      - "8000:8000"
+      - "8001:8000"
     deploy:
       resources:
         reservations:
@@ -21,8 +22,37 @@ services:
               count: 1
               capabilities: [gpu]
     command: >
-      --model TinyLlama/TinyLlama-1.1B-Chat-v1.0
+      --model Qwen/Qwen2.5-0.5B-Instruct
       --trust-remote-code
-      --max-model-len 2048
+      --max-model-len 4096
       --gpu-memory-utilization 0.7
+      --allowed-origins '["*"]'
     restart: unless-stopped
+
+  vanilla-tinyllama-service:
+    image: vllm/vllm-openai:latest
+    container_name: vanilla-tinyllama
+    environment:
+      - CUDA_VISIBLE_DEVICES=0
+      - HF_TOKEN=${HF_TOKEN}
+      - VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
+
+    volumes:
+      - ~/.cache/huggingface:/root/.cache/huggingface
+    ports:
+      - "8002:8000"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    command: >
+      --model Qwen/Qwen2.5-0.5B-Instruct
+      --trust-remote-code
+      --max-model-len 4096
+      --gpu-memory-utilization 0.7
+      --allowed-origins '["*"]'
+    restart: unless-stopped
+

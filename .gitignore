@@ -11,3 +11,8 @@ __pycache__/
 .pytest_cache/
 .system_generated/
 .gemini/
+
+# Packaging
+dist/
+build/
+*.egg-info/
