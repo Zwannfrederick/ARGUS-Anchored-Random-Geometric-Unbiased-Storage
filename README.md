@@ -20,7 +20,7 @@ Combines the **perfect associative recall** of Transformers with the **extreme m
 
 ## 🎯 Architecture Overview
 
-Transformer models suffer from quadratic memory scaling ($O(N^2)$) due to key-value (KV) cache accumulation during causal generation. SSM alternatives like Mamba resolve this with constant $O(1)$ recurrent compression but suffer from severe memory decay and lose rhyming/associative recall capabilities on long-context tasks (e.g., Passkey Retrieval).
+Transformer models suffer from quadratic memory scaling (`O(N^2)`) due to key-value (KV) cache accumulation during causal generation. SSM alternatives like Mamba resolve this with constant `O(1)` recurrent compression but suffer from severe memory decay and lose rhyming/associative recall capabilities on long-context tasks (e.g., Passkey Retrieval).
 
 ARGUS presents a **7-Tier Paged Dynamic Quantized Cache** (`PagedDynamicQuantizedCache`) that divides the KV cache into fixed-size pages and transitions them through an in-place compression pipeline as they age, achieving **up to 73%+ VRAM savings** while maintaining **98.2%+ Raw Tensor Reconstruction Accuracy** and **100% retrieval accuracy**.
 
@@ -34,8 +34,8 @@ Sequence Direction: [Sinks (FP16)] -> [Rhyme Anchors (FP16)] -> [Active (FP16)] 
 3. **Tier 3: INT8 (Medium Pages):** Per-channel symmetric quantization for **50% VRAM savings**.
 4. **Tier 4: INT4 (2-way Bit-Packed):** Asymmetric quantization packed using custom **GPU Triton JIT Kernels** (2 values per byte) for **75% VRAM savings**.
 5. **Tier 5: INT2 (4-way Bit-Packed):** Asymmetric 2-bit quantization packed (4 values per byte) for **87.5% VRAM savings**.
-6. **Tier 6: 1-Bit (Sign-Binarized Bit-Packed):** Binarized signs ($x \ge 0 \rightarrow 1$, else $0$) packed 8 values per byte using custom **GPU Triton JIT Kernels** for **93.7% normal VRAM savings**. Outliers isolated dynamically.
-7. **Tier 7: Johnson-Lindenstrauss Orthogonal Matrix Projection:** Sequence-dimension projection ($N \rightarrow M$, where $M = N // 4$) keeping FP16 precision. Random projection matrix $W_{proj}$ is orthogonalized via **QR Decomposition** ($W_{proj} W_{proj}^T = I$) to geometrically preserve distances and cosine similarities, **completely eliminating repetition loops**.
+6. **Tier 6: 1-Bit (Sign-Binarized Bit-Packed):** Binarized signs (`x >= 0 -> 1`, else `0`) packed 8 values per byte using custom **GPU Triton JIT Kernels** for **93.7% normal VRAM savings**. Outliers isolated dynamically.
+7. **Tier 7: Johnson-Lindenstrauss Orthogonal Matrix Projection:** Sequence-dimension projection (`N -> M`, where `M = N // 4`) keeping FP16 precision. Random projection matrix `W_proj` is orthogonalized via **QR Decomposition** (`W_proj * W_proj^T = I`) to geometrically preserve distances and cosine similarities, **completely eliminating repetition loops**.
 
 ---
 
@@ -49,8 +49,8 @@ To eliminate memory latency bottleneck during autoregressive decoding, ARGUS aut
 ### 2. Uniform Scalar Load Broadcast Triton Kernels
 Dquantization kernels in [triton_kernels.py](file:///home/zwannfrederick/Masaüstü/Sektor/Coding/mamba%20fix/argus_cache/core/triton_kernels.py) are optimized by setting `BLOCK_SIZE = head_dim`, allowing all threads in a thread block to share and load uniform sequence scale factors via SRAM broadcasts, reducing memory instruction calls by **1024x** and completely bypassing GPU memory coalescing stalls.
 
-### 3. Dynamic Outlier Thresholding ($\sigma > 3.0$)
-Calculates statistical variance in real-time. Key/value features exceeding $3.0\sigma$ standard deviation are dynamically isolated and stored permanently in high-fidelity FP16, while only the background normal range is compressed down. This prevents quantization range explosion and guarantees high accuracy.
+### 3. Dynamic Outlier Thresholding (`σ > 3.0`)
+Calculates statistical variance in real-time. Key/value features exceeding `3.0σ` standard deviation are dynamically isolated and stored permanently in high-fidelity FP16, while only the background normal range is compressed down. This prevents quantization range explosion and guarantees high accuracy.
 
 ---
 
@@ -125,7 +125,7 @@ At long contexts (3,500+ tokens), the KV Cache transfer overhead from VRAM to GP
 
 ## 🎯 Mimari Genel Bakış
 
-Transformers modelleri, causal üretim adımlarında biriken key-value (KV) durumları nedeniyle karesel ($O(N^2)$) bellek patlaması (Out-of-Memory - OOM) yaşarlar. Mamba gibi SSM alternatifleri bellek tüketimini recurrent bir scan döngüsüyle $O(1)$ seviyesinde sabitlese de, samanlıkta iğne arama (Passkey Retrieval) ve uzun vadeli uyak/vezin yapısı koruma gerektiren şiirsel metin üretimlerinde bellek sönümlenmesi (memory decay) yaşayarak başarısız olurlar.
+Transformers modelleri, causal üretim adımlarında biriken key-value (KV) durumları nedeniyle karesel (`O(N^2)`) bellek patlaması (Out-of-Memory - OOM) yaşarlar. Mamba gibi SSM alternatifleri bellek tüketimini recurrent bir scan döngüsüyle `O(1)` seviyesinde sabitlese de, samanlıkta iğne arama (Passkey Retrieval) ve uzun vadeli uyak/vezin yapısı koruma gerektiren şiirsel metin üretimlerinde bellek sönümlenmesi (memory decay) yaşayarak başarısız olurlar.
 
 ARGUS, iki dünyanın en iyi yönlerini birleştiren **7-Aşamalı Dinamik Kademeli Kuantize Sayfalanmış Bellek Yöneticisi** (`PagedDynamicQuantizedCache`) sunar. Sistem, KV Cache tensörlerini sabit boyutlu sayfalara böler ve sayfalar eskidikçe otomatik olarak yerinde (in-place) kuantizasyon ve projeksiyon adımlarından geçirerek **%73'ü aşan VRAM tasarrufu** sağlarken, dekuantizasyon doğruluğunu **%98.2+** seviyesinde korur.
 
@@ -139,8 +139,8 @@ Dizi Yönü: [Sinks (FP16)] -> [Rhyme Anchors (FP16)] -> [Active (FP16)] -> [FP8
 3. **Tier 3: INT8 (Orta Sayfalar):** Per-channel simetrik kuantizasyon ile **%50 VRAM tasarrufu** sağlar.
 4. **Tier 4: INT4 (2-way Packed):** Custom **Triton JIT CUDA GPU Kernelleri** ile iki adet 4-bitlik değerin tek bir `uint8` hücresine GPU SRAM üzerinde paralel paketlenmesiyle **%75 VRAM tasarrufu** sağlar.
 5. **Tier 5: INT2 (4-way Packed):** Dört adet 2-bitlik değerin tek bir `uint8` hücresine bit-packing ile paketlenmesiyle **%87.5 VRAM tasarrufu** sağlar.
-6. **Tier 6: 1-Bit (İşaret Binarize Bit-Packed):** İşaret değerlerini ($x \ge 0 \rightarrow 1$, else $0$) custom **Triton JIT CUDA Kernelleri** ile 8 adet 1-bitlik değeri tek bir `uint8` hücresine paralel paketleyerek **%93.7 normal VRAM tasarrufu** sağlar.
-7. **Tier 7: Johnson-Lindenstrauss Ortogonal Matris Projeksiyonu (JL):** En eski arşiv sayfalarında tekrarlama döngüsü bug'ına yol açan lossy INT2 yerine, sequence boyutu $N$ ortogonal bir rastgele matris $W_{proj}$ ile çarpılarak sequence boyutu 4 kat büzüştürülür. Sayılar yüksek çözünürlüklü **FP16** biçiminde tutulur, **tekrarlama döngüsü bug'ları tamamen önlenir**.
+6. **Tier 6: 1-Bit (İşaret Binarize Bit-Packed):** İşaret değerlerini (`x >= 0 -> 1`, else `0`) custom **Triton JIT CUDA Kernelleri** ile 8 adet 1-bitlik değeri tek bir `uint8` hücresine paralel paketleyerek **%93.7 normal VRAM tasarrufu** sağlar.
+7. **Tier 7: Johnson-Lindenstrauss Ortogonal Matris Projeksiyonu (JL):** En eski arşiv sayfalarında tekrarlama döngüsü bug'ına yol açan lossy INT2 yerine, sequence boyutu `N` ortogonal bir rastgele matris `W_proj` ile çarpılarak sequence boyutu 4 kat büzüştürülür. Sayılar yüksek çözünürlüklü **FP16** biçiminde tutulur, **tekrarlama döngüsü bug'ları tamamen önlenir**.
 
 ---
 
@@ -149,7 +149,7 @@ Dizi Yönü: [Sinks (FP16)] -> [Rhyme Anchors (FP16)] -> [Active (FP16)] -> [FP8
 ### 1. Donanıma Duyarlı Auto-Switching Attention (⚡ YENİ ⚡)
 Autoregressive üretim adımlarındaki bellek gecikmesini tamamen ortadan kaldırmak için ARGUS, çalışma zamanında GPU gücünü otomatik olarak analiz eder ve en verimli attention yoluna geçer:
 *   **Kurumsal Sunucu Modu (A100/H100/L4):** Paralel **Vectorized Attention** devrededir. Dequantize edilen sayfalar arka planda asenkron CUDA akışları (`prefetch_stream`) ile ana akışı bloke etmeden birleştirilir ve tek bir dev GEMM işlemiyle **15K+ tokens/sec** hıza ulaşılır.
-*   **Bireysel/Mobil Modu (RTX 3050 Ti/4060):** Bellek kopyalamasını $32.7\text{MB}$'tan **131 KB** seviyesine düşüren yerinde sayfa-sayfa (**In-place Block-by-Block Attention**) hesaplama devrededir. Bu yöntem, mobil GPU'lardaki darboğazı kırarak hızı **36.7 kat** artırmış ve **1.4K t/s (1400 token/sn)** seviyesine çıkarmıştır!
+*   **Bireysel/Mobil Modu (RTX 3050 Ti/4060):** Bellek kopyalamasını `32.7 MB`'tan **131 KB** seviyesine düşüren yerinde sayfa-sayfa (**In-place Block-by-Block Attention**) hesaplama devrededir. Bu yöntem, mobil GPU'lardaki darboğazı kırarak hızı **36.7 kat** artırmış ve **1.4K t/s (1400 token/sn)** seviyesine çıkarmıştır!
 
 ### 2. Uniform Scalar Load Broadcast
 Triton JIT dekuantizasyon çekirdeklerinde `BLOCK_SIZE = head_dim` olarak sabitlenerek, thread bloğundaki tüm iş parçacıklarının aynı sequence ölçek faktörünü paylaşması sağlanmıştır. Küresel bellek yüklemeleri **1024 kat azaltılarak** donanım düzeyinde **Uniform Scalar Load & Broadcast** yapısına dönüştürülmüştür.

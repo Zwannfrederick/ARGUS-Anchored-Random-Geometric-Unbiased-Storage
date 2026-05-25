@@ -579,6 +579,56 @@
             display: none;
             line-height: 1.4;
         }
+
+        /* Responsive Design & Stretch Optimization */
+        @media (max-width: 1100px) {
+            body {
+                overflow: auto !important;
+            }
+            main {
+                grid-template-columns: 1fr;
+                height: auto;
+                overflow-y: auto;
+                gap: 16px;
+            }
+            .results-panel {
+                height: auto;
+                overflow: visible;
+                gap: 16px;
+            }
+            .output-box {
+                height: auto !important;
+                min-height: 350px;
+                flex: none;
+            }
+            .metrics-row {
+                grid-template-columns: repeat(2, 1fr);
+            }
+            .charts-row {
+                grid-template-columns: 1fr;
+            }
+        }
+        
+        @media (max-width: 600px) {
+            .metrics-row {
+                grid-template-columns: 1fr;
+            }
+            .deploy-bar {
+                flex-direction: column;
+                height: auto;
+                gap: 10px;
+                padding: 12px;
+            }
+            header {
+                flex-direction: column;
+                gap: 10px;
+                padding: 12px;
+                height: auto;
+            }
+            main {
+                padding: 10px;
+            }
+        }
     </style>
 </head>
 <body>
