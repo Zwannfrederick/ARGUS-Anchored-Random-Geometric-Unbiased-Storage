@@ -16,29 +16,17 @@ from .quantization import (
 
 def isolate_outliers(tensor, threshold_sigma=3.0):
     """
-    Isolates extreme value outliers globally using a hybrid 2-way statistical filter:
-    1. Channel-wise (dim=-1) - protects activation channel spikes (LLM.int8 style).
-    2. Sequence-wise (dim=-2) - protects token-level semantic anchors (Passkey Retrieval).
-    Outliers are kept in FP16 permanently, while normal values are returned separately.
+    Isolates extreme value outliers globally using a highly optimized, fast 1-pass filter:
+    Bypasses heavy double std/mean calculations to prevent latency spikes during lifecycle cascades.
     """
     if threshold_sigma <= 0:
-        # Outlier isolation disabled
         return tensor, torch.zeros_like(tensor), torch.zeros_like(tensor, dtype=torch.bool)
         
     abs_t = torch.abs(tensor)
     
-    # 1. Channel-wise outliers (activation spikes)
+    # Fast 1-pass channel-wise mean-based outlier filter (avoids costly std)
     mean_ch = torch.mean(abs_t, dim=-1, keepdim=True)
-    std_ch = torch.std(abs_t, dim=-1, keepdim=True).nan_to_num(0.0)
-    mask_ch = abs_t > (mean_ch + threshold_sigma * std_ch)
-    
-    # 2. Sequence-wise outliers (token anchors/passkey)
-    mean_seq = torch.mean(abs_t, dim=-2, keepdim=True)
-    std_seq = torch.std(abs_t, dim=-2, keepdim=True).nan_to_num(0.0)
-    mask_seq = abs_t > (mean_seq + threshold_sigma * std_seq)
-    
-    # Combine masks
-    outlier_mask = mask_ch | mask_seq
+    outlier_mask = abs_t > (mean_ch * threshold_sigma)
     
     # Extract outliers in FP16, zero them out in normal part to reduce quantization range
     outlier_vals = torch.where(outlier_mask, tensor, torch.zeros(1, dtype=tensor.dtype, device=tensor.device))
