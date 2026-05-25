@@ -1,9 +1,19 @@
 Metadata-Version: 2.4
 Name: argus_cache
-Version: 0.1.1
+Version: 0.1.2
 Summary: ARGUS: Anchored Random Geometric Unbiased Storage - Advanced Dynamic Quantized KV Cache
 Author: Muhammed Emin Çelik
 License: Apache-2.0
+Classifier: Development Status :: 4 - Beta
+Classifier: Intended Audience :: Science/Research
+Classifier: License :: OSI Approved :: Apache Software License
+Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Python :: 3.8
+Classifier: Programming Language :: Python :: 3.9
+Classifier: Programming Language :: Python :: 3.10
+Classifier: Programming Language :: Python :: 3.11
+Classifier: Programming Language :: Python :: 3.12
+Classifier: Topic :: Scientific/Engineering :: Artificial Intelligence
 Requires-Python: >=3.8
 Description-Content-Type: text/markdown
 License-File: LICENSE

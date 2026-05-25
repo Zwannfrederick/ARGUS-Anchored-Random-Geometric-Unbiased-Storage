@@ -4,13 +4,25 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "argus_cache"
-version = "0.1.1"
+version = "0.1.2"
 description = "ARGUS: Anchored Random Geometric Unbiased Storage - Advanced Dynamic Quantized KV Cache"
 readme = "README.md"
 authors = [
     { name = "Muhammed Emin Çelik" }
 ]
 license = { text = "Apache-2.0" }
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 requires-python = ">=3.8"
 dependencies = [
     "torch>=2.0.0",
