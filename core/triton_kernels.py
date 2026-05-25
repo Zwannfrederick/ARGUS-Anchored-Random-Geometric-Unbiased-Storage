@@ -43,7 +43,7 @@ if TRITON_AVAILABLE:
     @triton.jit
     def triton_unpack_int4_kernel(
         packed_ptr, unpacked_ptr, scales_ptr, min_vals_ptr,
-        num_elements, head_dim,
+        num_elements,
         BLOCK_SIZE: tl.constexpr
     ):
         """Triton Kernel: Unpacks one uint8 into two 4-bit values and performs fused dequantization."""
@@ -64,14 +64,15 @@ if TRITON_AVAILABLE:
         mask_even = offsets_even < num_elements
         mask_odd = offsets_odd < num_elements
         
-        # Fused scale and min loading per sequence/token (offsets // head_dim)
-        even_scale = tl.load(scales_ptr + (offsets_even // head_dim), mask=mask_even, other=1.0)
-        even_min = tl.load(min_vals_ptr + (offsets_even // head_dim), mask=mask_even, other=0.0)
-        even_dequant = even_vals.to(tl.float32) * even_scale + even_min
+        # Extremely fast: Load single scalar scale and min per token (since BLOCK_SIZE == head_dim)
+        scale_even = tl.load(scales_ptr + (2 * pid))
+        min_even = tl.load(min_vals_ptr + (2 * pid))
         
-        odd_scale = tl.load(scales_ptr + (offsets_odd // head_dim), mask=mask_odd, other=1.0)
-        odd_min = tl.load(min_vals_ptr + (offsets_odd // head_dim), mask=mask_odd, other=0.0)
-        odd_dequant = odd_vals.to(tl.float32) * odd_scale + odd_min
+        scale_odd = tl.load(scales_ptr + (2 * pid + 1))
+        min_odd = tl.load(min_vals_ptr + (2 * pid + 1))
+        
+        even_dequant = even_vals.to(tl.float32) * scale_even + min_even
+        odd_dequant = odd_vals.to(tl.float32) * scale_odd + min_odd
         
         tl.store(unpacked_ptr + offsets_even, even_dequant, mask=mask_even)
         tl.store(unpacked_ptr + offsets_odd, odd_dequant, mask=mask_odd)
@@ -114,7 +115,7 @@ if TRITON_AVAILABLE:
     @triton.jit
     def triton_unpack_1bit_kernel(
         packed_ptr, unpacked_ptr, scales_ptr,
-        num_elements, head_dim,
+        num_elements,
         BLOCK_SIZE: tl.constexpr
     ):
         """Triton Kernel: Unpacks one uint8 into eight 1-bit values and performs fused dequantization."""
@@ -137,15 +138,15 @@ if TRITON_AVAILABLE:
         
         offsets_0 = block_start * 8 + tl.arange(0, BLOCK_SIZE) * 8
         
-        # Load scales dynamically per sequence element
-        s0 = tl.load(scales_ptr + (offsets_0 // head_dim), mask=offsets_0 < num_elements, other=1.0)
-        s1 = tl.load(scales_ptr + ((offsets_0 + 1) // head_dim), mask=(offsets_0 + 1) < num_elements, other=1.0)
-        s2 = tl.load(scales_ptr + ((offsets_0 + 2) // head_dim), mask=(offsets_0 + 2) < num_elements, other=1.0)
-        s3 = tl.load(scales_ptr + ((offsets_0 + 3) // head_dim), mask=(offsets_0 + 3) < num_elements, other=1.0)
-        s4 = tl.load(scales_ptr + ((offsets_0 + 4) // head_dim), mask=(offsets_0 + 4) < num_elements, other=1.0)
-        s5 = tl.load(scales_ptr + ((offsets_0 + 5) // head_dim), mask=(offsets_0 + 5) < num_elements, other=1.0)
-        s6 = tl.load(scales_ptr + ((offsets_0 + 6) // head_dim), mask=(offsets_0 + 6) < num_elements, other=1.0)
-        s7 = tl.load(scales_ptr + ((offsets_0 + 7) // head_dim), mask=(offsets_0 + 7) < num_elements, other=1.0)
+        # Extremely fast: Load single scalar scales for the 8 tokens processed by this block (BLOCK_SIZE == head_dim)
+        s0 = tl.load(scales_ptr + (8 * pid + 0))
+        s1 = tl.load(scales_ptr + (8 * pid + 1))
+        s2 = tl.load(scales_ptr + (8 * pid + 2))
+        s3 = tl.load(scales_ptr + (8 * pid + 3))
+        s4 = tl.load(scales_ptr + (8 * pid + 4))
+        s5 = tl.load(scales_ptr + (8 * pid + 5))
+        s6 = tl.load(scales_ptr + (8 * pid + 6))
+        s7 = tl.load(scales_ptr + (8 * pid + 7))
         
         v0 = (b0 * 2.0 - 1.0) * s0
         v1 = (b1 * 2.0 - 1.0) * s1
@@ -245,13 +246,12 @@ def triton_unpack_int4(packed: torch.Tensor, scales: torch.Tensor, min_vals: tor
     unpacked_shape[seq_dim] = seq_len_packed * 2
     unpacked = torch.empty(unpacked_shape, dtype=scales.dtype, device=packed.device)
     
-    BLOCK_SIZE = 1024
+    # We set BLOCK_SIZE exactly to head_dim for uniform scalar loads
+    BLOCK_SIZE = packed.shape[-1]
     grid = lambda meta: (triton.cdiv(num_elements // 2, meta['BLOCK_SIZE']),)
     
-    head_dim = packed.shape[-1]
-    
     triton_unpack_int4_kernel[grid](
-        packed, unpacked, scales, min_vals, num_elements, head_dim,
+        packed, unpacked, scales, min_vals, num_elements,
         BLOCK_SIZE=BLOCK_SIZE
     )
     
@@ -394,13 +394,12 @@ def triton_unpack_1bit(packed: torch.Tensor, scales: torch.Tensor, seq_dim: int 
     unpacked_shape[seq_dim] = seq_len_packed * 8
     unpacked = torch.empty(unpacked_shape, dtype=scales.dtype, device=packed.device)
     
-    BLOCK_SIZE = 1024
+    # We set BLOCK_SIZE exactly to head_dim for uniform scalar loads
+    BLOCK_SIZE = packed.shape[-1]
     grid = lambda meta: (triton.cdiv(num_elements // 8, meta['BLOCK_SIZE']),)
     
-    head_dim = packed.shape[-1]
-    
     triton_unpack_1bit_kernel[grid](
-        packed, unpacked, scales, num_elements, head_dim,
+        packed, unpacked, scales, num_elements,
         BLOCK_SIZE=BLOCK_SIZE
     )
     return unpacked
