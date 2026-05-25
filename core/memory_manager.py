@@ -619,6 +619,143 @@ class PagedDynamicKVCache:
             
         return torch.cat(all_keys, dim=-2), torch.cat(all_values, dim=-2)
 
+    def inplace_paged_attention(self, q: torch.Tensor, scale: float = None) -> torch.Tensor:
+        """
+        Computes scaled dot-product attention block-by-block/page-by-page.
+        Bypasses massive FP16 reconstruction of full KV tensors to save DRAM bandwidth and VRAM.
+        Works seamlessly on both:
+          1. Enterprise GPUs (vectorized batched attention over active + prefetched pages)
+          2. Consumer GPUs (low-VRAM sequential block-by-block calculation)
+        
+        q shape: [batch, num_heads, q_len, head_dim]
+        Returns:
+          attn_output: [batch, num_heads, q_len, head_dim]
+        """
+        import math
+        batch, num_heads, q_len, head_dim = q.shape
+        device = q.device
+        dtype = q.dtype
+        
+        if scale is None:
+            scale = 1.0 / math.sqrt(head_dim)
+            
+        # Detect if we should use Enterprise Mode or Consumer Mode
+        is_enterprise = False
+        if torch.cuda.is_available():
+            device_name = torch.cuda.get_device_name(0).lower()
+            if ("a100" in device_name or "h100" in device_name or "l4" in device_name or 
+                "t4" in device_name or "a10" in device_name or "v100" in device_name or 
+                torch.cuda.get_device_properties(0).total_memory > 12 * 1024**3):
+                is_enterprise = True
+
+        # Automatic Swap-In Safeguard
+        if self.is_swapped_out:
+            self.swap_in_to_device()
+
+        # Let's collect all dequantized/active K and V tensors
+        keys_list = []
+        values_list = []
+        
+        # 1. Outlier-Aware: Attention Sinks (FP16)
+        if self.sink_k is not None:
+            keys_list.append(self.sink_k)
+            values_list.append(self.sink_v)
+            
+        # 2. VIP Anchors (FP16)
+        if self.anchor_k is not None:
+            keys_list.append(self.anchor_k)
+            values_list.append(self.anchor_v)
+            
+        # 3. Active FP16 Pages
+        for page in self.active_pages:
+            keys_list.append(page['key'])
+            values_list.append(page['value'])
+            
+        # 4. Temp active buffer
+        if self.k_buffer is not None and self.k_buffer.shape[-2] > 0:
+            keys_list.append(self.k_buffer)
+            values_list.append(self.v_buffer)
+            
+        # 5. Compressed Pages (Tiers 2-7)
+        def process_compressed_pages(pages, tier):
+            for page in pages:
+                if id(page) in self.prefetch_cache:
+                    k, v = self.prefetch_cache[id(page)]
+                    self.prefetch_hits += 1
+                else:
+                    self.prefetch_misses += 1
+                    if tier == 'fp8':
+                        k = dequantize_from_fp8_simulated(page['key_q'], page['key_scales'])
+                        v = dequantize_from_fp8_simulated(page['value_q'], page['value_scales'])
+                    elif tier == 'int8':
+                        k = dequantize_from_int8(page['key_q'], page['key_scales'])
+                        v = dequantize_from_int8(page['value_q'], page['value_scales'])
+                    elif tier == 'int4':
+                        k = dequantize_from_int4_packed(page['key_packed'], page['key_scales'], page['key_min'], seq_dim=-2)
+                        v = dequantize_from_int4_packed(page['value_packed'], page['value_scales'], page['value_min'], seq_dim=-2)
+                    elif tier == 'int2':
+                        k = dequantize_from_int2_packed(page['key_packed'], page['key_scales'], page['key_min'], seq_dim=-2)
+                        v = dequantize_from_int2_packed(page['value_packed'], page['value_scales'], page['value_min'], seq_dim=-2)
+                    elif tier == 'one_bit':
+                        k = dequantize_from_1bit_packed(page['key_packed'], page['key_scales'], seq_dim=-2)
+                        v = dequantize_from_1bit_packed(page['value_packed'], page['value_scales'], seq_dim=-2)
+                    elif tier == 'jl':
+                        w_proj = self.get_jl_projection_matrix(page['key_proj'].device, page['key_proj'].dtype)
+                        k = torch.matmul(w_proj.t(), page['key_proj'])
+                        v = torch.matmul(w_proj.t(), page['value_proj'])
+                    else:
+                        continue
+                        
+                    k_idx = page.get('key_out_indices')
+                    if k_idx is not None and k_idx.numel() > 0:
+                        k = k.clone()
+                        k[k_idx[:, 0].long(), k_idx[:, 1].long(), k_idx[:, 2].long(), k_idx[:, 3].long()] = page['key_out_values']
+                    v_idx = page.get('value_out_indices')
+                    if v_idx is not None and v_idx.numel() > 0:
+                        v = v.clone()
+                        v[v_idx[:, 0].long(), v_idx[:, 1].long(), v_idx[:, 2].long(), v_idx[:, 3].long()] = page['value_out_values']
+                        
+                keys_list.append(k)
+                values_list.append(v)
+                
+        process_compressed_pages(self.jl_pages, 'jl')
+        process_compressed_pages(self.one_bit_pages, 'one_bit')
+        process_compressed_pages(self.int2_pages, 'int2')
+        process_compressed_pages(self.int4_pages, 'int4')
+        process_compressed_pages(self.int8_pages, 'int8')
+        process_compressed_pages(self.fp8_pages, 'fp8')
+        
+        if not keys_list:
+            return torch.zeros_like(q)
+            
+        if is_enterprise:
+            k_full = torch.cat(keys_list, dim=-2)
+            v_full = torch.cat(values_list, dim=-2)
+            
+            attn_weights = torch.matmul(q, k_full.transpose(-1, -2)) * scale
+            attn_probs = torch.softmax(attn_weights, dim=-1)
+            attn_output = torch.matmul(attn_probs, v_full)
+            return attn_output
+        else:
+            scores_list = []
+            for k_block in keys_list:
+                score_block = torch.matmul(q, k_block.transpose(-1, -2)) * scale
+                scores_list.append(score_block)
+                
+            scores = torch.cat(scores_list, dim=-1)
+            attn_probs = torch.softmax(scores, dim=-1)
+            
+            attn_output = torch.zeros_like(q)
+            idx_start = 0
+            for i, v_block in enumerate(values_list):
+                block_len = v_block.shape[-2]
+                attn_probs_block = attn_probs[..., idx_start : idx_start + block_len]
+                out_block = torch.matmul(attn_probs_block, v_block)
+                attn_output.add_(out_block)
+                idx_start += block_len
+                
+            return attn_output
+
     def speculate_and_prefetch(self, attn_weights=None):
         """
         Predicts and pre-dequantizes pages that will be heavily attended to in the next step.

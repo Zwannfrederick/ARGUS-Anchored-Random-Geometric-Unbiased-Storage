@@ -1,5 +1,5 @@
 import torch
-from ..core.memory_manager import PagedDynamicKVCache
+from argus_cache.core.memory_manager import PagedDynamicKVCache
 
 # Attempt to import HuggingFace Cache base class for seamless integration
 try:

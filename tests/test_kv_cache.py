@@ -166,6 +166,27 @@ def test_cache_transitions():
     print(f"Calculated VRAM usage: {vram_bytes} bytes")
     assert vram_bytes > 0
     print("VRAM check passed!")
+    
+    # 12. Test inplace_paged_attention
+    print("Testing inplace_paged_attention vs standard reconstructed attention...")
+    q = torch.randn(1, 1, 1, 16, dtype=torch.float16) # 1 query token
+    
+    # Standard reconstructed attention
+    attn_weights = torch.matmul(q, all_k.transpose(-1, -2)) / 4.0 # head_dim = 16, sqrt = 4
+    attn_probs = torch.softmax(attn_weights, dim=-1)
+    standard_attn_out = torch.matmul(attn_probs, all_v)
+    
+    # Inplace Paged Attention
+    inplace_attn_out = cache.inplace_paged_attention(q)
+    
+    # Check shape
+    assert inplace_attn_out.shape == standard_attn_out.shape
+    
+    # Verify close values (within floating point tolerances)
+    diff = torch.mean(torch.abs(standard_attn_out - inplace_attn_out)).item()
+    print(f"Difference between standard and inplace attention: {diff:.6f}")
+    assert diff < 1e-3, "Attention output mismatch!"
+    print("inplace_paged_attention check passed!")
 
 if __name__ == "__main__":
     test_cache_transitions()
