@@ -17,4 +17,6 @@ argus_cache/models/__init__.py
 argus_cache/models/attention_wrapper.py
 tests/test_compression_loss.py
 tests/test_kv_cache.py
+tests/test_memory_intelligence.py
+tests/test_paper_grade_benchmarks.py
 tests/test_quantization.py
