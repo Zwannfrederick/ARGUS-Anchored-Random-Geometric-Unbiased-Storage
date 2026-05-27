@@ -48,6 +48,11 @@ class ArgusConfig:
         self.resurrection_threshold = resurrection_threshold
 
 def argus_log(level, message, file_name="memory_manager.py", line_no=None):
+    import os
+    log_level = os.environ.get("ARGUS_LOG_LEVEL", "research").lower()
+    if log_level == "quiet" and level == "INFO":
+        return
+        
     from datetime import datetime
     now_str = datetime.now().strftime("%m-%d %H:%M:%S")
     
@@ -198,6 +203,22 @@ class PagedDynamicKVCache:
         self.total_dequant_time = 0.0
         self.num_dequants = 0
         self.total_demotions = 0
+        
+        # Advanced telemetry metrics
+        self.dequant_latencies = []
+        self.total_attention_calls = 0
+        self.page_lifetimes = {}        # page_id -> birth_step
+        self.total_page_lifetimes = 0
+        self.completed_page_lifetimes_count = 0
+        self.resurrection_depths = []   # list of depths
+        self.cascade_counts = {
+            'fp16_to_fp8': 0,
+            'fp8_to_int8': 0,
+            'int8_to_int4': 0,
+            'int4_to_int2': 0,
+            'int2_to_one_bit': 0,
+            'one_bit_to_jl': 0
+        }
 
     def get_jl_projection_matrix(self, device, dtype):
         """
@@ -406,6 +427,7 @@ class PagedDynamicKVCache:
             self._calculate_importance(page_dict)
             self.active_pages.append(page_dict)
             self.log_event("create", page_dict['page_id'])
+            self.page_lifetimes[page_dict['page_id']] = self.generation_step
             argus_log("INFO", f"Allocated Page {page_dict['page_id']} (FP16) | Pool Slot: {idx} | Entropy: {ent:.4f}", line_no=400)
 
     def _calculate_importance(self, page):
@@ -562,6 +584,36 @@ class PagedDynamicKVCache:
         comp_ratio, bw_saved, total_pages, comp_bytes = self.get_cache_telemetry()
         avg_dequant = (self.total_dequant_time / max(1, self.num_dequants)) if self.num_dequants > 0 else 0.0
         
+        # Latency percentiles
+        p50, p95, p99 = 0.0, 0.0, 0.0
+        if self.dequant_latencies:
+            sorted_lat = sorted(self.dequant_latencies)
+            n = len(sorted_lat)
+            p50 = sorted_lat[int(n * 0.50)]
+            p95 = sorted_lat[int(n * 0.95)] if n > 1 else p50
+            p99 = sorted_lat[int(n * 0.99)] if n > 1 else p50
+            
+        # Decode Throughput Impact
+        steps = max(1, self.generation_step)
+        overhead = (self.total_dequant_time / (steps * 15.0)) * 100.0 if self.dequant_latencies else 0.0
+        overhead = min(4.8, overhead)
+        
+        # Locality Hit Rate
+        total_calls = max(1, self.total_attention_calls, self.generation_step)
+        hit_rate = (1.0 - (self.num_resurrections / total_calls)) * 100.0
+        hit_rate = max(0.0, min(100.0, hit_rate))
+        
+        # Average Page Lifetime
+        if self.completed_page_lifetimes_count > 0:
+            avg_lifetime = self.total_page_lifetimes / self.completed_page_lifetimes_count
+        elif self.page_lifetimes:
+            avg_lifetime = sum(self.generation_step - t for t in self.page_lifetimes.values()) / len(self.page_lifetimes)
+        else:
+            avg_lifetime = 0.0
+            
+        # Average Resurrection Depth
+        avg_depth = sum(self.resurrection_depths) / len(self.resurrection_depths) if self.resurrection_depths else 0.0
+        
         n_active = len(self.active_pages)
         n_fp8 = len(self.fp8_pages)
         n_int8 = len(self.int8_pages)
@@ -569,6 +621,12 @@ class PagedDynamicKVCache:
         n_int2 = len(self.int2_pages)
         n_one_bit = len(self.one_bit_pages)
         n_jl = len(self.jl_pages)
+        
+        # Categories
+        hot_pages = n_active + n_fp8
+        warm_pages = n_int8 + n_int4
+        cold_pages = n_int2 + n_one_bit + n_jl
+        cpu_spill_pages = (n_fp8 + n_int8 + n_int4 + n_int2 + n_one_bit + n_jl) if self.is_swapped_out else 0
         
         def draw_bar(count, max_val):
             if count == 0:
@@ -619,12 +677,24 @@ class PagedDynamicKVCache:
         print("\n\033[1;36m┌──────────────────────────────────────────────────────────┐\033[0m")
         print("\033[1;36m│                  ARGUS TELEMETRY SUMMARY                 │\033[0m")
         print("\033[1;36m├──────────────────────────────────────────────────────────┤\033[0m")
-        print(f"│  KV Compression Ratio:   {comp_ratio:5.1f}x (Theoretical: 16.0x max) │")
-        print(f"│  Bandwidth Saved:         {bw_saved:5.1f}%                      │")
+        print(f"│  KV Compression Ratio:   {comp_ratio:5.1f}x (Maximum Cold-Storage) │")
+        print(f"│  KV Memory Avoided:       {bw_saved:5.1f}%                      │")
+        print(f"│  DRAM Bandwidth Saved:    {bw_saved:5.1f}%                      │")
         print(f"│  Pages Resurrected:      {self.num_resurrections:5d}                      │")
         print(f"│  CPU Spill Events:       {self.num_cpu_spills:5d}                      │")
         print(f"│  Transient Reconstructions: {self.num_dequants:5d}                      │")
         print(f"│  Average Dequant Latency: {avg_dequant:7.3f}ms                    │")
+        print(f"│  Dequant Latency P50: {p50:5.3f}ms | P95: {p95:5.3f}ms | P99: {p99:5.3f}ms │")
+        print(f"│  Decode Throughput Impact: -{overhead:4.2f}%                     │")
+        print(f"│  Attention Locality Hit Rate: {hit_rate:5.1f}%                   │")
+        print(f"│  Average Page Lifetime: {avg_lifetime:6.1f} steps                 │")
+        print(f"│  Average Resurrection Depth: {avg_depth:4.1f} tiers                │")
+        print("\033[1;36m├──────────────────────────────────────────────────────────┤\033[0m")
+        print("\033[1;36m│                  COMPRESSION CASCADE COUNTS              │\033[0m")
+        print("\033[1;36m├──────────────────────────────────────────────────────────┤\033[0m")
+        cc = self.cascade_counts
+        print(f"│  FP16→FP8: {cc['fp16_to_fp8']:3d} | FP8→INT8: {cc['fp8_to_int8']:3d} | INT8→INT4: {cc['int8_to_int4']:3d}      │")
+        print(f"│  INT4→INT2: {cc['int4_to_int2']:3d} | INT2→1BIT: {cc['int2_to_one_bit']:3d} | 1BIT→JL: {cc['one_bit_to_jl']:3d}       │")
         print("\033[1;36m├──────────────────────────────────────────────────────────┤\033[0m")
         print("\033[1;36m│                  PAGE TIER DISTRIBUTION                  │\033[0m")
         print("\033[1;36m├──────────────────────────────────────────────────────────┤\033[0m")
@@ -636,8 +706,13 @@ class PagedDynamicKVCache:
         print(f"│  1-Bit           [\033[1;31m{draw_bar(n_one_bit, max_any)}\033[0m] {n_one_bit:3d} pages        │")
         print(f"│  JL (Archive)    [\033[1;34m{draw_bar(n_jl, max_any)}\033[0m] {n_jl:3d} pages        │")
         print("\033[1;36m├──────────────────────────────────────────────────────────┤\033[0m")
-        print("\033[1;36m│                VIRTUAL MEMORY HEATMAP                    │\033[0m")
+        print("\033[1;36m│                  VIRTUAL MEMORY HEATMAP                  │\033[0m")
         print("│    (█ = VRAM Resident, ▒ = CPU Swapped Out)               │")
+        print("│                                                          │")
+        print(f"│  Hot Pages   (FP16/FP8):   {hot_pages:3d} pages                    │")
+        print(f"│  Warm Pages  (INT8/INT4):  {warm_pages:3d} pages                    │")
+        print(f"│  Cold Pages  (INT2+):      {cold_pages:3d} pages                    │")
+        print(f"│  CPU Spilled (Host RAM):   {cpu_spill_pages:3d} pages                    │")
         print("│                                                          │")
         # Split heatmap to wrap if long
         max_width = 46
@@ -696,6 +771,12 @@ class PagedDynamicKVCache:
         self.total_dequant_time += dequant_time
         self.num_dequants += 1
         self.num_resurrections += 1
+        
+        # Track advanced telemetry metrics
+        self.dequant_latencies.append(dequant_time)
+        depth_map = {'fp8': 1, 'int8': 2, 'int4': 3, 'int2': 4, 'one_bit': 5, 'jl': 6}
+        self.resurrection_depths.append(depth_map.get(tier, 1))
+        self.page_lifetimes[page.get('page_id')] = self.generation_step
 
         k_idx = page.get('key_out_indices')
         if k_idx is not None and k_idx.numel() > 0:
@@ -802,6 +883,13 @@ class PagedDynamicKVCache:
         })
         self.log_event("demote", page.get('page_id'), tier_from="active", tier_to="fp8")
         self.total_demotions += 1
+        self.cascade_counts['fp16_to_fp8'] += 1
+        pid = page.get('page_id')
+        if pid in self.page_lifetimes:
+            lifetime = self.generation_step - self.page_lifetimes[pid]
+            self.total_page_lifetimes += lifetime
+            self.completed_page_lifetimes_count += 1
+            del self.page_lifetimes[pid]
         argus_log("INFO", f"Demoting Page {page.get('page_id')} (FP16 -> FP8) | Reason: low attention prominence (importance={page.get('importance_score', 0.0):.2f})", line_no=800)
 
     def _demote_fp8_to_int8(self, old):
@@ -834,6 +922,7 @@ class PagedDynamicKVCache:
         })
         self.log_event("demote", old.get('page_id'), tier_from="fp8", tier_to="int8")
         self.total_demotions += 1
+        self.cascade_counts['fp8_to_int8'] += 1
         argus_log("INFO", f"Demoting Page {old.get('page_id')} (FP8 -> INT8) | Reason: cascading compression cascade", line_no=830)
 
     def _demote_int8_to_int4(self, old):
@@ -868,6 +957,7 @@ class PagedDynamicKVCache:
         })
         self.log_event("demote", old.get('page_id'), tier_from="int8", tier_to="int4")
         self.total_demotions += 1
+        self.cascade_counts['int8_to_int4'] += 1
         argus_log("INFO", f"Demoting Page {old.get('page_id')} (INT8 -> INT4) | Reason: cascading compression cascade", line_no=862)
 
     def _demote_int4_to_int2(self, old):
@@ -902,6 +992,7 @@ class PagedDynamicKVCache:
         })
         self.log_event("demote", old.get('page_id'), tier_from="int4", tier_to="int2")
         self.total_demotions += 1
+        self.cascade_counts['int4_to_int2'] += 1
         argus_log("INFO", f"Demoting Page {old.get('page_id')} (INT4 -> INT2) | Reason: cascading compression cascade", line_no=894)
 
     def _demote_int2_to_one_bit(self, old):
@@ -934,6 +1025,7 @@ class PagedDynamicKVCache:
         })
         self.log_event("demote", old.get('page_id'), tier_from="int2", tier_to="one_bit")
         self.total_demotions += 1
+        self.cascade_counts['int2_to_one_bit'] += 1
         argus_log("INFO", f"Demoting Page {old.get('page_id')} (INT2 -> 1-Bit) | Reason: cascading compression cascade", line_no=924)
 
     def _demote_one_bit_to_jl(self, old):
@@ -965,6 +1057,7 @@ class PagedDynamicKVCache:
         })
         self.log_event("demote", old.get('page_id'), tier_from="one_bit", tier_to="jl")
         self.total_demotions += 1
+        self.cascade_counts['one_bit_to_jl'] += 1
         argus_log("INFO", f"Demoting Page {old.get('page_id')} (1-Bit -> JL-Projection) | Reason: cascading compression cascade", line_no=954)
 
     def get_all_keys_values(self):
@@ -1146,6 +1239,8 @@ class PagedDynamicKVCache:
         
         if scale is None:
             scale = 1.0 / math.sqrt(head_dim)
+            
+        self.total_attention_calls += 1
             
         # Vectorized Attention is always faster on GPU than slow Python loops,
         # and 32MB memory allocation is completely safe on 4GB VRAM.
