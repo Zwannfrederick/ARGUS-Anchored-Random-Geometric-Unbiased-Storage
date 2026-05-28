@@ -1,6 +1,6 @@
 Metadata-Version: 2.4
 Name: argus_cache
-Version: 0.1.6
+Version: 0.1.7
 Summary: ARGUS: Anchored Random Geometric Unbiased Storage - Advanced Dynamic Quantized KV Cache
 Author: Muhammed Emin Çelik
 License: Apache-2.0
@@ -69,7 +69,7 @@ FP16 Active Pool (Hot)
        INT2 (4-way Bit-Packed)
         │
         ▼
-      1-Bit (8-way Sign-Packed)
+      1-Bit (8-way Sign-Packed + FP16 Outliers)
         │
         ▼
  JL Archive (Deep Orthogonal Projection)
@@ -241,10 +241,27 @@ print(tokenizer.decode(outputs[0], skip_special_tokens=True))
 
 ARGUS is an active research project. Please note the following constraints:
 
+> [!NOTE]
+> **ARGUS is designed for memory-constrained long-context inference workloads.**  
+> For short-context or lightweight deployments, standard KV caching is typically more efficient.
+
 *   **Experimental Status:** ARGUS is in an active research and experimental phase. The codebase is under rapid development.
 *   **Lossy Archival Tiers:** Aggressive cold-storage tiers (such as 1-Bit quantization and Johnson-Lindenstrauss orthogonal sequence projection) are lossy and may reduce tensor fidelity, although designed to minimize semantic impact.
 *   **Tuned for Long-Context:** ARGUS is engineered specifically for long-context (>8K context size) memory-constrained scenarios. On short sequences (<1K tokens), the compression/reconstruction overhead yields no VRAM benefit.
+*   **Sequence-Length & Triton Warm-up Cost:** Custom Triton kernels incur a tiny one-time JIT compile startup latency on the first forward pass. For extremely latency-sensitive short-context APIs, standard raw attention is highly recommended.
 *   **Predictor Not Production-Ready:** The predictive attention paging module is currently highly experimental and not ready for stable deployment.
+
+---
+
+## 💻 GPU Recommendation Table
+
+To maximize throughput and prevent execution bottlenecks under strict VRAM caps, use these recommended configuration profiles:
+
+| GPU Category | Optimal VRAM Budget | Optimal Page Size | Active Pools (FP16/FP8) |
+| :--- | :--- | :--- | :--- |
+| **4GB Mobile / Edge** | 0.8 GB - 1.2 GB | 512 - 1024 tokens | 1-2 pages |
+| **8GB - 16GB Consumer** | 2.0 GB - 4.0 GB | 2048 tokens | 2-4 pages |
+| **Enterprise (24GB+)** | 8.0 GB - 16.0 GB | 4096 tokens | 4-8 pages |
 
 ---
 

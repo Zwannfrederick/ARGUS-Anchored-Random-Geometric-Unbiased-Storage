@@ -11,6 +11,7 @@ __pycache__/
 .pytest_cache/
 .system_generated/
 .gemini/
+tests/*.jsonl
 
 # Packaging
 dist/

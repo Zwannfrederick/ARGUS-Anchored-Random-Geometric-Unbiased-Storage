@@ -219,6 +219,10 @@ class PagedDynamicKVCache:
             'int2_to_one_bit': 0,
             'one_bit_to_jl': 0
         }
+        
+        # Locality Predictor State
+        self.page_access_ema = {}
+        self.page_access_history = {}
 
     def get_jl_projection_matrix(self, device, dtype):
         """
@@ -235,6 +239,7 @@ class PagedDynamicKVCache:
         return self.w_proj
 
     def log_event(self, event_type, page_id, **kwargs):
+        import json
         event = {
             'event': event_type,
             'page_id': page_id,
@@ -245,6 +250,15 @@ class PagedDynamicKVCache:
         if not hasattr(self, 'event_log'):
             self.event_log = []
         self.event_log.append(event)
+        
+        # Real-time structured lifecycle tracing (ignored by git via tests/*.jsonl)
+        try:
+            import os
+            os.makedirs("tests", exist_ok=True)
+            with open("tests/argus_attention_trace.jsonl", "a") as f:
+                f.write(json.dumps(event) + "\n")
+        except Exception:
+            pass
 
     @property
     def k_buffer(self):
@@ -440,7 +454,43 @@ class PagedDynamicKVCache:
         recency = 1.0 / (1.0 + float(self.generation_step - last_step))
         entropy = page.get('entropy', 0.0)
         
-        score = alpha * attention_sum + beta * recency + gamma * entropy
+        # --- Locality Predictor ---
+        page_id = page.get('page_id')
+        accessed_now = 1.0 if (self.generation_step == last_step) else 0.0
+        prev_ema = self.page_access_ema.get(page_id, 0.0)
+        
+        # EMA alpha coefficient = 0.15 for temporal access decay tracking
+        ema = 0.15 * accessed_now + 0.85 * prev_ema
+        self.page_access_ema[page_id] = ema
+        
+        # Stride prediction: check if page accesses happen in uniform step strides
+        if page_id not in self.page_access_history:
+            self.page_access_history[page_id] = []
+        if accessed_now > 0.0 and (not self.page_access_history[page_id] or self.page_access_history[page_id][-1] != self.generation_step):
+            self.page_access_history[page_id].append(self.generation_step)
+            if len(self.page_access_history[page_id]) > 5:
+                self.page_access_history[page_id].pop(0)
+                
+        stride_bonus = 0.0
+        history = self.page_access_history.get(page_id, [])
+        if len(history) >= 3:
+            strides = [history[i] - history[i-1] for i in range(1, len(history))]
+            # If uniform sequence access strides exist, predict next access step
+            if len(set(strides)) == 1:
+                next_predicted = history[-1] + strides[0]
+                if abs(next_predicted - self.generation_step) <= 2:
+                    stride_bonus = 0.8  # Strong future reuse prediction bonus
+                    
+        # --- Adaptive Entropy-Aware Policy ---
+        # Highly cognitive, outlier-heavy pages get a dynamic scaling factor to stay warm longer
+        # Boilerplate/repetitive low-entropy pages get scaled down for rapid cascading compression
+        entropy_factor = 1.0
+        if entropy > 10.0:
+            entropy_factor = 1.3
+        elif entropy < 5.0:
+            entropy_factor = 0.6
+            
+        score = (alpha * attention_sum + beta * recency + gamma * (entropy * entropy_factor)) + (0.5 * ema) + stride_bonus
         page['importance_score'] = score
         return score
 

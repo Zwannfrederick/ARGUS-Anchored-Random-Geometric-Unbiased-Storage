@@ -1,0 +1,113 @@
+{
+    "preset": "consumer-gpu-4gb",
+    "timestamp": 1779975650.9827514,
+    "total_duration_sec": 2.0662453174591064,
+    "compression_ratio": 1.87,
+    "vram_avoided_percent": 46.6,
+    "p50_dequant_latency_ms": 183.943,
+    "p95_dequant_latency_ms": 209.218,
+    "p99_dequant_latency_ms": 209.218,
+    "steps_simulated": 10,
+    "metrics_over_steps": [
+        {
+            "step": 1,
+            "step_duration_ms": 23.446321487426758,
+            "dequant_latency_ms": 0.0,
+            "active_pages": 0,
+            "fp8_pages": 0,
+            "one_bit_pages": 0,
+            "jl_pages": 0,
+            "is_swapped_out": false
+        },
+        {
+            "step": 2,
+            "step_duration_ms": 161.6513729095459,
+            "dequant_latency_ms": 0.0,
+            "active_pages": 1,
+            "fp8_pages": 0,
+            "one_bit_pages": 0,
+            "jl_pages": 0,
+            "is_swapped_out": false
+        },
+        {
+            "step": 3,
+            "step_duration_ms": 0.5915164947509766,
+            "dequant_latency_ms": 0.0,
+            "active_pages": 2,
+            "fp8_pages": 0,
+            "one_bit_pages": 0,
+            "jl_pages": 0,
+            "is_swapped_out": false
+        },
+        {
+            "step": 4,
+            "step_duration_ms": 149.05714988708496,
+            "dequant_latency_ms": 183.94267984578838,
+            "active_pages": 2,
+            "fp8_pages": 1,
+            "one_bit_pages": 0,
+            "jl_pages": 0,
+            "is_swapped_out": false
+        },
+        {
+            "step": 5,
+            "step_duration_ms": 1.7614364624023438,
+            "dequant_latency_ms": 122.50107552226669,
+            "active_pages": 2,
+            "fp8_pages": 2,
+            "one_bit_pages": 0,
+            "jl_pages": 0,
+            "is_swapped_out": false
+        },
+        {
+            "step": 6,
+            "step_duration_ms": 1.9631385803222656,
+            "dequant_latency_ms": 147.50293183691193,
+            "active_pages": 2,
+            "fp8_pages": 2,
+            "one_bit_pages": 0,
+            "jl_pages": 0,
+            "is_swapped_out": false
+        },
+        {
+            "step": 7,
+            "step_duration_ms": 1.5125274658203125,
+            "dequant_latency_ms": 142.32107381488225,
+            "active_pages": 2,
+            "fp8_pages": 2,
+            "one_bit_pages": 0,
+            "jl_pages": 0,
+            "is_swapped_out": false
+        },
+        {
+            "step": 8,
+            "step_duration_ms": 1578.6495208740234,
+            "dequant_latency_ms": 193.64712141640123,
+            "active_pages": 2,
+            "fp8_pages": 2,
+            "one_bit_pages": 0,
+            "jl_pages": 0,
+            "is_swapped_out": false
+        },
+        {
+            "step": 9,
+            "step_duration_ms": 2.4094581604003906,
+            "dequant_latency_ms": 187.66994874229115,
+            "active_pages": 2,
+            "fp8_pages": 2,
+            "one_bit_pages": 0,
+            "jl_pages": 0,
+            "is_swapped_out": false
+        },
+        {
+            "step": 10,
+            "step_duration_ms": 13.700485229492188,
+            "dequant_latency_ms": 209.21795677048453,
+            "active_pages": 2,
+            "fp8_pages": 2,
+            "one_bit_pages": 0,
+            "jl_pages": 0,
+            "is_swapped_out": false
+        }
+    ]
+}
