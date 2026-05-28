@@ -109,8 +109,8 @@ Below are the evaluations conducted on downstream long-context behaviors and att
 | :--- | :--- | :--- | :--- |
 | Passkey Retrieval (16K Context) | 100% | 100% | Passed |
 | Repetition Loop Stability | Stable | Stable | Passed |
-| Attention Reconstruction (Cosine Sim) | Baseline | 100.00% | Passed |
-| Downstream Perplexity Delta ($\Delta$) | Baseline | < +0.3 | Estimated |
+| Attention Reconstruction (Cosine Sim) | Baseline | ~99.5% cosine similarity retention | Passed |
+| Downstream Perplexity Delta ($\Delta$) | Baseline | — | Not yet fully evaluated |
 
 #### 2. Cold-Archive Reconstruction Fidelity Curve
 | Context Horizon | Relative L2 Error | Cold-Archive Reconstruction Fidelity | Cognitive Quality Group |
@@ -298,7 +298,7 @@ ARGUS is an active research project. Please note the following constraints:
 > For short-context or lightweight deployments, standard KV caching is typically more efficient.
 
 *   **Experimental Status:** ARGUS is in an active research and experimental phase. The codebase is under rapid development.
-*   **Lossy Archival Tiers:** Aggressive cold-storage tiers (such as 1-Bit quantization and Johnson-Lindenstrauss orthogonal sequence projection) are lossy and may reduce tensor fidelity. Note that 1-bit archival tiers are intended only for deeply cold inactive pages with transient reconstruction before reuse; they are not used directly for attention computation.
+*   **Lossy Archival Tiers:** Aggressive cold-storage tiers (such as 1-Bit quantization and Johnson-Lindenstrauss orthogonal sequence projection) are lossy and may reduce tensor fidelity. 1-bit archival tiers are intended only for deeply inactive pages where approximate reconstruction is acceptable under aggressive memory-pressure scenarios; they are not used directly for attention computation.
 *   **Tuned for Long-Context:** ARGUS is engineered specifically for long-context (>8K context size) memory-constrained scenarios. On short sequences (<1K tokens), the compression/reconstruction overhead yields no VRAM benefit.
 *   **Sequence-Length & Triton Warm-up Cost:** Custom Triton kernels incur a tiny one-time JIT compile startup latency on the first forward pass. For extremely latency-sensitive short-context APIs, standard raw attention is highly recommended.
 *   **Predictive Paging Disabled by Default:** The predictive attention paging module (Locality Predictor) is currently disabled by default, highly experimental, and considered early-stage research infrastructure. It is not recommended for production setups.
