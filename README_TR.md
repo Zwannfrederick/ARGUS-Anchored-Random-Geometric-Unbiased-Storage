@@ -105,13 +105,13 @@ Sıkıştırma katmanları altında anlama kalitesini, kapasite limitlerini ve a
 #### 2. Soğuk Arşiv Yeniden Yapılandırma Sadakati Eğrisi
 | Bağlam Uzunluğu | Relative L2 Error | Soğuk Arşiv Yeniden Yapılandırma Sadakati (Reconstruction Fidelity) | Bilişsel Kalite Grubu |
 | :--- | :--- | :--- | :--- |
-| **2,048 jeton** | 0.0000 | 100.00% | **Kayıpsıza Yakın 🏆** |
-| **4,096 jeton** | 0.0002 | %99.99 | **Kayıpsıza Yakın 🏆** |
-| **8,192 jeton** | 0.0012 | %99.95 | **Kayıpsıza Yakın 🏆** |
-| **16,384 jeton** | 0.0035 | %99.85¹ | **Kayıpsıza Yakın 🏆** (Yüksek Sadakatli Laplacian-Regularized JL Rekonstrüksiyonu) |
+| **2,048 jeton** | 0.0000 | 100.00% | **Yüksek Sadakatli Yeniden Yapılandırma 🏆** |
+| **4,096 jeton** | 0.0002 | %99.99 | **Yüksek Sadakatli Yeniden Yapılandırma 🏆** |
+| **8,192 jeton** | 0.0012 | %99.95 | **Yüksek Sadakatli Yeniden Yapılandırma 🏆** |
+| **16,384 jeton** | 0.0035 | %99.85¹ | **Yüksek Sadakatli Yeniden Yapılandırma 🏆** (Kayıpsıza Yakın Laplacian-Regularized JL Rekonstrüksiyonu) |
 
 > [!NOTE]
-> **Soğuk Arşiv Yeniden Yapılandırma Sadakati Açıklaması (Matematiksel Devrim):**
+> **Soğuk Arşiv Yeniden Yapılandırma Sadakati Açıklaması (Laplacian-Regularized Reconstruction Yaklaşımı):**
 > ¹ Tablodaki **%99.85** değeri, **Laplacian-Regularized Smooth Reconstruction** kullanarak elde ettiğimiz **neredeyse tamamen kayıpsız yeniden yapılandırma sadakatini** temsil eder.
 > * **JL'in Zorluğu:** Standart Johnson-Lindenstrauss (JL) rastgele projeksiyonu, transpoz/pseudo-inverse ($W^T Y$) gibi pürüzsüzlüğü göz ardı eden klasik yöntemlerle geri açıldığında matematiksel olarak kayıplıdır.
 > * **Laplacian Çözümü:** KV Cache verilerinin dizi boyutu boyunca sürekliliğini (pürüzsüzlüğünü) bildiğimiz için ölçüm kısıtlarını sağlayan en pürüzsüz diziyi çözeriz:
@@ -129,18 +129,24 @@ Sıkı VRAM limitleri altında standart paged cache hızla çökerken (OOM), ARG
 
 Maksimum tekrarlanabilirlik ve akademik dürüstlüğü garanti etmek adına, tüm değerlendirme metrikleri ve kapasite eğrileri aşağıdaki standartlaştırılmış test yapılandırması altında ölçülmüştür:
 
-*   **Model Özellikleri:** `Qwen/Qwen2.5-1.5B-Instruct` (Tam Revizyon: `5d8d0d624a98402db26dfa76cb96a1a1f337fa43`)
-*   **Prompt Yapılandırması:** Sıralı bağlam dolgusu yapan özel sentetik prompt şablonu, deterministik tohumlama (`--seed 42`), batch size = 1, generation length = 1 jeton.
-*   **Donanım Yapısı:** Tek Mobil Dizüstü GPU (4GB VRAM'li NVIDIA GeForce RTX 3050 Ti Laptop GPU), GPU Sürücü sürümü: `535.183.01`, CUDA Toolkit sürümü: `12.2`.
-*   **Yazılım Yığını:** PyTorch `2.12.0`, Triton `3.7.0`, Transformers `5.9.0`, CUDA Graph Capture: `Devre Dışı` (önceden bellek ayırma yan etkilerini önlemek amacıyla).
-*   **Ölçüm Protokolü:** CUDA kernel'larını kararlı hale getirmek için warmup adım sayısı = 5, tepe VRAM tüketimi doğrudan `torch.cuda.max_memory_allocated()` ile ölçülmüş ve `nvidia-smi` sorgu döngüleriyle doğrulanmıştır.
+*   **GPU Donanımı:** NVIDIA GeForce RTX 3050 Ti Laptop GPU (4GB VRAM)
+*   **CUDA Sürümü:** 12.2
+*   **Triton Sürümü:** 3.7.0
+*   **Batch Size (Grup Boyutu):** 1
+*   **Rastgele Tohumlar (Random Seeds):** Sabitlenmiş (deterministik tohum `--seed 42`)
+*   **Prompt Türü:** Sentetik uzun bağlamlı erişim (synthetic long-context retrieval) şablonu
+*   **Warmup Runs (Isınma Adımları):** 5 adım (CUDA kernel'larını derlemek ve kararlı hale getirmek için)
+*   **Decode Uzunluğu:** 1 jeton (token)
+*   **KV Sıkıştırma (KV Compression):** Etkin (Yes)
+*   **Öngörülü Ön-Getirme (Predictive Paging):** Devre Dışı (Disabled)
+*   **VRAM Ölçüm Yöntemi:** `torch.cuda.max_memory_allocated()` ile tepe VRAM değerinin doğrudan sorgulanması ve `nvidia-smi` aktif sorgu döngüleriyle çapraz doğrulanması
 
 ### 💡 Gerçek Senaryo Analizi: Dizüstü GPU'larında (RTX 3050 Ti, 4GB VRAM) Qwen2.5-1.5B-Instruct Kullanımı
 
 Pek çok geliştirici **Qwen2.5-1.5B-Instruct** modelini bütçe dostu dizüstü ekran kartlarında (4GB VRAM'li RTX 3050 Ti gibi) çalıştırmak ister.
 *   **Orijinal vLLM / HuggingFace:** Model ağırlıklarının kendisi doğrudan **3.0 GB** yer kaplar; bu da KV önbelleği ve aktif hesaplamalar için geriye sadece **1.0 GB** gibi çok dar bir VRAM alanı bırakır. Sohbet geçmişi veya döküman bağlamı **4K - 8K jetona** ulaştığında standart KV önbelleği bu sınırı anında aşar, sistemi bellek yetersizliğiyle (OOM) çökerterek sohbeti **neredeyse imkansız** kılar.
 *   **ARGUS Çalışma Zamanı (Runtime):** KV önbelleğini dinamik olarak sıkıştırıp derin arşivleri Host DRAM'e aktararak, **32K bağlam uzunluğunda bile KV önbellek boyutunu 0.8 GB'ın altında tutar**!¹
-*   **Sonuç:** 4GB dizüstü ekran kartınızda tamamen kararlı, kesintisiz ve uzun bağlamlı sohbetlerin keyfini çıkarırsınız. ARGUS, **%98.1 zamansal attention lokalitesi yeniden kullanım verimliliği** sunarak bellek tahsisi kaynaklı OOM çökmelerini tamamen ortadan kaldırır.
+*   **Sonuç:** 4GB dizüstü ekran kartınızda tamamen kararlı, kesintisiz ve uzun bağlamlı sohbetlerin keyfini çıkarırsınız. ARGUS, **%98.1 zamansal attention lokalitesi yeniden kullanım oranı** sunarak bellek tahsisi kaynaklı OOM çökmelerini tamamen ortadan kaldırır.
 
 ¹ *Kayıplı derin arşivleme (lossy deep-storage) etkinleştirilmiş olarak, agresif soğuk katman arşiv koşulları altında ölçülmüştür.*
 

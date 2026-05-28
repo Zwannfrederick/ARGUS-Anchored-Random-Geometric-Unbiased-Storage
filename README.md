@@ -105,18 +105,18 @@ We ran the newly introduced standardized evaluation suites to measure exact retr
 #### 2. Cold-Archive Reconstruction Fidelity Curve
 | Context Horizon | Relative L2 Error | Cold-Archive Reconstruction Fidelity | Cognitive Quality Group |
 | :--- | :--- | :--- | :--- |
-| **2,048 tokens** | 0.0000 | 100.00% | **Near-Lossless 🏆** |
-| **4,096 tokens** | 0.0002 | 99.99% | **Near-Lossless 🏆** |
-| **8,192 tokens** | 0.0012 | 99.95% | **Near-Lossless 🏆** |
-| **16,384 tokens** | 0.0035 | 99.85%¹ | **Near-Lossless 🏆** (High-Fidelity Laplacian-Regularized JL Reconstruction) |
+| **2,048 tokens** | 0.0000 | 100.00% | **High-Fidelity Reconstruction 🏆** |
+| **4,096 tokens** | 0.0002 | 99.99% | **High-Fidelity Reconstruction 🏆** |
+| **8,192 tokens** | 0.0012 | 99.95% | **High-Fidelity Reconstruction 🏆** |
+| **16,384 tokens** | 0.0035 | 99.85%¹ | **High-Fidelity Reconstruction 🏆** (Near-Lossless Laplacian-Regularized JL Reconstruction) |
 
 > [!NOTE]
-> **Cold-Archive Reconstruction Fidelity Explanation (Mathematical Breakthrough):**
+> **Cold-Archive Reconstruction Fidelity Explanation (Laplacian-Regularized Reconstruction Approach):**
 > ¹ The **99.85%** metric represents the **effectively lossless reconstruction fidelity** achieved using our **Laplacian-Regularized Smooth Reconstruction**.
 > * **The Challenge of JL:** Standard Johnson-Lindenstrauss (JL) random projection is mathematically lossy when reconstructed using a simple transpose/pseudo-inverse ($W^T Y$), which assumes white noise and discards the sequence's structural details.
 > * **The Laplacian Breakthrough:** Since key/value attention states are highly continuous and smooth along the sequence dimension, we solve a regularized inverse problem:
 >   $$\min_{X} \| D_{diff} X \|_F^2 \quad \text{subject to} \quad W X = Y$$
->   This yields the closed-form reconstruction operator $R = A^{-1} W^T (W A^{-1} W^T)^{-1}$ (where $A = L + \alpha I$ is the regularized graph Laplacian), which preserves over **99.8% of the signal energy** while keeping the exact same 4x sequence compression ratio and avoiding iterative runtime reconstruction solves through precomputed cached operators.
+>   This yields the closed-form reconstruction operator $R = A^{-1} W^T (W A^{-1} W^T)^{-1}$ (where $A = L + \alpha I$ is the regularized graph Laplacian), which preserves over **99.8% of the signal energy** while keeping the exact same 4x sequence compression ratio with reconstruction operators precomputed and cached ahead-of-time.
 
 
 #### 3. Stable Context Scaling Under Fixed VRAM Budget
@@ -129,18 +129,24 @@ Under strict VRAM limits, standard exact caches OOM quickly while ARGUS leverage
 
 To ensure maximum reproducibility and academic honesty, all evaluation metrics and capacity curves were measured under the following standardized benchmarking configuration:
 
-*   **Model Specification:** `Qwen/Qwen2.5-1.5B-Instruct` (Exact Revision: `5d8d0d624a98402db26dfa76cb96a1a1f337fa43`)
-*   **Prompt Configuration:** Custom synthetic prompt template with sequential context fill, deterministic seeding (`--seed 42`), batch size = 1, generation length = 1 token.
-*   **Hardware Setup:** Single Mobile Laptop GPU with 4GB VRAM (NVIDIA GeForce RTX 3050 Ti Laptop GPU), GPU Driver version: `535.183.01`, CUDA Toolkit version: `12.2`.
-*   **Software Stack:** PyTorch `2.12.0`, Triton `3.7.0`, Transformers `5.9.0`, CUDA Graph Capture: `Disabled` (to prevent allocation pre-reservation side effects).
-*   **Measurement Protocol:** Warmup iteration count = 5 steps to stabilize CUDA kernels, peak VRAM measured directly via `torch.cuda.max_memory_allocated()`, verified via `nvidia-smi` query loops.
+*   **GPU Hardware:** NVIDIA GeForce RTX 3050 Ti Laptop GPU (4GB VRAM)
+*   **CUDA version:** 12.2
+*   **Triton version:** 3.7.0
+*   **Batch Size:** 1
+*   **Random Seeds:** Fixed (deterministic seed `--seed 42`)
+*   **Prompt Type:** Synthetic long-context retrieval template
+*   **Warmup Runs:** 5 steps (to compile and stabilize CUDA kernels)
+*   **Decode Length:** 1 token
+*   **KV Compression Enabled:** Yes
+*   **Predictive Paging:** Disabled
+*   **VRAM Measurement Method:** Direct query of peak VRAM using `torch.cuda.max_memory_allocated()`, cross-verified with `nvidia-smi` active query loops
 
 ### 💡 Real-World Case Study: Qwen2.5-1.5B-Instruct on a Laptop GPU (RTX 3050 Ti, 4GB VRAM)
 
 Many developers try to run **Qwen2.5-1.5B-Instruct** on budget laptop cards (like an RTX 3050 Ti with 4GB VRAM). 
 *   **Vanilla vLLM / HuggingFace:** The model weights themselves consume **3.0 GB**, leaving a tiny **1.0 GB** window for KV Cache and active activations. Once the conversation context grows to **4K - 8K tokens**, the KV Cache memory allocation easily exceeds the available headroom, triggering an instant Out-Of-Memory (OOM) crash. This makes extended chatting **nearly impossible**.
 *   **ARGUS-Enabled Runtime:** By dynamically compressing the KV Cache and spilling deep-archived pages to Host DRAM under memory pressure, the entire KV Cache footprint at **32K context is kept under 0.8 GB**!¹
-*   **The Result:** You get stable, seamless, long-context conversations on a 4GB Laptop GPU. ARGUS delivers **98.1% temporal attention locality reuse efficiency** and completely avoids the dreaded allocation OOMs.
+*   **The Result:** You get stable, seamless, long-context conversations on a 4GB Laptop GPU. ARGUS delivers **98.1% temporal attention locality reuse rate** and completely avoids the dreaded allocation OOMs.
 
 ¹ *Measured under aggressive cold-tier archival conditions with lossy deep-storage enabled.*
 
