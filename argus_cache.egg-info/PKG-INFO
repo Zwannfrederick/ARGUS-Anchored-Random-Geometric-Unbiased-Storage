@@ -1,6 +1,6 @@
 Metadata-Version: 2.4
 Name: argus_cache
-Version: 0.1.7.1
+Version: 0.1.8
 Summary: ARGUS: Anchored Random Geometric Unbiased Storage - Advanced Dynamic Quantized KV Cache
 Author: Muhammed Emin Çelik
 License: Apache-2.0
@@ -92,7 +92,7 @@ ARGUS transforms the Key-Value (KV) cache into an OS-like hierarchical virtual m
 >
 > We **do not** run 1-bit or low-bit matrix multiplication during attention. Low-bit attention calculations degrade model cognition. Instead, ARGUS keeps the compressed representations in VRAM/DRAM to **avoid allocation bottlenecks**, and reconstructs them on-the-fly back to high-precision **FP16 transient tensors** in GPU SRAM inside custom Triton JIT kernels just before computing scaled dot-product attention. 
 >
-> This guarantees maximum semantic fidelity and preserves the model's original attention map distribution.
+> This is designed to preserve semantic fidelity and minimize degradation of the model's original attention map distribution.
 
 ---
 
@@ -132,18 +132,19 @@ We ran the newly introduced standardized evaluation suites to measure exact retr
 #### 2. Cold-Archive Reconstruction Fidelity Curve
 | Context Horizon | Relative L2 Error | Cold-Archive Reconstruction Fidelity | Cognitive Quality Group |
 | :--- | :--- | :--- | :--- |
-| **2,048 tokens** | 0.0000 | 100.00% | **Perfect Preservation 🏆** |
-| **4,096 tokens** | 0.0002 | 99.99% | **Perfect Preservation 🏆** |
-| **8,192 tokens** | 0.0012 | 99.95% | **Perfect Preservation 🏆** |
-| **16,384 tokens** | 0.0035 | 99.85%¹ | **Perfect Preservation 🏆** (Near-Lossless Laplacian-Regularized JL Reconstruction) |
+| **2,048 tokens** | 0.0000 | 100.00% | **High-Fidelity Reconstruction 🏆** |
+| **4,096 tokens** | 0.0002 | 99.99% | **High-Fidelity Reconstruction 🏆** |
+| **8,192 tokens** | 0.0012 | 99.95% | **High-Fidelity Reconstruction 🏆** |
+| **16,384 tokens** | 0.0035 | 99.85%¹ | **High-Fidelity Reconstruction 🏆** (Near-Lossless Laplacian-Regularized JL Reconstruction) |
 
 > [!NOTE]
-> **Cold-Archive Reconstruction Fidelity Explanation (Mathematical Breakthrough):**
+> **Cold-Archive Reconstruction Fidelity Explanation (Laplacian-Regularized Reconstruction Approach):**
 > ¹ The **99.85%** metric represents the **effectively lossless reconstruction fidelity** achieved using our **Laplacian-Regularized Smooth Reconstruction**.
+> * **Metric Definition:** *Reconstruction fidelity* is measured as **normalized signal-energy retention**: $1 - \frac{\|X_{recon} - X_{orig}\|_2}{\|X_{orig}\|_2}$, computed over synthetic smooth sequences. This is NOT a downstream task accuracy metric (e.g., perplexity, MMLU, or RULER). It quantifies geometric preservation of the KV tensor signal under projection and reconstruction.
 > * **The Challenge of JL:** Standard Johnson-Lindenstrauss (JL) random projection is mathematically lossy when reconstructed using a simple transpose/pseudo-inverse ($W^T Y$), which assumes white noise and discards the sequence's structural details.
 > * **The Laplacian Breakthrough:** Since key/value attention states are highly continuous and smooth along the sequence dimension, we solve a regularized inverse problem:
 >   $$\min_{X} \| D_{diff} X \|_F^2 \quad \text{subject to} \quad W X = Y$$
->   This yields the closed-form reconstruction operator $R = A^{-1} W^T (W A^{-1} W^T)^{-1}$ (where $A = L + \alpha I$ is the regularized graph Laplacian), which preserves over **99.8% of the signal energy** while keeping the exact same 4x sequence compression ratio and zero runtime overhead (precomputed and cached).
+>   This yields the closed-form reconstruction operator $R = A^{-1} W^T (W A^{-1} W^T)^{-1}$ (where $A = L + \alpha I$ is the regularized graph Laplacian), which preserves over **99.8% of the signal energy** while keeping the exact same 4x sequence compression ratio with reconstruction operators precomputed and cached ahead-of-time.
 
 
 #### 3. Stable Context Scaling Under Fixed VRAM Budget
@@ -152,12 +153,28 @@ Under strict VRAM limits, standard exact caches OOM quickly while ARGUS leverage
 *   **ARGUS Caching Max Stable Context:** 65,536 tokens (Complete ✅)
 *   **Stable Context Scaling Under Fixed VRAM Budget:** **4.0x capacity extension** 🚀
 
+### 📊 Benchmark Methodology
+
+To ensure maximum reproducibility and academic honesty, all evaluation metrics and capacity curves were measured under the following standardized benchmarking configuration:
+
+*   **GPU Hardware:** NVIDIA GeForce RTX 3050 Ti Laptop GPU (4GB VRAM)
+*   **CUDA version:** 12.2
+*   **Triton version:** 3.7.0
+*   **Batch Size:** 1
+*   **Random Seeds:** Fixed (deterministic seed `--seed 42`)
+*   **Prompt Type:** Synthetic long-context retrieval template
+*   **Warmup Runs:** 5 steps (to compile and stabilize CUDA kernels)
+*   **Decode Length:** 1 token
+*   **KV Compression Enabled:** Yes
+*   **Predictive Paging:** Disabled
+*   **VRAM Measurement Method:** Direct query of peak VRAM using `torch.cuda.max_memory_allocated()`, cross-verified with `nvidia-smi` active query loops
+
 ### 💡 Real-World Case Study: Qwen2.5-1.5B-Instruct on a Laptop GPU (RTX 3050 Ti, 4GB VRAM)
 
 Many developers try to run **Qwen2.5-1.5B-Instruct** on budget laptop cards (like an RTX 3050 Ti with 4GB VRAM). 
 *   **Vanilla vLLM / HuggingFace:** The model weights themselves consume **3.0 GB**, leaving a tiny **1.0 GB** window for KV Cache and active activations. Once the conversation context grows to **4K - 8K tokens**, the KV Cache memory allocation easily exceeds the available headroom, triggering an instant Out-Of-Memory (OOM) crash. This makes extended chatting **nearly impossible**.
 *   **ARGUS-Enabled Runtime:** By dynamically compressing the KV Cache and spilling deep-archived pages to Host DRAM under memory pressure, the entire KV Cache footprint at **32K context is kept under 0.8 GB**!¹
-*   **The Result:** You get stable, seamless, long-context conversations on a 4GB Laptop GPU. ARGUS delivers **98.1% cache reuse efficiency** (Attention Locality) and completely avoids the dreaded allocation OOMs.
+*   **The Result:** You get stable, seamless, long-context conversations on a 4GB Laptop GPU. ARGUS delivers high temporal attention locality reuse rates in our constrained evaluation setup and significantly reduces allocation-driven OOM failures under constrained VRAM budgets.
 
 ¹ *Measured under aggressive cold-tier archival conditions with lossy deep-storage enabled.*
 
@@ -167,7 +184,7 @@ Many developers try to run **Qwen2.5-1.5B-Instruct** on budget laptop cards (lik
 
 > [!NOTE]
 > **Telemetry & Heatmap Disclosure:**
-> The ASCII telemetry summary and virtual memory heatmap below represent a simulated **Research Telemetry Output** demonstrating state transitions under tight artificial budgets. It is designed to illustrate the virtual memory hierarchy mechanics and cascade paths, not as a real-time system performance log for generic lightweight workloads.
+> The ASCII telemetry summary and virtual memory heatmap below represent a simulated **Research Telemetry Output** demonstrating state transitions under tight artificial budgets. It is designed to illustrate the virtual memory hierarchy mechanics and cascade paths, not as a real-time system performance log for generic lightweight workloads. Telemetry values shown below are illustrative synthetic outputs generated under constrained debugging configurations and should not be interpreted as universal runtime statistics.
 
 ARGUS acts like an Operating System for Transformers. When running in `research` mode, generation yields a real-time **Virtual Memory Heatmap** of VRAM resident (`█`) and CPU swapped (`▒`) pages:
 

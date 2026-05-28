@@ -1,0 +1,22 @@
+{
+    "benchmark": "Temporal Attention Locality Reuse Rate",
+    "parameters": {
+        "seed": 42,
+        "steps": 1024,
+        "page_size": 128
+    },
+    "results": {
+        "64": {
+            "average_page_reuse_rate": 0.9975669099756691,
+            "status": "Target Met (98%+) \u2705"
+        },
+        "128": {
+            "average_page_reuse_rate": 0.9973929236499068,
+            "status": "Target Met (98%+) \u2705"
+        },
+        "256": {
+            "average_page_reuse_rate": 0.9976097348978704,
+            "status": "Target Met (98%+) \u2705"
+        }
+    }
+}

@@ -65,7 +65,7 @@ ARGUS transforms the Key-Value (KV) cache into an OS-like hierarchical virtual m
 >
 > We **do not** run 1-bit or low-bit matrix multiplication during attention. Low-bit attention calculations degrade model cognition. Instead, ARGUS keeps the compressed representations in VRAM/DRAM to **avoid allocation bottlenecks**, and reconstructs them on-the-fly back to high-precision **FP16 transient tensors** in GPU SRAM inside custom Triton JIT kernels just before computing scaled dot-product attention. 
 >
-> This guarantees maximum semantic fidelity and preserves the model's original attention map distribution.
+> This is designed to preserve semantic fidelity and minimize degradation of the model's original attention map distribution.
 
 ---
 
@@ -105,18 +105,19 @@ We ran the newly introduced standardized evaluation suites to measure exact retr
 #### 2. Cold-Archive Reconstruction Fidelity Curve
 | Context Horizon | Relative L2 Error | Cold-Archive Reconstruction Fidelity | Cognitive Quality Group |
 | :--- | :--- | :--- | :--- |
-| **2,048 tokens** | 0.0000 | 100.00% | **High-Fidelity Reconstruction 🏆** |
-| **4,096 tokens** | 0.0002 | 99.99% | **High-Fidelity Reconstruction 🏆** |
-| **8,192 tokens** | 0.0012 | 99.95% | **High-Fidelity Reconstruction 🏆** |
-| **16,384 tokens** | 0.0035 | 99.85%¹ | **High-Fidelity Reconstruction 🏆** (Near-Lossless Laplacian-Regularized JL Reconstruction) |
+| **2,048 tokens** | 0.0054 | 99.46% | **High-Fidelity Reconstruction 🏆** |
+| **4,096 tokens** | 0.0051 | 99.49% | **High-Fidelity Reconstruction 🏆** |
+| **8,192 tokens** | 0.0056 | 99.44% | **High-Fidelity Reconstruction 🏆** |
+| **16,384 tokens** | 0.0053 | 99.47%¹ | **High-Fidelity Reconstruction 🏆** (Near-Lossless Laplacian-Regularized JL Reconstruction) |
 
 > [!NOTE]
 > **Cold-Archive Reconstruction Fidelity Explanation (Laplacian-Regularized Reconstruction Approach):**
-> ¹ The **99.85%** metric represents the **effectively lossless reconstruction fidelity** achieved using our **Laplacian-Regularized Smooth Reconstruction**.
+> ¹ The **99.47%** metric represents the **effectively lossless reconstruction fidelity** achieved using our **Laplacian-Regularized Smooth Reconstruction**.
+> * **Metric Definition:** *Reconstruction fidelity* is measured as **normalized signal-energy retention**: $1 - \frac{\|X_{recon} - X_{orig}\|_2}{\|X_{orig}\|_2}$, computed over synthetic smooth sequences. This is NOT a downstream task accuracy metric (e.g., perplexity, MMLU, or RULER). It quantifies geometric preservation of the KV tensor signal under projection and reconstruction.
 > * **The Challenge of JL:** Standard Johnson-Lindenstrauss (JL) random projection is mathematically lossy when reconstructed using a simple transpose/pseudo-inverse ($W^T Y$), which assumes white noise and discards the sequence's structural details.
 > * **The Laplacian Breakthrough:** Since key/value attention states are highly continuous and smooth along the sequence dimension, we solve a regularized inverse problem:
 >   $$\min_{X} \| D_{diff} X \|_F^2 \quad \text{subject to} \quad W X = Y$$
->   This yields the closed-form reconstruction operator $R = A^{-1} W^T (W A^{-1} W^T)^{-1}$ (where $A = L + \alpha I$ is the regularized graph Laplacian), which preserves over **99.8% of the signal energy** while keeping the exact same 4x sequence compression ratio with reconstruction operators precomputed and cached ahead-of-time.
+>   This yields the closed-form reconstruction operator $R = A^{-1} W^T (W A^{-1} W^T)^{-1}$ (where $A = L + \alpha I$ is the regularized graph Laplacian), which preserves over **99.4% of the signal energy** while keeping the exact same 4x sequence compression ratio with reconstruction operators precomputed and cached ahead-of-time.
 
 
 #### 3. Stable Context Scaling Under Fixed VRAM Budget
@@ -146,7 +147,7 @@ To ensure maximum reproducibility and academic honesty, all evaluation metrics a
 Many developers try to run **Qwen2.5-1.5B-Instruct** on budget laptop cards (like an RTX 3050 Ti with 4GB VRAM). 
 *   **Vanilla vLLM / HuggingFace:** The model weights themselves consume **3.0 GB**, leaving a tiny **1.0 GB** window for KV Cache and active activations. Once the conversation context grows to **4K - 8K tokens**, the KV Cache memory allocation easily exceeds the available headroom, triggering an instant Out-Of-Memory (OOM) crash. This makes extended chatting **nearly impossible**.
 *   **ARGUS-Enabled Runtime:** By dynamically compressing the KV Cache and spilling deep-archived pages to Host DRAM under memory pressure, the entire KV Cache footprint at **32K context is kept under 0.8 GB**!¹
-*   **The Result:** You get stable, seamless, long-context conversations on a 4GB Laptop GPU. ARGUS delivers **98.1% temporal attention locality reuse rate** and completely avoids the dreaded allocation OOMs.
+*   **The Result:** You get stable, seamless, long-context conversations on a 4GB Laptop GPU. ARGUS delivers high temporal attention locality reuse rates in our constrained evaluation setup and significantly reduces allocation-driven OOM failures under constrained VRAM budgets.
 
 ¹ *Measured under aggressive cold-tier archival conditions with lossy deep-storage enabled.*
 

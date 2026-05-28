@@ -335,7 +335,6 @@ def triton_unpack_1bit(packed: torch.Tensor, scales: torch.Tensor, seq_dim: int 
         b0 = packed & 0x01
         b1 = (packed >> 1) & 0x01
         b2 = (packed >> 2) & 0x01
-        b3 = (packed >> 4) & 0x01 # wait, 1-bit shifts: b3 is packed >> 3
         b3 = (packed >> 3) & 0x01
         b4 = (packed >> 4) & 0x01
         b5 = (packed >> 5) & 0x01

@@ -234,9 +234,11 @@ def quantize_to_jl_projection(tensor: torch.Tensor, ratio: int = 4):
     n = orig_shape[-2]
     m = n // ratio
     
-    raw_randn = torch.randn(n, m, dtype=torch.float32, device=tensor.device)
+    # Run QR decomposition on CPU to avoid CUDA OOM for large context lengths
+    cpu_device = torch.device("cpu")
+    raw_randn = torch.randn(n, m, dtype=torch.float32, device=cpu_device)
     q, _ = torch.linalg.qr(raw_randn)
-    w_proj = q.t().to(tensor.dtype) # [M, N]
+    w_proj = q.t().to(tensor.dtype).to(tensor.device) # [M, N]
     
     compressed = torch.matmul(w_proj, tensor)
     
@@ -256,26 +258,33 @@ def dequantize_from_jl_projection(compressed: torch.Tensor, w_proj: torch.Tensor
     dtype = compressed.dtype
     M, N = w_proj.shape
     
-    # Construct standard 1D Laplacian L [N, N]
-    L = torch.zeros(N, N, dtype=torch.float32, device=device)
-    for i in range(N):
-        L[i, i] = 2.0
-        if i > 0:
-            L[i, i-1] = -1.0
-        if i < N - 1:
-            L[i, i+1] = -1.0
+    # Run the operator precomputation steps on CPU to avoid CUDA OOM / fragmentation
+    cpu_device = torch.device("cpu")
+    
+    # Vectorized tridiagonal Laplacian formulation
+    L = torch.zeros(N, N, dtype=torch.float32, device=cpu_device)
+    L.diagonal().fill_(2.0)
+    L.diagonal(-1).fill_(-1.0)
+    L.diagonal(1).fill_(-1.0)
     L[0, 0] = 1.0
     L[N-1, N-1] = 1.0
     
     # Regularize: A = L + alpha * I
-    A = L + alpha * torch.eye(N, dtype=torch.float32, device=device)
-    A_inv = torch.inverse(A)
+    A = L + alpha * torch.eye(N, dtype=torch.float32, device=cpu_device)
     
-    W = w_proj.to(torch.float32)
-    W_A_inv = torch.matmul(W, A_inv)
-    W_A_inv_WT = torch.matmul(W_A_inv, W.t())
-    inv_term = torch.inverse(W_A_inv_WT)
+    W = w_proj.to(torch.float32).to(cpu_device)
     
-    recon = torch.matmul(torch.matmul(A_inv, W.t()), inv_term).to(dtype)
+    # Solves A * Y = W^T for Y (which is equivalent to Y = A_inv * W^T).
+    # Since A is tridiagonal, this solve is extremely fast and avoids computing N x N A_inv.
+    # W^T shape: [N, M], A shape: [N, N] -> Y shape: [N, M]
+    Y = torch.linalg.solve(A, W.t())
+    
+    # Compute W * Y -> shape: [M, M]
+    WY = torch.matmul(W, Y)
+    
+    # Compute inverse of WY -> shape: [M, M]. This is much smaller and faster (M = N // ratio).
+    inv_term = torch.inverse(WY)
+    
+    # recon = Y * inv_term -> shape: [N, M]
+    recon = torch.matmul(Y, inv_term).to(device).to(dtype)
     return torch.matmul(recon, compressed)
-

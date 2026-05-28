@@ -1,0 +1,35 @@
+{
+    "benchmark": "Reconstruction Fidelity Curve",
+    "parameters": {
+        "seed": 42,
+        "ratio": 4,
+        "alpha": 0.001,
+        "device": "cuda"
+    },
+    "results": {
+        "2048": {
+            "relative_l2_error": 0.0054431757889688015,
+            "signal_energy_retention": 0.9945568242110312,
+            "cosine_similarity": 0.9999920129776001,
+            "quality_tier": "High-Fidelity Reconstruction \ud83c\udfc6"
+        },
+        "4096": {
+            "relative_l2_error": 0.005112508777529001,
+            "signal_energy_retention": 0.994887491222471,
+            "cosine_similarity": 0.9999929666519165,
+            "quality_tier": "High-Fidelity Reconstruction \ud83c\udfc6"
+        },
+        "8192": {
+            "relative_l2_error": 0.005604281555861235,
+            "signal_energy_retention": 0.9943957184441388,
+            "cosine_similarity": 0.9999915361404419,
+            "quality_tier": "High-Fidelity Reconstruction \ud83c\udfc6"
+        },
+        "16384": {
+            "relative_l2_error": 0.005339962430298328,
+            "signal_energy_retention": 0.9946600375697017,
+            "cosine_similarity": 0.9999924898147583,
+            "quality_tier": "High-Fidelity Reconstruction \ud83c\udfc6"
+        }
+    }
+}
