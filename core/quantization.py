@@ -242,9 +242,40 @@ def quantize_to_jl_projection(tensor: torch.Tensor, ratio: int = 4):
     
     return compressed, w_proj
 
-def dequantize_from_jl_projection(compressed: torch.Tensor, w_proj: torch.Tensor):
+def dequantize_from_jl_projection(compressed: torch.Tensor, w_proj: torch.Tensor, recon_operator: torch.Tensor = None, alpha: float = 1e-3):
     """
-    De-project compressed memory back to original sequence length using pseudo-inverse (transpose).
+    De-project compressed memory back to original sequence length.
+    If recon_operator is provided, it uses it directly (highly recommended for performance).
+    Otherwise, it computes it dynamically.
     Reconstructs shape back to [..., N, D].
     """
-    return torch.matmul(w_proj.t(), compressed)
+    if recon_operator is not None:
+        return torch.matmul(recon_operator, compressed)
+        
+    device = compressed.device
+    dtype = compressed.dtype
+    M, N = w_proj.shape
+    
+    # Construct standard 1D Laplacian L [N, N]
+    L = torch.zeros(N, N, dtype=torch.float32, device=device)
+    for i in range(N):
+        L[i, i] = 2.0
+        if i > 0:
+            L[i, i-1] = -1.0
+        if i < N - 1:
+            L[i, i+1] = -1.0
+    L[0, 0] = 1.0
+    L[N-1, N-1] = 1.0
+    
+    # Regularize: A = L + alpha * I
+    A = L + alpha * torch.eye(N, dtype=torch.float32, device=device)
+    A_inv = torch.inverse(A)
+    
+    W = w_proj.to(torch.float32)
+    W_A_inv = torch.matmul(W, A_inv)
+    W_A_inv_WT = torch.matmul(W_A_inv, W.t())
+    inv_term = torch.inverse(W_A_inv_WT)
+    
+    recon = torch.matmul(torch.matmul(A_inv, W.t()), inv_term).to(dtype)
+    return torch.matmul(recon, compressed)
+

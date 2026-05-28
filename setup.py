@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="argus_cache",
-    version="0.1.7",
+    version="0.1.7.1",
     author="Muhammed Emin Çelik",
     description="ARGUS: Anchored Random Geometric Unbiased Storage - Advanced Dynamic Quantized KV Cache",
     long_description=open("README.md").read() if open("README.md") else "",

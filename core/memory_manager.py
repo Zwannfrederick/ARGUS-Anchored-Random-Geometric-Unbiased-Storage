@@ -238,6 +238,50 @@ class PagedDynamicKVCache:
             self.w_proj = q.t().to(dtype) # [M, N]
         return self.w_proj
 
+    def get_jl_reconstruction_operator(self, device, dtype, alpha=1e-3):
+        """
+        Precomputes and caches the smooth Laplacian-regularized reconstruction operator
+        associated with the current static JL projection matrix.
+        Shape: [page_size, page_size // 4]
+        """
+        if (not hasattr(self, '_jl_recon_operator') or self._jl_recon_operator is None or 
+            self._jl_recon_operator.device != device or self._jl_recon_operator.dtype != dtype):
+            
+            # Fetch the projection matrix w_proj [M, N]
+            w_proj = self.get_jl_projection_matrix(device, dtype)
+            M, N = w_proj.shape
+            
+            # Construct standard 1D Laplacian L [N, N]
+            L = torch.zeros(N, N, dtype=torch.float32, device=device)
+            for i in range(N):
+                L[i, i] = 2.0
+                if i > 0:
+                    L[i, i-1] = -1.0
+                if i < N - 1:
+                    L[i, i+1] = -1.0
+            L[0, 0] = 1.0
+            L[N-1, N-1] = 1.0
+            
+            # Regularize: A = L + alpha * I
+            A = L + alpha * torch.eye(N, dtype=torch.float32, device=device)
+            A_inv = torch.inverse(A)
+            
+            # Compute: W = w_proj
+            W = w_proj.to(torch.float32)
+            
+            # Compute: inv_term = (W @ A_inv @ WT)^-1
+            W_A_inv = torch.matmul(W, A_inv)
+            W_A_inv_WT = torch.matmul(W_A_inv, W.t())
+            inv_term = torch.inverse(W_A_inv_WT)
+            
+            # Compute final reconstruction operator: A_inv @ WT @ inv_term
+            recon_operator = torch.matmul(torch.matmul(A_inv, W.t()), inv_term)
+            
+            self._jl_recon_operator = recon_operator.to(dtype)
+            
+        return self._jl_recon_operator
+
+
     def log_event(self, event_type, page_id, **kwargs):
         import json
         event = {
@@ -810,9 +854,9 @@ class PagedDynamicKVCache:
             v = dequantize_from_1bit_packed(page['value_packed'], page['value_scales'], seq_dim=-2)
             self.one_bit_pages = [p for p in self.one_bit_pages if p is not page]
         elif tier == 'jl':
-            w_proj = self.get_jl_projection_matrix(page['key_proj'].device, page['key_proj'].dtype)
-            k = torch.matmul(w_proj.t(), page['key_proj'])
-            v = torch.matmul(w_proj.t(), page['value_proj'])
+            recon_op = self.get_jl_reconstruction_operator(page['key_proj'].device, page['key_proj'].dtype)
+            k = torch.matmul(recon_op, page['key_proj'])
+            v = torch.matmul(recon_op, page['value_proj'])
             self.jl_pages = [p for p in self.jl_pages if p is not page]
         else:
             return
@@ -1129,9 +1173,9 @@ class PagedDynamicKVCache:
                 self.prefetch_hits += 1
             else:
                 self.prefetch_misses += 1
-                w_proj = self.get_jl_projection_matrix(page['key_proj'].device, page['key_proj'].dtype)
-                k = torch.matmul(w_proj.t(), page['key_proj'])
-                v = torch.matmul(w_proj.t(), page['value_proj'])
+                recon_op = self.get_jl_reconstruction_operator(page['key_proj'].device, page['key_proj'].dtype)
+                k = torch.matmul(recon_op, page['key_proj'])
+                v = torch.matmul(recon_op, page['value_proj'])
             all_keys.append(k)
             all_values.append(v)
             
@@ -1349,9 +1393,9 @@ class PagedDynamicKVCache:
                         k = dequantize_from_1bit_packed(page['key_packed'], page['key_scales'], seq_dim=-2)
                         v = dequantize_from_1bit_packed(page['value_packed'], page['value_scales'], seq_dim=-2)
                     elif tier == 'jl':
-                        w_proj = self.get_jl_projection_matrix(page['key_proj'].device, page['key_proj'].dtype)
-                        k = torch.matmul(w_proj.t(), page['key_proj'])
-                        v = torch.matmul(w_proj.t(), page['value_proj'])
+                        recon_op = self.get_jl_reconstruction_operator(page['key_proj'].device, page['key_proj'].dtype)
+                        k = torch.matmul(recon_op, page['key_proj'])
+                        v = torch.matmul(recon_op, page['value_proj'])
                     else:
                         continue
                         
@@ -1557,9 +1601,9 @@ class PagedDynamicKVCache:
                             k = dequantize_from_1bit_packed(page['key_packed'], page['key_scales'], seq_dim=-2)
                             v = dequantize_from_1bit_packed(page['value_packed'], page['value_scales'], seq_dim=-2)
                         elif tier == 'jl':
-                            w_proj = self.get_jl_projection_matrix(page['key_proj'].device, page['key_proj'].dtype)
-                            k = torch.matmul(w_proj.t(), page['key_proj'])
-                            v = torch.matmul(w_proj.t(), page['value_proj'])
+                            recon_op = self.get_jl_reconstruction_operator(page['key_proj'].device, page['key_proj'].dtype)
+                            k = torch.matmul(recon_op, page['key_proj'])
+                            v = torch.matmul(recon_op, page['value_proj'])
                         else:
                              continue
                              
@@ -1592,9 +1636,9 @@ class PagedDynamicKVCache:
                         k = dequantize_from_1bit_packed(page['key_packed'], page['key_scales'], seq_dim=-2)
                         v = dequantize_from_1bit_packed(page['value_packed'], page['value_scales'], seq_dim=-2)
                     elif tier == 'jl':
-                        w_proj = self.get_jl_projection_matrix(page['key_proj'].device, page['key_proj'].dtype)
-                        k = torch.matmul(w_proj.t(), page['key_proj'])
-                        v = torch.matmul(w_proj.t(), page['value_proj'])
+                        recon_op = self.get_jl_reconstruction_operator(page['key_proj'].device, page['key_proj'].dtype)
+                        k = torch.matmul(recon_op, page['key_proj'])
+                        v = torch.matmul(recon_op, page['value_proj'])
                     else:
                          continue
                          

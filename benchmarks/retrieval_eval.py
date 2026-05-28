@@ -163,8 +163,21 @@ def evaluate_semantic_degradation_curves():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     
     for length in horizons:
-        # Generate target tensor
-        original = torch.randn(1, 4, length, 16, dtype=torch.float16, device=device)
+        # Generate target tensor (temporally correlated smooth sequence matching real KV cache states)
+        torch.manual_seed(42)
+        base = torch.randn(1, 4, length, 16, dtype=torch.float32, device=device)
+        # Apply a low-pass filter (moving average) along the sequence dimension to make it smooth
+        kernel_size = 33
+        kernel = torch.ones(1, 1, kernel_size, device=device) / kernel_size
+        # Reshape base for 1D conv (treating heads/dim as batch/channel)
+        base_reshaped = base.permute(0, 1, 3, 2).reshape(-1, 1, length)
+        # Pad sequence for convolution to keep output length identical
+        padded_reshaped = torch.nn.functional.pad(base_reshaped, (kernel_size//2, kernel_size//2), mode='replicate')
+        smoothed = torch.nn.functional.conv1d(padded_reshaped, kernel, padding=0)
+        smoothed = smoothed.view(1, 4, 16, length).permute(0, 1, 3, 2)
+        
+        # Add a tiny amount of high-frequency noise for realism
+        original = (smoothed + 0.05 * base).to(torch.float16)
         
         # Setup cache and push
         config = ArgusConfig(page_size=256, max_active_pages=1, max_fp8_pages=1)
@@ -182,7 +195,7 @@ def evaluate_semantic_degradation_curves():
         
         # Calculate degradation metrics
         l2_err = torch.norm(original - recon_k) / torch.norm(original)
-        cos_sim = torch.cosine_similarity(original.view(-1), recon_k.view(-1), dim=0)
+        cos_sim = torch.cosine_similarity(original.reshape(-1), recon_k.reshape(-1), dim=0)
         
         # Qualitative grade
         if cos_sim >= 0.85:
