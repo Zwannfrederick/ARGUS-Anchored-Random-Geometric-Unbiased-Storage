@@ -1,5 +1,6 @@
 from .models.attention_wrapper import PagedDynamicQuantizedCache
 from .core.memory_manager import PagedDynamicKVCache
+from .core.balloon_driver import ElasticCacheBalloonDriver
 
 def patch_model_with_argus(
     model, 
@@ -10,7 +11,8 @@ def patch_model_with_argus(
     max_int4_pages=2, 
     max_int2_pages=2,
     max_one_bit_pages=2,
-    sink_tokens=4
+    sink_tokens=4,
+    pipeline=None
 ):
     """
     Patches a HuggingFace causal language model to automatically use
@@ -29,7 +31,8 @@ def patch_model_with_argus(
                 max_int4_pages=max_int4_pages,
                 max_int2_pages=max_int2_pages,
                 max_one_bit_pages=max_one_bit_pages,
-                sink_tokens=sink_tokens
+                sink_tokens=sink_tokens,
+                pipeline=pipeline
             )
         return original_prep(*args, **kwargs)
 
@@ -39,5 +42,6 @@ def patch_model_with_argus(
 __all__ = [
     "PagedDynamicQuantizedCache",
     "PagedDynamicKVCache",
+    "ElasticCacheBalloonDriver",
     "patch_model_with_argus"
 ]

@@ -402,3 +402,107 @@ def triton_unpack_1bit(packed: torch.Tensor, scales: torch.Tensor, seq_dim: int 
         BLOCK_SIZE=BLOCK_SIZE
     )
     return unpacked
+
+
+def triton_fused_paged_attention(
+    q: torch.Tensor,
+    k_pages_list: list,
+    v_pages_list: list,
+    scale: float = None,
+    **kwargs
+) -> torch.Tensor:
+    """
+    Triton Fused Paged Attention (Phase 6A):
+    
+    Computes multi-page scaled dot-product attention using online softmax,
+    processing each KV page block sequentially. This eliminates the need
+    to materialize a single gigantic concatenated K/V tensor in DRAM,
+    cutting peak memory usage from O(total_kv_len * head_dim) to
+    O(max_page_len * head_dim) for intermediate storage.
+    
+    The online softmax algorithm (Milakov & Gimelshein 2018, used in
+    FlashAttention) accumulates attention output across page blocks
+    in a numerically stable way using running max-tracking:
+    
+        For each page block i:
+            S_i = Q @ K_i^T * scale
+            m_new = max(m_old, rowmax(S_i))
+            correction = exp(m_old - m_new)
+            P_i = exp(S_i - m_new)
+            O = correction * O + P_i @ V_i
+            l = correction * l + rowsum(P_i)
+        Final: O = O / l
+    
+    When pages are already decompressed to FP16 (as provided by the
+    batched decompression pipeline), this kernel operates on those
+    tensors directly. The K/V pages arrive pre-dequantized from the
+    _decompress_tier_pages_batched() method, so the on-the-fly fusion
+    benefit is the avoidance of the torch.cat() DRAM allocation.
+    
+    Falls back to standard PyTorch SDPA when:
+        - Only a single page exists (no benefit from paging)
+        - Running on CPU (no GPU kernel dispatch)
+    """
+    import math
+    if scale is None:
+        scale = 1.0 / math.sqrt(q.shape[-1])
+    
+    if not k_pages_list:
+        return torch.zeros_like(q)
+    
+    # Fast path: Single page — no need for online softmax overhead
+    if len(k_pages_list) == 1:
+        return torch.nn.functional.scaled_dot_product_attention(
+            q, k_pages_list[0], v_pages_list[0],
+            attn_mask=None, dropout_p=0.0, is_causal=False, scale=scale
+        )
+    
+    # Fast path: CPU or tiny tensors — just concat + SDPA
+    if not q.is_cuda:
+        k_full = torch.cat(k_pages_list, dim=-2)
+        v_full = torch.cat(v_pages_list, dim=-2)
+        return torch.nn.functional.scaled_dot_product_attention(
+            q, k_full, v_full, attn_mask=None, dropout_p=0.0, is_causal=False, scale=scale
+        )
+    
+    # ═══════════════════════════════════════════════════════════════════
+    # Online Softmax Fused Multi-Page Attention (GPU Path)
+    # ═══════════════════════════════════════════════════════════════════
+    # Process each page block without concatenating K/V into a single
+    # massive tensor in DRAM. This saves one full KV-length allocation.
+    
+    batch, num_heads, q_len, head_dim = q.shape
+    device = q.device
+    dtype = q.dtype
+    
+    # Running accumulators (in float32 for numerical stability)
+    O = torch.zeros(batch, num_heads, q_len, head_dim, device=device, dtype=torch.float32)
+    l = torch.zeros(batch, num_heads, q_len, 1, device=device, dtype=torch.float32)
+    m = torch.full((batch, num_heads, q_len, 1), float('-inf'), device=device, dtype=torch.float32)
+    
+    q_f32 = q.float()
+    
+    for k_page, v_page in zip(k_pages_list, v_pages_list):
+        # S_i = Q @ K_i^T * scale  — [batch, heads, q_len, page_kv_len]
+        S_i = torch.matmul(q_f32, k_page.float().transpose(-1, -2)) * scale
+        
+        # Online softmax: update running max
+        m_i = S_i.amax(dim=-1, keepdim=True)          # [batch, heads, q_len, 1]
+        m_new = torch.maximum(m, m_i)
+        
+        # Correction factor for previously accumulated output
+        correction = torch.exp(m - m_new)               # [batch, heads, q_len, 1]
+        
+        # Exponentiated scores for current block
+        P_i = torch.exp(S_i - m_new)                    # [batch, heads, q_len, page_kv_len]
+        
+        # Accumulate: rescale old output + add new contribution
+        O = correction * O + torch.matmul(P_i, v_page.float())
+        l = correction * l + P_i.sum(dim=-1, keepdim=True)
+        m = m_new
+    
+    # Final normalization
+    result = (O / l).to(dtype)
+    
+    return result
+

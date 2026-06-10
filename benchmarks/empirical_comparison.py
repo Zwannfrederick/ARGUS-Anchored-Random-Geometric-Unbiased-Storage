@@ -347,7 +347,7 @@ def evaluate_models(std_model, ssm_model, paged_model):
             paged_cache_acc = PagedDynamicKVCache(
                 page_size=128, max_active_pages=2, max_fp8_pages=2,
                 max_int8_pages=2, max_int4_pages=2,
-                sink_tokens=4, threshold_sigma=2.0
+                sink_tokens=4, threshold_sigma=3.0
             )
             out_paged = paged_model(x, paged_cache=paged_cache_acc)
             pred_paged = out_paged[:, -1, :]
@@ -361,7 +361,7 @@ def evaluate_models(std_model, ssm_model, paged_model):
                 wpc = PagedDynamicKVCache(
                     page_size=128, max_active_pages=2, max_fp8_pages=2,
                     max_int8_pages=2, max_int4_pages=2,
-                    sink_tokens=4, threshold_sigma=2.0
+                    sink_tokens=4, threshold_sigma=3.0
                 )
                 for t in range(min(8, length)):
                     _ = paged_model(x[:, t:t+1, :], paged_cache=wpc)
@@ -374,7 +374,7 @@ def evaluate_models(std_model, ssm_model, paged_model):
                 pc = PagedDynamicKVCache(
                     page_size=128, max_active_pages=2, max_fp8_pages=2,
                     max_int8_pages=2, max_int4_pages=2,
-                    sink_tokens=4, threshold_sigma=2.0
+                    sink_tokens=4, threshold_sigma=3.0
                 )
                 _ = paged_model(x[:, :1, :], paged_cache=pc)
                 pc.speculate_and_prefetch()

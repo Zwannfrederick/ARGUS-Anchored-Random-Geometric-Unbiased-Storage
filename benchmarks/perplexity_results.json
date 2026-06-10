@@ -1,0 +1,13 @@
+{
+    "benchmark": "Perplexity Delta (\u0394PPL)",
+    "parameters": {
+        "seed": 42,
+        "tokens": 256,
+        "device": "cuda"
+    },
+    "results": {
+        "ppl_vanilla": 1030.0,
+        "ppl_argus": 1030.0,
+        "delta_ppl": 0.0
+    }
+}

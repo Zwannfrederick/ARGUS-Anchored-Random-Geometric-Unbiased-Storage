@@ -57,7 +57,7 @@ def run_benchmark(device, seed, ratio, alpha):
     print("-" * 90)
     
     results = {}
-    context_lengths = [2048, 4096, 8192, 16384]
+    context_lengths = [2048, 4096, 8192, 16384, 32768]
     
     for seq_len in context_lengths:
         # 1. Generate realistic KV sequence
@@ -114,12 +114,51 @@ def run_benchmark(device, seed, ratio, alpha):
     return results
 
 
+def plot_fidelity_curve(results, output_path):
+    try:
+        import matplotlib.pyplot as plt
+        
+        lengths = sorted([int(k) for k in results.keys()])
+        l2_errors = [results[str(l)]["relative_l2_error"] for l in lengths]
+        retentions = [results[str(l)]["signal_energy_retention"] * 100.0 for l in lengths]
+        
+        plt.style.use("seaborn-v0_8-whitegrid" if "seaborn-v0_8-whitegrid" in plt.style.available else "default")
+        fig, ax1 = plt.subplots(figsize=(10, 6), dpi=150)
+        
+        # Plot Relative L2 Error
+        color = "#e06666"
+        ax1.set_xlabel("Context Length", fontweight="bold", labelpad=10)
+        ax1.set_ylabel("Relative L2 Error", color=color, fontweight="bold", labelpad=10)
+        ax1.plot(lengths, l2_errors, color=color, marker="o", linewidth=2.5, markersize=8, label="L2 Error")
+        ax1.tick_params(axis="y", labelcolor=color)
+        ax1.set_xscale("log")
+        ax1.set_xticks(lengths)
+        ax1.get_xaxis().set_major_formatter(plt.ScalarFormatter())
+        
+        # Second axis for retention
+        ax2 = ax1.twinx()
+        color = "#3d85c6"
+        ax2.set_ylabel("Signal-Energy Retention (%)", color=color, fontweight="bold", labelpad=10)
+        ax2.plot(lengths, retentions, color=color, marker="s", linestyle="--", linewidth=2, markersize=8, label="Retention")
+        ax2.tick_params(axis="y", labelcolor=color)
+        
+        plt.title("ARGUS Laplacian Reconstruction Fidelity Curve (2K - 32K)", fontsize=14, fontweight="bold", pad=15)
+        fig.tight_layout()
+        
+        plt.savefig(output_path, dpi=300)
+        plt.close()
+        print(f"Fidelity curve plot saved successfully to: {output_path}")
+    except Exception as e:
+        print(f"Could not generate plot due to: {e}")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Deterministic Reconstruction Fidelity Benchmark")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for repeatability")
     parser.add_argument("--ratio", type=int, default=4, help="Sequence compression ratio (default: 4x)")
     parser.add_argument("--alpha", type=float, default=1e-3, help="Laplacian regularization coefficient")
     parser.add_argument("--export", type=str, default="benchmarks/reconstruction_results.json", help="Path to export JSON results")
+    parser.add_argument("--plot", type=str, default="benchmarks/fidelity_curve.png", help="Path to export PNG plot")
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="Device to run on")
     
     args = parser.parse_args()
@@ -142,6 +181,10 @@ def main():
                 "results": results
             }, f, indent=4)
         print(f"Results successfully exported to: {args.export}\n")
+        
+    # Generate Plot
+    if args.plot:
+        plot_fidelity_curve(results, args.plot)
 
 
 if __name__ == "__main__":

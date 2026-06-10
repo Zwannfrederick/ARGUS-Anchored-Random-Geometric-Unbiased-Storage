@@ -1,0 +1,25 @@
+{
+    "benchmark": "RULER Benchmark",
+    "results": {
+        "4096": {
+            "multi_key_retrieval": 0.0,
+            "variable_tracking": 0.0,
+            "qa_score": 0.0
+        },
+        "8192": {
+            "multi_key_retrieval": 0.0,
+            "variable_tracking": 0.0,
+            "qa_score": 0.0
+        },
+        "16384": {
+            "multi_key_retrieval": 0.0,
+            "variable_tracking": 0.0,
+            "qa_score": 0.0
+        },
+        "32768": {
+            "multi_key_retrieval": 0.0,
+            "variable_tracking": 0.0,
+            "qa_score": 0.0
+        }
+    }
+}

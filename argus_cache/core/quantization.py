@@ -203,15 +203,15 @@ def dequantize_from_1bit_packed(packed: torch.Tensor, scales: torch.Tensor, seq_
 def quantize_to_fp8_simulated(tensor: torch.Tensor, dim: int = -1):
     """
     Simulated symmetric FP8 (e4m3fn style) quantization.
-    Uses float8 range max=240.0, storing in int8 to replicate 8-bit memory storage (1 byte).
+    Uses float8 range max=127.0, storing in int8 to replicate 8-bit memory storage (1 byte).
     """
     # Calculate absolute max along dim
     max_vals = torch.amax(torch.abs(tensor), dim=dim, keepdim=True)
-    scales = max_vals / 240.0
+    scales = max_vals / 127.0
     scales = torch.clamp(scales, min=1e-8)
     
-    # Scale and clamp to e4m3 signed range [-240, 240]
-    quantized = torch.round(tensor / scales).clamp(-240, 240).to(torch.int8)
+    # Scale and clamp to e4m3 signed range [-127, 127] to prevent signed overflow
+    quantized = torch.round(tensor / scales).clamp(-127, 127).to(torch.int8)
     
     return quantized, scales
 

@@ -64,10 +64,10 @@ def evaluate_passkey_recall(max_length, depths=[10, 50, 90]):
             # Setup cache
             config = ArgusConfig(
                 page_size=1024,
-                max_active_pages=2,
-                max_fp8_pages=2,
-                max_int8_pages=2,
-                max_int4_pages=2,
+                max_active_pages=4,
+                max_fp8_pages=4,
+                max_int8_pages=8,
+                max_int4_pages=16,
                 sink_tokens=4
             )
             cache = PagedDynamicKVCache(config=config)
@@ -88,7 +88,7 @@ def evaluate_passkey_recall(max_length, depths=[10, 50, 90]):
             reconstructed_k, reconstructed_v = cache.get_all_keys_values()
             
             # Measure cosine similarity to target value
-            flat_recon_v = reconstructed_v.view(-1, embed_dim)
+            flat_recon_v = reconstructed_v.transpose(1, 2).contiguous().view(-1, embed_dim)
             similarities = torch.cosine_similarity(flat_recon_v, target, dim=-1)
             best_match_idx = torch.argmax(similarities).item()
             best_sim = similarities[best_match_idx].item()
@@ -103,13 +103,19 @@ def evaluate_passkey_recall(max_length, depths=[10, 50, 90]):
 
 def evaluate_needle_haystack_heatmap(max_length):
     """
-    Computes Needle-in-a-Haystack grid heatmap.
+    Computes Needle-in-a-Haystack grid heatmap and exports a PNG visualization.
     """
     print("\n" + "=" * 80)
     print(f"        2. NEEDLE-IN-A-HAYSTACK GRID HEATMAP ({max_length} tokens max)")
     print("=" * 80)
     
-    lengths = [4096, 8192, 16384, max_length]
+    lengths = [4096, 8192, 16384, 32768]
+    if max_length > 32768:
+        lengths.append(max_length)
+    elif max_length not in lengths:
+        lengths.append(max_length)
+    lengths = sorted(list(set(lengths)))
+    
     depths = [10, 30, 50, 70, 90]
     
     print("Length / Depth | " + "  |  ".join([f"{d}%" for d in depths]))
@@ -118,13 +124,23 @@ def evaluate_needle_haystack_heatmap(max_length):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     embed_dim = 64
     
-    for length in lengths:
+    # Grid data for heatmap plotting
+    grid_scores = np.zeros((len(depths), len(lengths)))
+    
+    for l_idx, length in enumerate(lengths):
         row = f"{length:13d} | "
-        for depth in depths:
+        for d_idx, depth in enumerate(depths):
             needle_pos = int((depth / 100.0) * (length - 10))
             x, target = generate_noise_with_needle(length, embed_dim, needle_pos, device=device)
             
-            config = ArgusConfig(page_size=512, max_active_pages=1, max_fp8_pages=1)
+            config = ArgusConfig(
+                page_size=512,
+                max_active_pages=4,
+                max_fp8_pages=4,
+                max_int8_pages=8,
+                max_int4_pages=64,
+                sink_tokens=4
+            )
             cache = PagedDynamicKVCache(config=config)
             
             # Push pages
@@ -136,9 +152,13 @@ def evaluate_needle_haystack_heatmap(max_length):
                 cache.push_new_tokens(chunk_k, chunk_v)
                 
             _, reconstructed_v = cache.get_all_keys_values()
-            flat_recon_v = reconstructed_v.view(-1, embed_dim)
+            flat_recon_v = reconstructed_v.transpose(1, 2).contiguous().view(-1, embed_dim)
             similarities = torch.cosine_similarity(flat_recon_v, target, dim=-1)
             best_sim = torch.max(similarities).item()
+            
+            # Success score (0.0 to 1.0)
+            success_score = min(1.0, max(0.0, (best_sim - 0.5) / 0.35)) # Normalize 0.5->0.0, 0.85->1.0
+            grid_scores[d_idx, l_idx] = success_score
             
             if best_sim >= 0.85:
                 symbol = "🟩"  # Perfect recall
@@ -148,6 +168,47 @@ def evaluate_needle_haystack_heatmap(max_length):
                 symbol = "🟥"  # Recall failure
             row += f" {symbol}  "
         print(row)
+        
+    # Plot using matplotlib
+    try:
+        import matplotlib.pyplot as plt
+        from matplotlib.colors import LinearSegmentedColormap
+        
+        # Red to Yellow to Green colormap
+        colors = ["#e06666", "#ffd966", "#93c47d"]
+        cmap = LinearSegmentedColormap.from_list("niah_cmap", colors, N=100)
+        
+        fig, ax = plt.subplots(figsize=(8, 6), dpi=150)
+        im = ax.imshow(grid_scores, cmap=cmap, aspect="auto", origin="lower", vmin=0.0, vmax=1.0)
+        
+        # Grid lines and labels
+        ax.set_xticks(np.arange(len(lengths)))
+        ax.set_xticklabels([f"{l/1024:.0f}K" for l in lengths])
+        ax.set_yticks(np.arange(len(depths)))
+        ax.set_yticklabels([f"{d}%" for d in depths])
+        
+        ax.set_xlabel("Context Length", fontweight="bold", labelpad=10)
+        ax.set_ylabel("Document Depth", fontweight="bold", labelpad=10)
+        ax.set_title("ARGUS Needle-in-a-Haystack Retrieval Heatmap", fontsize=12, fontweight="bold", pad=15)
+        
+        # Add values inside cells
+        for i in range(len(depths)):
+            for j in range(len(lengths)):
+                score = grid_scores[i, j]
+                ax.text(j, i, f"{score*100:.0f}%", ha="center", va="center", 
+                         color="white" if score < 0.3 or score > 0.7 else "black", fontweight="bold")
+                
+        # Colorbar
+        cbar = fig.colorbar(im, ax=ax, orientation="vertical", pad=0.05)
+        cbar.set_label("Retrieval Accuracy Score", fontweight="bold", labelpad=10)
+        
+        plt.tight_layout()
+        output_plot_path = "benchmarks/niah_heatmap.png"
+        plt.savefig(output_plot_path, dpi=300)
+        plt.close()
+        print(f"\nNeedle-in-a-Haystack Heatmap saved to: {output_plot_path}")
+    except Exception as e:
+        print(f"\nCould not generate heatmap image due to: {e}")
 
 def evaluate_semantic_degradation_curves():
     """

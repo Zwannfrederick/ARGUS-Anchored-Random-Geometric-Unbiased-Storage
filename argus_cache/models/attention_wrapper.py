@@ -20,7 +20,9 @@ class PagedDynamicQuantizedCache(Cache):
         max_int2_pages=2,
         max_one_bit_pages=2,
         sink_tokens=4,
-        threshold_sigma=3.0
+        threshold_sigma=3.0,
+        pipeline=None,
+        balloon_driver=None
     ):
         """
         HuggingFace-compatible Caching Layer: PagedDynamicQuantizedCache.
@@ -37,7 +39,21 @@ class PagedDynamicQuantizedCache(Cache):
         self.max_one_bit_pages = max_one_bit_pages
         self.sink_tokens = sink_tokens
         self.threshold_sigma = threshold_sigma
+        self.pipeline = pipeline
+        self.balloon_driver = balloon_driver
         
+        if pipeline is not None:
+            self.page_size = getattr(pipeline, 'page_size', page_size)
+            self.max_active_pages = getattr(pipeline, 'max_active_pages', max_active_pages)
+            tier_dict = {t.name: t.max_pages for t in getattr(pipeline, 'tiers', [])}
+            self.max_fp8_pages = tier_dict.get('fp8', max_fp8_pages)
+            self.max_int8_pages = tier_dict.get('int8', max_int8_pages)
+            self.max_int4_pages = tier_dict.get('int4', max_int4_pages)
+            self.max_int2_pages = tier_dict.get('int2', max_int2_pages)
+            self.max_one_bit_pages = tier_dict.get('one_bit', max_one_bit_pages)
+            self.sink_tokens = getattr(pipeline, 'sink_tokens', sink_tokens)
+            self.threshold_sigma = getattr(pipeline, 'threshold_sigma', threshold_sigma)
+            
         # Maps layer index to its corresponding PagedDynamicKVCache instance
         self.layer_caches = {}
 
@@ -47,36 +63,59 @@ class PagedDynamicQuantizedCache(Cache):
         Performs Auto-Adaptive Tiering based on key_states dtype (FP16/BF16 vs FP8/INT8 fine-tuned models).
         """
         if layer_idx not in self.layer_caches:
-            # Auto-Adaptive Tiering logic:
-            if key_states.dtype in (torch.float32, torch.float16, torch.bfloat16):
-                # Standard high precision flow
-                active_p = self.max_active_pages
-                fp8_p = self.max_fp8_pages
-                int8_p = self.max_int8_pages
-                int4_p = self.max_int4_pages
-                int2_p = self.max_int2_pages
-                one_bit_p = self.max_one_bit_pages
+            if self.pipeline is not None:
+                # If pipeline is provided, copy and potentially adapt it for low-precision models
+                if key_states.dtype in (torch.float32, torch.float16, torch.bfloat16):
+                    layer_pipeline = self.pipeline
+                else:
+                    import copy
+                    layer_pipeline = copy.deepcopy(self.pipeline)
+                    layer_pipeline.max_active_pages = max(1, layer_pipeline.max_active_pages // 2)
+                    for spec in layer_pipeline.tiers:
+                        if spec.name == 'fp8':
+                            spec.max_pages = 1
+                        elif spec.name == 'int4':
+                            spec.max_pages = max(1, spec.max_pages * 2)
+                        elif spec.name == 'int2':
+                            spec.max_pages = max(1, spec.max_pages * 2)
+                        elif spec.name == 'one_bit':
+                            spec.max_pages = max(1, spec.max_pages * 2)
+                
+                self.layer_caches[layer_idx] = PagedDynamicKVCache(
+                    pipeline=layer_pipeline
+                )
             else:
-                # Low-precision inputs (FP8/INT8 models).
-                # Shorten FP16/FP8 active stages and increase heavy compression capacity.
-                active_p = max(1, self.max_active_pages // 2)
-                fp8_p = 1
-                int8_p = self.max_int8_pages
-                int4_p = max(1, self.max_int4_pages * 2)
-                int2_p = max(1, self.max_int2_pages * 2)
-                one_bit_p = max(1, self.max_one_bit_pages * 2)
+                # Auto-Adaptive Tiering logic:
+                if key_states.dtype in (torch.float32, torch.float16, torch.bfloat16):
+                    # Standard high precision flow
+                    active_p = self.max_active_pages
+                    fp8_p = self.max_fp8_pages
+                    int8_p = self.max_int8_pages
+                    int4_p = self.max_int4_pages
+                    int2_p = self.max_int2_pages
+                    one_bit_p = self.max_one_bit_pages
+                else:
+                    # Low-precision inputs (FP8/INT8 models).
+                    # Shorten FP16/FP8 active stages and increase heavy compression capacity.
+                    active_p = max(1, self.max_active_pages // 2)
+                    fp8_p = 1
+                    int8_p = self.max_int8_pages
+                    int4_p = max(1, self.max_int4_pages * 2)
+                    int2_p = max(1, self.max_int2_pages * 2)
+                    one_bit_p = max(1, self.max_one_bit_pages * 2)
 
-            self.layer_caches[layer_idx] = PagedDynamicKVCache(
-                page_size=self.page_size,
-                max_active_pages=active_p,
-                max_fp8_pages=fp8_p,
-                max_int8_pages=int8_p,
-                max_int4_pages=int4_p,
-                max_int2_pages=int2_p,
-                max_one_bit_pages=one_bit_p,
-                sink_tokens=self.sink_tokens,
-                threshold_sigma=self.threshold_sigma
-            )
+                self.layer_caches[layer_idx] = PagedDynamicKVCache(
+                    page_size=self.page_size,
+                    max_active_pages=active_p,
+                    max_fp8_pages=fp8_p,
+                    max_int8_pages=int8_p,
+                    max_int4_pages=int4_p,
+                    max_int2_pages=int2_p,
+                    max_one_bit_pages=one_bit_p,
+                    sink_tokens=self.sink_tokens,
+                    threshold_sigma=self.threshold_sigma,
+                    balloon_driver=self.balloon_driver
+                )
             
         layer_cache = self.layer_caches[layer_idx]
         
@@ -105,16 +144,8 @@ class PagedDynamicQuantizedCache(Cache):
         if cache.anchor_k is not None:
             length += cache.anchor_k.shape[-2]
             
-        # Calculate tokens from all page levels (7 Tiers)
-        num_pages = (
-            len(cache.active_pages) + 
-            len(cache.fp8_pages) + 
-            len(cache.int8_pages) + 
-            len(cache.int4_pages) + 
-            len(cache.int2_pages) +
-            len(cache.one_bit_pages) + 
-            len(cache.jl_pages)
-        )
+        # Calculate tokens from all page levels (pluggable tiers + active pool)
+        num_pages = len(cache.active_pages) + sum(len(pages) for pages in cache.pages_by_tier.values())
         length += num_pages * cache.page_size
         
         # Add remaining tokens in the temporary buffer

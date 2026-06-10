@@ -30,6 +30,12 @@
             "signal_energy_retention": 0.9946600375697017,
             "cosine_similarity": 0.9999924898147583,
             "quality_tier": "High-Fidelity Reconstruction \ud83c\udfc6"
+        },
+        "32768": {
+            "relative_l2_error": 0.00553228659555316,
+            "signal_energy_retention": 0.9944677134044468,
+            "cosine_similarity": 0.9999920725822449,
+            "quality_tier": "High-Fidelity Reconstruction \ud83c\udfc6"
         }
     }
 }
