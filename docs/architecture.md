@@ -42,7 +42,7 @@ was moved only after characterization tests pinned its existing behavior.
 | `granularity.py` | experimental page split/merge (ACTIVE pages only) | 317 |
 | `host_spill.py` | lossless spill to pinned host memory, both directions idempotent | 185 |
 | `jl_operators.py` | cached JL projection/reconstruction operators | 128 |
-| `pool_allocator.py` | per-tier compressed page pools, shaped from capabilities | 119 |
+| `pool_allocator.py` | per-tier compressed page pools, shaped from capabilities | 131 |
 | `outliers.py` | outlier isolation and restoration | 85 |
 
 The split target was five separated responsibilities, not a line count;
@@ -268,6 +268,12 @@ Reproduce with:
 python benchmarks/bench_native_runtime.py --json results.json
 ```
 
+Every number in §5.1, §5.2 and §5.5 comes from
+`docs/measurements/native-2026-08-14.json`, recorded against commit
+`2951715` on a clean tree with the extension rebuilt from scratch. Provenance
+for that tree is in `docs/measurements/baseline-2026-08-14-post.json`
+(`git_dirty: false`, 191 passed / 1 skipped).
+
 **Environment:** RTX 3050 Ti Laptop (4 GB, SM 8.6) · CUDA 13.0 · torch
 2.12.0+cu130 · Triton 3.7.0 · Python 3.14.7 · seed 1234 · fp16 ·
 batch 1 · 8 heads · head_dim 64 · page_size 128.
@@ -278,17 +284,17 @@ Random Gaussian tensors. Fidelity here measures the codec, **not** the model.
 
 | tier | ratio | compress (ms) | decompress (ms, median) | rel. L2 | cosine |
 |---|---:|---:|---:|---:|---:|
-| fp8 | 2.00× | 54.27 | 0.0725 | 0.0097 | 1.0000 |
-| int8 | 2.00× | 1.66 | 0.0718 | 0.0097 | 1.0000 |
-| int4 | 4.00× | 10.12 | 0.0515 | 0.1593 | 0.9876 |
-| int2 | 8.00× | 1.92 | 0.0399 | 0.8332 | 0.8135 |
-| one_bit | 16.00× | 12.40 | 0.0358 | 0.6023 | 0.7983 |
-| jl | 4.00× | 221.44 | 0.1058 | 1.1733 | 0.2666 |
+| fp8 | 2.00× | 57.52 | 0.0729 | 0.0097 | 1.0000 |
+| int8 | 2.00× | 1.89 | 0.0752 | 0.0097 | 1.0000 |
+| int4 | 4.00× | 11.48 | 0.0523 | 0.1593 | 0.9876 |
+| int2 | 8.00× | 1.87 | 0.0403 | 0.8332 | 0.8135 |
+| one_bit | 16.00× | 13.01 | 0.0359 | 0.6023 | 0.7983 |
+| jl | 4.00× | 225.28 | 0.1013 | 1.1733 | 0.2666 |
 
 Notes, stated rather than glossed:
 
 * **fp8/int8 compress timings include one-time CUDA context and pool warmup**
-  on the first tier measured; int8 (1.66 ms) is the steady-state cost of the
+  on the first tier measured; int8 (1.89 ms) is the steady-state cost of the
   same operation.
 * **JL fidelity on random input is not meaningful.** Reconstructing a 4×
   projection of white noise is information-theoretically impossible, so
@@ -304,19 +310,19 @@ int4 tier, single decode step, median over 30 steps.
 
 | context tokens | page size | pages | ms/step | peak VRAM (MiB) |
 |---:|---:|---:|---:|---:|
-| 256 | 128 | 2 | 0.79 | 51.6 |
-| 1024 | 128 | 8 | 4.72 | 61.6 |
-| 2048 | 128 | 16 | 10.05 | 73.1 |
-| 512 | 256 | 2 | 0.72 | 75.3 |
-| 2048 | 256 | 8 | 5.07 | 95.3 |
-| 4096 | 256 | 16 | 10.74 | 118.3 |
-| 1024 | 512 | 2 | 0.83 | 122.6 |
-| 4096 | 512 | 8 | 7.43 | 162.7 |
-| 8192 | 512 | 16 | 13.98 | 208.7 |
+| 256 | 128 | 2 | 0.72 | 51.6 |
+| 1024 | 128 | 8 | 4.74 | 61.6 |
+| 2048 | 128 | 16 | 10.61 | 73.1 |
+| 512 | 256 | 2 | 0.78 | 75.3 |
+| 2048 | 256 | 8 | 5.24 | 95.3 |
+| 4096 | 256 | 16 | 11.35 | 118.3 |
+| 1024 | 512 | 2 | 0.94 | 122.6 |
+| 4096 | 512 | 8 | 7.97 | 162.7 |
+| 8192 | 512 | 16 | 14.78 | 208.7 |
 
 Decode cost grows roughly linearly in resident pages, because every compressed
 page is decompressed and concatenated each step. Larger pages amortize better
-at equal context (4096 tokens: 10.74 ms at page 256 vs 7.43 ms at page 512).
+at equal context (4096 tokens: 11.35 ms at page 256 vs 7.97 ms at page 512).
 
 ### 5.3 Not measured
 
@@ -371,6 +377,19 @@ tensor fidelity, which is not the same as winning on perplexity. §5.3 still
 applies.
 
 ---
+
+### 5.5 Verbose logging overhead
+
+`ARGUS_VERBOSE` gates every hot-path `std::cout` in the native engine. It is
+off by default, and this is why:
+
+| logging | ms/step | overhead |
+|---|---:|---:|
+| off (default) | 1.612 | — |
+| on | 1.783 | **+10.6 %** |
+
+Stream insertion on the demotion path is not free; leaving it always-on cost
+over a tenth of decode time.
 
 ## 6. Correctness fixes found during the refactor
 

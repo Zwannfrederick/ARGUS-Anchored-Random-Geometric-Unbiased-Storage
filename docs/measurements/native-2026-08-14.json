@@ -1,0 +1,186 @@
+{
+  "environment": {
+    "python": "3.14.7",
+    "platform": "Linux-7.1.6-zen1-1-zen-x86_64-with-glibc2.44",
+    "torch": "2.12.0+cu130",
+    "cuda_available": true,
+    "seed": 1234,
+    "gpu": "NVIDIA GeForce RTX 3050 Ti Laptop GPU",
+    "gpu_total_mib": 3770,
+    "cuda": "13.0",
+    "capability": "8.6",
+    "triton": "3.7.0"
+  },
+  "config": {
+    "page_size": 128,
+    "head_dim": 64,
+    "heads": 8,
+    "repeats": 50,
+    "steps": 30,
+    "json": "docs/measurements/native-2026-08-14.json"
+  },
+  "codecs": [
+    {
+      "metric_class": "reconstruction+runtime",
+      "tier": "fp8",
+      "fp16_bytes": 131072,
+      "stored_bytes": 65536,
+      "compression_ratio": 2.0,
+      "effective_bits": 8.0,
+      "compress_ms": 57.519,
+      "decompress_ms_median": 0.0729,
+      "decompress_ms_p90": 0.0787,
+      "relative_l2_error": 0.0097,
+      "cosine_similarity": 1.0
+    },
+    {
+      "metric_class": "reconstruction+runtime",
+      "tier": "int8",
+      "fp16_bytes": 131072,
+      "stored_bytes": 65536,
+      "compression_ratio": 2.0,
+      "effective_bits": 8.0,
+      "compress_ms": 1.885,
+      "decompress_ms_median": 0.0752,
+      "decompress_ms_p90": 0.1186,
+      "relative_l2_error": 0.0097,
+      "cosine_similarity": 1.0
+    },
+    {
+      "metric_class": "reconstruction+runtime",
+      "tier": "int4",
+      "fp16_bytes": 131072,
+      "stored_bytes": 32768,
+      "compression_ratio": 4.0,
+      "effective_bits": 4.0,
+      "compress_ms": 11.48,
+      "decompress_ms_median": 0.0523,
+      "decompress_ms_p90": 0.0605,
+      "relative_l2_error": 0.1593,
+      "cosine_similarity": 0.9876
+    },
+    {
+      "metric_class": "reconstruction+runtime",
+      "tier": "int2",
+      "fp16_bytes": 131072,
+      "stored_bytes": 16384,
+      "compression_ratio": 8.0,
+      "effective_bits": 2.0,
+      "compress_ms": 1.868,
+      "decompress_ms_median": 0.0403,
+      "decompress_ms_p90": 0.0562,
+      "relative_l2_error": 0.8332,
+      "cosine_similarity": 0.8135
+    },
+    {
+      "metric_class": "reconstruction+runtime",
+      "tier": "one_bit",
+      "fp16_bytes": 131072,
+      "stored_bytes": 8192,
+      "compression_ratio": 16.0,
+      "effective_bits": 1.0,
+      "compress_ms": 13.013,
+      "decompress_ms_median": 0.0359,
+      "decompress_ms_p90": 0.0389,
+      "relative_l2_error": 0.6023,
+      "cosine_similarity": 0.7983
+    },
+    {
+      "metric_class": "reconstruction+runtime",
+      "tier": "jl",
+      "fp16_bytes": 131072,
+      "stored_bytes": 32768,
+      "compression_ratio": 4.0,
+      "effective_bits": 4.0,
+      "compress_ms": 225.283,
+      "decompress_ms_median": 0.1013,
+      "decompress_ms_p90": 0.1166,
+      "relative_l2_error": 1.1733,
+      "cosine_similarity": 0.2666
+    }
+  ],
+  "logging": {
+    "verbose_off": 1.6119,
+    "verbose_on": 1.783,
+    "logging_overhead_pct": 10.6,
+    "metric_class": "runtime"
+  },
+  "scaling": [
+    {
+      "metric_class": "runtime",
+      "context_tokens": 256,
+      "page_size": 128,
+      "pages": 2,
+      "decode_step_ms": 0.7225,
+      "peak_vram_mib": 51.58
+    },
+    {
+      "metric_class": "runtime",
+      "context_tokens": 1024,
+      "page_size": 128,
+      "pages": 8,
+      "decode_step_ms": 4.7445,
+      "peak_vram_mib": 61.58
+    },
+    {
+      "metric_class": "runtime",
+      "context_tokens": 2048,
+      "page_size": 128,
+      "pages": 16,
+      "decode_step_ms": 10.6086,
+      "peak_vram_mib": 73.08
+    },
+    {
+      "metric_class": "runtime",
+      "context_tokens": 512,
+      "page_size": 256,
+      "pages": 2,
+      "decode_step_ms": 0.7832,
+      "peak_vram_mib": 75.27
+    },
+    {
+      "metric_class": "runtime",
+      "context_tokens": 2048,
+      "page_size": 256,
+      "pages": 8,
+      "decode_step_ms": 5.2436,
+      "peak_vram_mib": 95.27
+    },
+    {
+      "metric_class": "runtime",
+      "context_tokens": 4096,
+      "page_size": 256,
+      "pages": 16,
+      "decode_step_ms": 11.3518,
+      "peak_vram_mib": 118.28
+    },
+    {
+      "metric_class": "runtime",
+      "context_tokens": 1024,
+      "page_size": 512,
+      "pages": 2,
+      "decode_step_ms": 0.9364,
+      "peak_vram_mib": 122.64
+    },
+    {
+      "metric_class": "runtime",
+      "context_tokens": 4096,
+      "page_size": 512,
+      "pages": 8,
+      "decode_step_ms": 7.9685,
+      "peak_vram_mib": 162.65
+    },
+    {
+      "metric_class": "runtime",
+      "context_tokens": 8192,
+      "page_size": 512,
+      "pages": 16,
+      "decode_step_ms": 14.7833,
+      "peak_vram_mib": 208.66
+    }
+  ],
+  "downstream_quality": {
+    "measured": false,
+    "reason": "Downstream accuracy (perplexity, NIAH/RULER retrieval) is not produced by this script. The reconstruction numbers above are synthetic fidelity on random tensors and must not be reported as model quality."
+  }
+}
