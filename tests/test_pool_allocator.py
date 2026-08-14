@@ -89,6 +89,19 @@ def test_projection_tier_gets_no_static_pool():
     assert pools == {}
 
 
+def test_unbounded_tier_gets_no_static_pool():
+    """max_pages=-1 marks the archival floor, which has no fixed capacity.
+    Passing the sentinel to torch.zeros raised 'Dimension size must be
+    non-negative' and took down any pipeline with an unbounded tier."""
+    allocator = StaticPoolAllocator(page_size=PAGE)
+
+    pools = _allocate(
+        allocator, TierSpec(name="one_bit", backend="one_bit"), max_pages=-1
+    )
+
+    assert pools == {}
+
+
 def test_release_frees_a_tiers_pools():
     allocator = StaticPoolAllocator(page_size=PAGE)
     _allocate(allocator, TierSpec(name="int8", backend="int8"))

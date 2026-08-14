@@ -44,6 +44,13 @@ class StaticPoolAllocator:
         Returns an empty mapping for tiers that cannot use a static pool
         (projection tiers, and tiers that declare no native storage format).
         """
+        if max_pages < 0:
+            # An unbounded tier (max_pages=-1, the archival floor) has no fixed
+            # capacity to preallocate; it allocates per page instead. Passing
+            # the sentinel straight to torch.zeros raised "Dimension size must
+            # be non-negative", which is how this surfaced.
+            return {}
+
         caps = getattr(spec, "capabilities", None)
         codec = caps.native_codec if caps is not None else None
         if codec is None or codec.kind in ("projection", "passthrough"):
@@ -98,6 +105,11 @@ class StaticPoolAllocator:
         key = f"{tier_name}_{field}"
         pool = self.pools.get(key)
         if pool is None:
+            if max_pages < 0:
+                raise ValueError(
+                    f"tier {tier_name!r} is unbounded (max_pages={max_pages}) "
+                    "and cannot back a fixed-size pool"
+                )
             pool = torch.zeros(max_pages, *shape, dtype=dtype, device=device)
             self.pools[key] = pool
         return pool
