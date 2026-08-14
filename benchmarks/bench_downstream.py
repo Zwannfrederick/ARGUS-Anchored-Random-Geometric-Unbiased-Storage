@@ -27,7 +27,10 @@ import argparse
 import gc
 import json
 import platform
+import shlex
 import statistics
+import subprocess
+import sys
 import time
 
 import torch
@@ -170,6 +173,7 @@ def main() -> int:
     parser.add_argument("--date", default=None)
     parser.add_argument("--new-tokens", type=int, default=64)
     parser.add_argument("--repeats", type=int, default=3)
+    parser.add_argument("--warmups", type=int, default=1)
     parser.add_argument("--page-size", type=int, default=256)
     parser.add_argument(
         "--contexts", type=int, nargs="+", default=[512, 1024, 2048, 4096]
@@ -209,6 +213,8 @@ def main() -> int:
         input_ids = unit.repeat(1, reps)[:, :ctx].to(device)
 
         for arm, factory in arms.items():
+            for _ in range(args.warmups):
+                measure_latency(model, input_ids, args.new_tokens, factory)
             runs = [
                 measure_latency(model, input_ids, args.new_tokens, factory)
                 for _ in range(args.repeats)
@@ -280,10 +286,15 @@ def main() -> int:
     result = {
         "metric_class": "downstream",
         "date": args.date,
-        "command": (
-            f"python benchmarks/bench_downstream.py --model {args.model} "
-            f"--new-tokens {args.new_tokens} --repeats {args.repeats} "
-            f"--page-size {args.page_size}"
+        "command": shlex.join([sys.executable, *sys.argv]),
+        "git_commit": subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], text=True
+        ).strip(),
+        "git_dirty": bool(
+            subprocess.check_output(
+                ["git", "status", "--porcelain", "--untracked-files=no"],
+                text=True,
+            ).strip()
         ),
         "model": args.model,
         "device": device,
@@ -293,6 +304,7 @@ def main() -> int:
         "host_platform": platform.platform(),
         "seed": 1234,
         "page_size": args.page_size,
+        "warmups": args.warmups,
         "latency": rows,
         "perplexity": {
             **perplexity,

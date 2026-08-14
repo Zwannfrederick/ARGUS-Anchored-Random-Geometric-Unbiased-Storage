@@ -7,6 +7,22 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core.memory_manager import PagedDynamicKVCache
 
+
+def test_large_prefill_does_not_leave_an_exact_sized_staging_mirror():
+    """Only a partial page may remain staged after full pages reach C++."""
+    page_size = 8
+    cache = PagedDynamicKVCache(page_size=page_size, sink_tokens=0)
+    keys = torch.randn(1, 1, page_size * 8, 16, dtype=torch.float16)
+    values = torch.randn_like(keys)
+    cache.push_new_tokens(keys, values)
+
+    assert cache.static_k_buffer.shape[-2] == page_size
+    assert cache.static_v_buffer.shape[-2] == page_size
+    assert cache.buffer_length == 0
+    assert cache.active_pool_k is None
+    assert cache.active_pool_v is None
+    assert cache.pools_by_tier == {}
+
 def test_cache_transitions():
     print("Testing 7-Tier PagedDynamicKVCache transitions...")
     
@@ -149,6 +165,12 @@ def test_cache_transitions():
     # 10. Retrieve and reconstruct all keys/values
     print("Retrieving and reconstructing all keys/values...")
     all_k, all_v = cache.get_all_keys_values()
+
+    # A compressed tier must not leave a full-precision mirror resident after
+    # materializing the HuggingFace-compatible return value.  Doing so makes
+    # ARGUS consume the exact cache plus its own compressed storage.
+    assert cache._decompressed_tiers_k is None
+    assert cache._decompressed_tiers_v is None
     
     print(f"Reconstructed K actual shape: {all_k.shape}")
     assert all_k.shape == (1, 1, 64, 16)

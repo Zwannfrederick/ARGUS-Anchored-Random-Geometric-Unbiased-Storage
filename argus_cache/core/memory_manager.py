@@ -550,7 +550,10 @@ class PagedDynamicKVCache:
         from argus_cache.core.telemetry import CacheTelemetry
         self._telemetry = CacheTelemetry(self)
 
-        # Decompression Cache for Static Tiers to Avoid Redundant GPU Decompression Loop
+        # Compatibility placeholders.  Older builds kept every compressed
+        # tier fully decompressed here between decode steps.  That persistent
+        # FP16 mirror cancelled the cache's memory saving and was the main
+        # reason the HuggingFace path used more VRAM than an exact cache.
         self._cache_version = 0
         self._tiers_version = -1
         self._decompressed_tiers_k = None
@@ -871,22 +874,22 @@ class PagedDynamicKVCache:
             self.static_k_buffer.dtype == dtype):
             return
             
-        # Pre-allocate buffer for incoming tokens
-        self.static_k_buffer = torch.zeros(batch, num_heads, self.page_size * 2, head_dim, device=device, dtype=dtype)
-        self.static_v_buffer = torch.zeros(batch, num_heads, self.page_size * 2, head_dim, device=device, dtype=dtype)
+        # Only an incomplete page belongs in the staging buffer.  Prefill can
+        # arrive as tens of thousands of tokens; sizing this buffer to the
+        # whole input retained an exact-cache-sized tensor on every layer even
+        # after all full pages had moved into the native manager.
+        self.static_k_buffer = torch.zeros(batch, num_heads, self.page_size, head_dim, device=device, dtype=dtype)
+        self.static_v_buffer = torch.zeros(batch, num_heads, self.page_size, head_dim, device=device, dtype=dtype)
         self.buffer_length = 0
-        
-        # Active Pool
-        self.active_pool_k = torch.zeros(self.max_active_pages, batch, num_heads, self.page_size, head_dim, device=device, dtype=dtype)
-        self.active_pool_v = torch.zeros(self.max_active_pages, batch, num_heads, self.page_size, head_dim, device=device, dtype=dtype)
+
+        # Active and compressed page storage is owned by ArgusCppManager.  The
+        # old Python mirrors were never passed to C++ and consumed ~23 MiB on
+        # the 24-layer reference model before holding a single useful byte.
+        self.active_pool_k = None
+        self.active_pool_v = None
         self.active_pool_idx = 0
-        
+
         self._pool_allocator.reset()
-        # Pre-allocate pools for default tiers if they are in the pipeline config
-        for spec in self.tier_specs:
-            if not spec.use_static_pool:
-                continue
-            self._allocate_pool_for_tier(spec.name, spec.max_pages, device, dtype, batch, num_heads, head_dim)
         
         # Pre-initialize JL projection and reconstruction matrices if "jl" is in the tier specifications
         if any(spec.is_projection for spec in self.tier_specs):
@@ -898,11 +901,11 @@ class PagedDynamicKVCache:
     def _allocate_pool_for_tier(self, name, max_pages, device=None, dtype=None, batch=None, num_heads=None, head_dim=None):
         """Pre-allocates the static pools for a specific tier if pools are already active."""
         if device is None or dtype is None or batch is None or num_heads is None or head_dim is None:
-            if not hasattr(self, 'active_pool_k') or self.active_pool_k is None:
+            if not hasattr(self, 'static_k_buffer') or self.static_k_buffer is None:
                 return # Pools not yet allocated
-            batch, num_heads, _, head_dim = self.active_pool_k.shape[1:]
-            device = self.active_pool_k.device
-            dtype = self.active_pool_k.dtype
+            batch, num_heads, _, head_dim = self.static_k_buffer.shape
+            device = self.static_k_buffer.device
+            dtype = self.static_k_buffer.dtype
 
         spec = self.tier_name_to_spec.get(name)
         if spec is None:
@@ -1087,32 +1090,13 @@ class PagedDynamicKVCache:
         # Ensure pools are allocated with correct batch and head size
         self._ensure_pools_allocated(keys, values)
         
-        num_new = keys.shape[-2]
-        # Expand static buffer if needed (extreme edge case)
-        if self.buffer_length + num_new > self.static_k_buffer.shape[-2]:
-            new_size = max(self.static_k_buffer.shape[-2] * 2, self.buffer_length + num_new)
-            batch, num_heads, _, head_dim = keys.shape
-            device = keys.device
-            dtype = keys.dtype
-            self.static_k_buffer = torch.cat([self.static_k_buffer, torch.zeros(batch, num_heads, new_size - self.static_k_buffer.shape[-2], head_dim, device=device, dtype=dtype)], dim=-2)
-            self.static_v_buffer = torch.cat([self.static_v_buffer, torch.zeros(batch, num_heads, new_size - self.static_v_buffer.shape[-2], head_dim, device=device, dtype=dtype)], dim=-2)
-
-        # Copy in-place
-        self.static_k_buffer[..., self.buffer_length : self.buffer_length + num_new, :].copy_(keys)
-        self.static_v_buffer[..., self.buffer_length : self.buffer_length + num_new, :].copy_(values)
-        self.buffer_length += num_new
-            
-        # Segment into pages in-place and delegate to C++ manager
-        while self.buffer_length >= self.page_size:
-            page_k = self.static_k_buffer[..., :self.page_size, :].clone()
-            page_v = self.static_v_buffer[..., :self.page_size, :].clone()
-
+        def push_page(page_k, page_v):
             # Record page list before push to detect demotions
             before_active_ids = {p.page_id for p in self._cpp_manager.active_pages}
-            
+
             # Delegate page creation to C++ manager
             self._cpp_manager.push_new_tokens(page_k, page_v)
-            
+
             # Detect demoted pages
             after_active = self._cpp_manager.active_pages
             after_active_ids = {p.page_id for p in after_active}
@@ -1129,12 +1113,42 @@ class PagedDynamicKVCache:
             new_page = [p for p in after_active if p.page_id not in before_active_ids]
             if new_page:
                 self.log_event("create", new_page[0].page_id)
-            
-            # Shift remaining tokens in static buffer
-            remaining = self.buffer_length - self.page_size
-            if remaining > 0:
-                self.static_k_buffer[..., :remaining, :].copy_(self.static_k_buffer[..., self.page_size : self.page_size + remaining, :])
-                self.static_v_buffer[..., :remaining, :].copy_(self.static_v_buffer[..., self.page_size : self.page_size + remaining, :])
+
+        num_new = int(keys.shape[-2])
+        cursor = 0
+
+        # Complete a partial page left by the previous decode step.
+        if self.buffer_length:
+            take = min(self.page_size - self.buffer_length, num_new)
+            end = self.buffer_length + take
+            self.static_k_buffer[..., self.buffer_length:end, :].copy_(
+                keys[..., :take, :]
+            )
+            self.static_v_buffer[..., self.buffer_length:end, :].copy_(
+                values[..., :take, :]
+            )
+            self.buffer_length = end
+            cursor = take
+            if self.buffer_length == self.page_size:
+                push_page(self.static_k_buffer.clone(), self.static_v_buffer.clone())
+                self.buffer_length = 0
+
+        # Stream full prefill pages directly.  Clone each slice because active
+        # pages must not retain a view (and therefore the storage) of the whole
+        # model-produced prefill tensor.
+        while cursor + self.page_size <= num_new:
+            end = cursor + self.page_size
+            push_page(
+                keys[..., cursor:end, :].clone(),
+                values[..., cursor:end, :].clone(),
+            )
+            cursor = end
+
+        # Keep only the final incomplete page for the next update.
+        remaining = num_new - cursor
+        if remaining:
+            self.static_k_buffer[..., :remaining, :].copy_(keys[..., cursor:, :])
+            self.static_v_buffer[..., :remaining, :].copy_(values[..., cursor:, :])
             self.buffer_length = remaining
 
     def _calculate_importance(self, page):
@@ -1421,6 +1435,22 @@ class PagedDynamicKVCache:
             
         key_comp = next_spec.backend.compress(k_norm, **comp_args)
         value_comp = next_spec.backend.compress(v_norm, **comp_args)
+
+        # This legacy Python demotion path is not used by the native lifecycle,
+        # so allocate its optional pool only if a caller explicitly invokes it.
+        if next_spec.use_static_pool and not any(
+            key.startswith(f"{next_spec.name}_") for key in self.pools_by_tier
+        ):
+            batch, num_heads, _, head_dim = k_norm.shape
+            self._allocate_pool_for_tier(
+                next_spec.name,
+                next_spec.max_pages,
+                k_norm.device,
+                k_norm.dtype,
+                batch,
+                num_heads,
+                head_dim,
+            )
         
         # 4. Limit aşımı kontrolü (Eviction)
         pages_list = self.pages_by_tier[next_spec.name]
@@ -1528,79 +1558,76 @@ class PagedDynamicKVCache:
             target_dev = self.active_pool_k.device if self.active_pool_k is not None else "cuda"
             self.swap_in_to_device(device=target_dev)
             
-        all_keys = []
-        all_values = []
-        
-        # Pluggable Tiers (Coldest to Hottest) — Cached/Batched Decompression
-        if self._tiers_version == self._cache_version and self._decompressed_tiers_k is not None:
-            if self._decompressed_tiers_k.numel() > 0:
-                all_keys.append(self._decompressed_tiers_k)
-                all_values.append(self._decompressed_tiers_v)
-        else:
-            tier_keys = []
-            tier_values = []
-            for spec in reversed(self.tier_specs):
-                tier_pages = self.pages_by_tier.get(spec.name, [])
-                if not tier_pages:
-                    continue
-                kv_pairs = self._decompress_tier_pages_batched(spec, tier_pages)
-                for k, v in kv_pairs:
-                    tier_keys.append(k)
-                    tier_values.append(v)
-            if tier_keys:
-                # Compressed-tier tensors live in pinned host (CPU) memory —
-                # decompressing them yields CPU tensors, while active pages
-                # are always on CUDA. Align to CUDA before concatenating so
-                # this doesn't crash the moment both are present at once.
-                target_dev = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
-                tier_keys = [k.to(target_dev) if k.device != target_dev else k for k in tier_keys]
-                tier_values = [v.to(target_dev) if v.device != target_dev else v for v in tier_values]
-                self._decompressed_tiers_k = torch.cat(tier_keys, dim=-2)
-                self._decompressed_tiers_v = torch.cat(tier_values, dim=-2)
-                all_keys.append(self._decompressed_tiers_k)
-                all_values.append(self._decompressed_tiers_v)
-            else:
-                dev = "cuda" if torch.cuda.is_available() else "cpu"
-                if self.active_pool_k is not None:
-                    dev = self.active_pool_k.device
-                elif self.sink_k is not None:
-                    dev = self.sink_k.device
-                self._decompressed_tiers_k = torch.empty(0, device=dev, dtype=torch.float16)
-                self._decompressed_tiers_v = torch.empty(0, device=dev, dtype=torch.float16)
-            self._tiers_version = self._cache_version
-            
-        # Tier 1: FP16 active pages
-        for page in self.active_pages:
-            all_keys.append(page['key'])
-            all_values.append(page['value'])
-            
-        # Temp active buffer
-        if self.k_buffer is not None and self.k_buffer.shape[-2] > 0:
-            all_keys.append(self.k_buffer)
-            all_values.append(self.v_buffer)
-            
-        # VIP Outliers: Prepend the Newline / Rhyme Anchors in FP16
-        if self.anchor_k is not None:
-            all_keys.insert(0, self.anchor_k)
-            all_values.insert(0, self.anchor_v)
-            
-        # Outlier-Aware: Prepend the Attention Sinks in FP16 to the very front
+        # The HuggingFace Cache API requires one contiguous K/V pair.  Build
+        # that pair directly and copy each decompressed page into its final
+        # slice.  The old implementation first concatenated all cold pages,
+        # retained that full FP16 tensor on every layer, and then concatenated
+        # it again with the hot pages.  At long context this produced a
+        # persistent exact-cache-sized mirror plus a second transient copy.
+        tier_entries = [
+            (spec, page)
+            for spec in reversed(self.tier_specs)
+            for page in self.pages_by_tier.get(spec.name, [])
+        ]
+        resident_pairs = []
         if self.sink_k is not None:
-            all_keys.insert(0, self.sink_k)
-            all_values.insert(0, self.sink_v)
-            
-        if not all_keys:
+            resident_pairs.append((self.sink_k, self.sink_v))
+        if self.anchor_k is not None:
+            resident_pairs.append((self.anchor_k, self.anchor_v))
+        resident_pairs.extend((page["key"], page["value"]) for page in self.active_pages)
+        if self.k_buffer is not None and self.k_buffer.shape[-2] > 0:
+            resident_pairs.append((self.k_buffer, self.v_buffer))
+
+        if not tier_entries and not resident_pairs:
             return None, None
 
-        # Sinks (pinned CPU by design) and compressed tiers (pinned host
-        # memory) can each land on a different device than the active pool
-        # (always CUDA). Align everything to one device right before the
-        # final concatenation instead of assuming they already match.
         target_dev = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
-        all_keys = [t.to(target_dev) if t.device != target_dev else t for t in all_keys]
-        all_values = [t.to(target_dev) if t.device != target_dev else t for t in all_values]
+        total_tokens = sum(int(k.shape[-2]) for k, _ in resident_pairs)
+        total_tokens += sum(int(page.get("page_size", self.page_size)) for _, page in tier_entries)
 
-        return torch.cat(all_keys, dim=-2).to(torch.float16), torch.cat(all_values, dim=-2).to(torch.float16)
+        first_pair = resident_pairs[0] if resident_pairs else None
+        first_tier = 0
+        if first_pair is None:
+            spec, page = tier_entries[0]
+            first_pair = self._decompress_tier_pages_batched(spec, [page])[0]
+            first_tier = 1
+
+        first_k, first_v = first_pair
+        output_shape = (*first_k.shape[:-2], total_tokens, first_k.shape[-1])
+        out_k = torch.empty(output_shape, device=target_dev, dtype=torch.float16)
+        out_v = torch.empty(output_shape, device=target_dev, dtype=torch.float16)
+        offset = 0
+
+        def append_pair(k, v):
+            nonlocal offset
+            length = int(k.shape[-2])
+            out_k[..., offset : offset + length, :].copy_(
+                k.to(device=target_dev, dtype=torch.float16)
+            )
+            out_v[..., offset : offset + length, :].copy_(
+                v.to(device=target_dev, dtype=torch.float16)
+            )
+            offset += length
+
+        # Preserve the historical logical order: sinks, anchors, coldest to
+        # hottest compressed tiers, active pages, then the partial buffer.
+        resident_prefix = int(self.sink_k is not None) + int(self.anchor_k is not None)
+        for pair in resident_pairs[:resident_prefix]:
+            append_pair(*pair)
+        if first_tier:
+            append_pair(first_k, first_v)
+        for spec, page in tier_entries[first_tier:]:
+            append_pair(*self._decompress_tier_pages_batched(spec, [page])[0])
+        for pair in resident_pairs[resident_prefix:]:
+            append_pair(*pair)
+
+        assert offset == total_tokens
+        # These remain None intentionally: compressed storage must never gain
+        # a persistent FP16 mirror merely to accelerate the next decode step.
+        self._decompressed_tiers_k = None
+        self._decompressed_tiers_v = None
+        self._tiers_version = -1
+        return out_k, out_v
 
     def inplace_paged_attention(self, q: torch.Tensor, scale: float = None) -> torch.Tensor:
         """

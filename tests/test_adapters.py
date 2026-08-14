@@ -25,7 +25,12 @@ from argus_cache.adapters import (
     list_adapters,
 )
 from argus_cache.adapters.ollama import OllamaAdapter, OllamaGeneration
-from argus_cache.adapters.vllm import VLLMAdapter, inject_argus_to_vllm
+from argus_cache.adapters.vllm import (
+    PROBED_VLLM_VERSIONS,
+    SUPPORTED_VLLM_RANGE,
+    VLLMAdapter,
+    inject_argus_to_vllm,
+)
 
 
 # ── registry ────────────────────────────────────────────────────────────────
@@ -45,6 +50,7 @@ def test_adapters_declare_honest_capabilities():
     assert get_adapter("ollama").capabilities.kind is RuntimeKind.EXTERNAL
     assert get_adapter("ollama").capabilities.manages_kv_cache is False
     assert get_adapter("vllm").capabilities.kind is RuntimeKind.IN_PROCESS
+    assert get_adapter("vllm").capabilities.manages_kv_cache is False
 
 
 # ── Ollama ──────────────────────────────────────────────────────────────────
@@ -231,36 +237,11 @@ def test_ollama_repeated_init_cleanup_cycles():
 
 @pytest.fixture
 def fake_vllm(monkeypatch):
-    """Install a minimal fake vLLM package so the seam is exercisable."""
-
-    def sentinel_forward(self, *args, **kwargs):
-        return "native"
-
-    attention_cls = type("LlamaAttention", (), {"forward": sentinel_forward})
-    second_cls = type("MistralAttention", (), {"forward": sentinel_forward})
-
+    """Install a minimal fake vLLM package for the compatibility probe."""
     vllm = types.ModuleType("vllm")
     vllm.__version__ = "0.9.0"
-    llama_mod = types.ModuleType("vllm.model_executor.models.llama")
-    llama_mod.LlamaAttention = attention_cls
-    mistral_mod = types.ModuleType("vllm.model_executor.models.mistral")
-    mistral_mod.MistralAttention = second_cls
-
-    for name, mod in [
-        ("vllm", vllm),
-        ("vllm.model_executor", types.ModuleType("vllm.model_executor")),
-        ("vllm.model_executor.models", types.ModuleType("vllm.model_executor.models")),
-        ("vllm.model_executor.models.llama", llama_mod),
-        ("vllm.model_executor.models.mistral", mistral_mod),
-    ]:
-        monkeypatch.setitem(sys.modules, name, mod)
-
-    return types.SimpleNamespace(
-        module=vllm,
-        attention_cls=attention_cls,
-        second_cls=second_cls,
-        original_forward=sentinel_forward,
-    )
+    monkeypatch.setitem(sys.modules, "vllm", vllm)
+    return vllm
 
 
 def test_legacy_injection_helper_refuses_with_an_explanation():
@@ -277,113 +258,74 @@ def test_vllm_missing_is_reported_clearly(monkeypatch):
         adapter.initialize()
 
 
-def test_vllm_unsupported_version_is_refused(fake_vllm):
-    fake_vllm.module.__version__ = "0.3.0"
+def test_vllm_has_no_guessed_supported_range():
+    assert SUPPORTED_VLLM_RANGE == ()
+    assert "0.27.1" in PROBED_VLLM_VERSIONS
+
+
+def test_vllm_probe_refuses_false_forward_hook_integration(fake_vllm):
     adapter = VLLMAdapter(cache_factory=lambda: object())
 
-    with pytest.raises(AdapterError, match="outside the range"):
+    with pytest.raises(AdapterError, match="KVConnectorBase_V1"):
         adapter.initialize()
+    assert adapter.state is AdapterState.FAILED
+    assert adapter.vllm_version == "0.9.0"
+    assert adapter.is_fully_restored()
+    assert adapter.cache is None
 
 
-def test_vllm_version_guard_can_be_overridden(fake_vllm):
-    fake_vllm.module.__version__ = "0.3.0"
+def test_vllm_unsafe_override_cannot_reenable_noop_patch(fake_vllm):
     adapter = VLLMAdapter(cache_factory=lambda: object(), strict_version=False)
-    adapter.initialize()
-    assert adapter.state is AdapterState.INITIALIZED
-
-
-def test_vllm_activate_patches_and_deactivate_restores(fake_vllm):
-    original = fake_vllm.attention_cls.forward
-    adapter = VLLMAdapter(cache_factory=lambda: "argus-cache")
-
-    adapter.activate()
-    assert fake_vllm.attention_cls.forward is not original
-    assert adapter.cache == "argus-cache"
-
-    adapter.deactivate()
-    assert fake_vllm.attention_cls.forward is original
+    with pytest.raises(AdapterError, match="activation is refused"):
+        adapter.activate()
     assert adapter.is_fully_restored()
-    assert adapter.cache is None
 
 
-def test_vllm_patched_forward_delegates_to_the_original(fake_vllm):
-    adapter = VLLMAdapter(cache_factory=lambda: "argus-cache")
-    adapter.activate()
-
-    instance = fake_vllm.attention_cls()
-    assert instance.forward() == "native", "ARGUS must not change vLLM's output"
-    assert instance._argus_cache == "argus-cache"
-    assert adapter.telemetry()["forward_calls"] == 1
-
-    adapter.deactivate()
-
-
-def test_vllm_partial_patch_failure_rolls_back_every_layer(fake_vllm):
-    """All-or-nothing: a half-patched vLLM mixes ARGUS and native attention."""
-    original = fake_vllm.attention_cls.forward
-    adapter = VLLMAdapter(
-        cache_factory=lambda: "argus-cache",
-        target_modules=[
-            "vllm.model_executor.models.llama.LlamaAttention",
-            "vllm.model_executor.models.missing.Nope",
-        ],
-    )
-
+def test_vllm_probe_never_constructs_an_argus_cache(fake_vllm):
+    calls = []
+    adapter = VLLMAdapter(cache_factory=lambda: calls.append("constructed"))
     with pytest.raises(AdapterError):
-        adapter.activate()
-
-    assert fake_vllm.attention_cls.forward is original, "first layer was left patched"
-    assert adapter.is_fully_restored()
-    assert adapter.cache is None
+        adapter.initialize()
+    assert calls == []
 
 
-def test_vllm_activate_without_cache_factory_is_refused(fake_vllm):
+def test_vllm_telemetry_never_claims_cache_ownership(fake_vllm):
     adapter = VLLMAdapter()
-    with pytest.raises(AdapterError, match="cache_factory"):
-        adapter.activate()
+    with pytest.raises(AdapterError):
+        adapter.initialize()
+    assert adapter.telemetry() == {
+        "runtime": "vllm",
+        "vllm_version": "0.9.0",
+        "argus_manages_kv_cache": False,
+        "integration_available": False,
+    }
 
 
-def test_vllm_double_patch_is_refused(fake_vllm):
-    first = VLLMAdapter(cache_factory=lambda: "a")
-    first.activate()
-
-    second = VLLMAdapter(cache_factory=lambda: "b")
-    with pytest.raises(AdapterError, match="already ARGUS-patched"):
-        second.activate()
-
-    first.deactivate()
-    assert first.is_fully_restored()
-
-
-def test_vllm_repeated_activate_deactivate_restores_exactly(fake_vllm):
-    """Restart behavior: five cycles must leave vLLM byte-identical."""
-    original = fake_vllm.attention_cls.forward
-    adapter = VLLMAdapter(cache_factory=lambda: "argus-cache")
-
-    for _ in range(5):
-        adapter.activate()
-        assert fake_vllm.attention_cls.forward is not original
-        adapter.deactivate()
-        assert fake_vllm.attention_cls.forward is original
-
+def test_vllm_failed_probe_can_be_shutdown_idempotently(fake_vllm):
+    adapter = VLLMAdapter()
+    with pytest.raises(AdapterError):
+        adapter.initialize()
     adapter.shutdown()
+    adapter.shutdown()
+    assert adapter.state is AdapterState.SHUTDOWN
     assert adapter.is_fully_restored()
 
 
-def test_vllm_multi_module_patch_and_restore(fake_vllm):
-    originals = (fake_vllm.attention_cls.forward, fake_vllm.second_cls.forward)
-    adapter = VLLMAdapter(
-        cache_factory=lambda: "argus-cache",
-        target_modules=[
-            "vllm.model_executor.models.llama.LlamaAttention",
-            "vllm.model_executor.models.mistral.MistralAttention",
-        ],
-    )
+def test_vllm_target_paths_are_never_monkey_patched(fake_vllm):
+    sentinel = type("Attention", (), {"forward": lambda self: "native"})
+    original = sentinel.forward
+    adapter = VLLMAdapter(target_modules=["fake.module.Attention"])
+    with pytest.raises(AdapterError):
+        adapter.initialize()
+    assert sentinel.forward is original
 
-    adapter.activate()
-    adapter.deactivate()
 
-    assert (fake_vllm.attention_cls.forward, fake_vllm.second_cls.forward) == originals
+def test_vllm_repeated_probes_do_not_mutate_runtime_module(fake_vllm):
+    before = dict(vars(fake_vllm))
+    for _ in range(5):
+        with pytest.raises(AdapterError):
+            VLLMAdapter().initialize()
+    assert vars(fake_vllm) == before
 
 
 # ── live runtimes (skipped unless present) ──────────────────────────────────
@@ -470,7 +412,10 @@ def test_ollama_live_repeated_cycles_are_stable():
     "vllm" not in sys.modules and not os.environ.get("ARGUS_TEST_VLLM"),
     reason="vLLM not installed (set ARGUS_TEST_VLLM=1 to force)",
 )
-def test_vllm_live_initialize():
+def test_vllm_live_probe_fails_closed():
     adapter = VLLMAdapter(cache_factory=lambda: object())
-    adapter.initialize()
+    with pytest.raises(AdapterError, match="KVConnectorBase_V1"):
+        adapter.initialize()
     assert adapter.vllm_version
+    assert adapter.capabilities.manages_kv_cache is False
+    assert adapter.is_fully_restored()

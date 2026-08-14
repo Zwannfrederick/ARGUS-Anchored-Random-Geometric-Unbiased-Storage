@@ -9,6 +9,8 @@ that ignored its own tier configuration, with no error to say so.
 import importlib
 import inspect
 from pathlib import Path
+import subprocess
+import sys
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -59,3 +61,16 @@ def test_scratch_is_documented_as_unsupported():
     readme = REPO / "scratch" / "README.md"
     assert readme.exists(), "scratch/ must state that it is unsupported"
     assert "not part of the package" in readme.read_text(encoding="utf-8").lower()
+
+
+def test_adapter_import_does_not_load_native_cache_runtime():
+    """Adapters must be testable in a vLLM env with a different torch ABI."""
+    code = (
+        "import sys; import argus_cache.adapters; "
+        "assert 'argus_cache.core.memory_manager' not in sys.modules; "
+        "assert 'argus_cpp_backend' not in sys.modules"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code], cwd=REPO, capture_output=True, text=True
+    )
+    assert result.returncode == 0, result.stderr

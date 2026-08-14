@@ -1,10 +1,18 @@
 #include "zero_copy_pool.h"
+#include <cstdlib>
 #include <iostream>
 #include <fstream>
 #include <sstream>
 #include <dirent.h>
 #include <dlfcn.h>
 #include <sys/types.h>
+
+namespace {
+bool verbose_from_env() {
+    const char* value = std::getenv("ARGUS_VERBOSE");
+    return value != nullptr && std::string(value) == "1";
+}
+}  // namespace
 
 ZeroCopyHostPool::ZeroCopyHostPool(int device_id)
     : device_id_(device_id),
@@ -101,7 +109,9 @@ void ZeroCopyHostPool::bind_to_gpu_node() {
         if (numa_available_fn_ && numa_set_preferred_fn_) {
             if (numa_available_fn_() >= 0) {
                 numa_set_preferred_fn_(gpu_numa_node_);
-                std::cout << "[ARGUS ZeroCopyHostPool] NUMA preference set to node " << gpu_numa_node_ << std::endl;
+                if (verbose_from_env()) {
+                    std::cout << "[ARGUS ZeroCopyHostPool] NUMA preference set to node " << gpu_numa_node_ << std::endl;
+                }
             }
         }
     }
@@ -111,7 +121,9 @@ void ZeroCopyHostPool::try_init() {
     cudaError_t err = cudaSetDevice(device_id_);
     if (err != cudaSuccess) {
         fallback_mode_ = true;
-        std::cout << "[ARGUS ZeroCopyHostPool] cudaSetDevice failed: " << cudaGetErrorString(err) << std::endl;
+        if (verbose_from_env()) {
+            std::cout << "[ARGUS ZeroCopyHostPool] cudaSetDevice failed: " << cudaGetErrorString(err) << std::endl;
+        }
         return;
     }
 
@@ -120,15 +132,19 @@ void ZeroCopyHostPool::try_init() {
     err = cudaHostAlloc(&probe_ptr, 65536, cudaHostAllocPortable | cudaHostAllocMapped);
     if (err != cudaSuccess) {
         fallback_mode_ = true;
-        std::cout << "[ARGUS ZeroCopyHostPool] Host allocation capability probe failed: " 
-                  << cudaGetErrorString(err) << " -> Fallback to pin_memory mode." << std::endl;
+        if (verbose_from_env()) {
+            std::cout << "[ARGUS ZeroCopyHostPool] Host allocation capability probe failed: "
+                      << cudaGetErrorString(err) << " -> Fallback to pin_memory mode." << std::endl;
+        }
         return;
     }
     cudaFreeHost(probe_ptr);
 
     bind_to_gpu_node();
     initialized_ = true;
-    std::cout << "[ARGUS ZeroCopyHostPool] Initialized successfully. Zero-Copy PCIe Active." << std::endl;
+    if (verbose_from_env()) {
+        std::cout << "[ARGUS ZeroCopyHostPool] Initialized successfully. Zero-Copy PCIe Active." << std::endl;
+    }
 }
 
 void* ZeroCopyHostPool::allocate(size_t size_bytes) {
