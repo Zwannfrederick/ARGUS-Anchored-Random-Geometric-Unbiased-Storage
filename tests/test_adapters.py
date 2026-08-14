@@ -422,6 +422,50 @@ def test_ollama_live_version_probe():
     assert adapter.server_version
 
 
+@pytest.mark.skipif(not _ollama_running(), reason="no Ollama server on localhost:11434")
+def test_ollama_live_generate_reports_real_timings():
+    with OllamaAdapter(model=_live_model(), num_ctx=2048) as ollama:
+        result = ollama.generate("Count to three.", max_tokens=24)
+
+    assert result.text.strip(), "server returned an empty completion"
+    assert result.eval_tokens and result.eval_tokens > 0
+    assert result.tokens_per_second and result.tokens_per_second > 0
+    # Client wall time must bound the server's own decode time.
+    assert result.wall_seconds >= result.eval_seconds
+
+
+@pytest.mark.skipif(not _ollama_running(), reason="no Ollama server on localhost:11434")
+def test_ollama_live_missing_model_is_rejected():
+    """The adapter must fail with an actionable message, not a raw 404 --
+    a missing model is the most common live failure and the fix is one
+    command the error should name."""
+    adapter = OllamaAdapter(model="definitely-not-a-real-model")
+    with pytest.raises(AdapterError, match="ollama pull"):
+        adapter.initialize()
+
+
+@pytest.mark.skipif(not _ollama_running(), reason="no Ollama server on localhost:11434")
+def test_ollama_live_telemetry_reports_loaded_model():
+    with OllamaAdapter(model=_live_model()) as ollama:
+        ollama.generate("hi", max_tokens=4)
+        telemetry = ollama.telemetry()
+
+    # Ollama runs in its own process: ARGUS cannot own its KV cache, and the
+    # adapter must keep saying so rather than implying credit for its numbers.
+    assert telemetry["argus_manages_kv_cache"] is False
+    assert telemetry["loaded_models"], "server reported no loaded model"
+
+
+@pytest.mark.skipif(not _ollama_running(), reason="no Ollama server on localhost:11434")
+def test_ollama_live_repeated_cycles_are_stable():
+    adapter = OllamaAdapter(model=_live_model())
+    for _ in range(3):
+        adapter.activate()
+        assert adapter.generate("ok", max_tokens=4).text is not None
+        adapter.deactivate()
+    adapter.shutdown()
+
+
 @pytest.mark.skipif(
     "vllm" not in sys.modules and not os.environ.get("ARGUS_TEST_VLLM"),
     reason="vLLM not installed (set ARGUS_TEST_VLLM=1 to force)",

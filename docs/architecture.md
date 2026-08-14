@@ -212,6 +212,29 @@ error, pass-through of Ollama's own `num_ctx` / `cache_type_k|v` settings, and
 per-request timings for use as an external baseline. Transport is injected, so
 it is testable without a running server.
 
+**Verification status: verified against a live server, 2026-08-14.**
+Ollama `0.32.11` (`ollama-cuda 0.32.11-1`), model `qwen2.5:0.5b`, on the
+RTX 3050 Ti Laptop host. Five live tests pass against the real HTTP API —
+version probe, real decode timings, actionable rejection of a missing model,
+telemetry reporting the loaded model, and three activate/generate/deactivate
+cycles without drift. The adapter needed no changes: its assumptions about
+field names and endpoint shapes matched the server as written.
+
+Recorded baseline: `docs/measurements/ollama-2026-08-14.json`, regenerate with
+`python scripts/measure_ollama.py --output <path> --date <date>`.
+
+| metric | value |
+|---|---|
+| median decode throughput | 264.0 tok/s |
+| range across 5 runs | 242.7 – 266.1 tok/s |
+| prompt eval | 0.004 – 0.031 s |
+| tokens generated per run | 64 |
+
+**Claim class: `runtime`, and external.** These describe an unmodified Ollama
+server. ARGUS does not manage this KV cache, so these numbers are not an ARGUS
+result and no speedup may be derived from them. They exist as a reference point
+for the adapter, nothing more.
+
 ### vLLM (`IN_PROCESS`, experimental)
 
 The previous integration divided vLLM's `block_tables` by 4 or 16. Those
@@ -341,7 +364,7 @@ configurations, capability filtering, tier replacement, single-tier pipelines,
 native-codec propagation to C++, and per-tier round-trip fidelity with error
 budgets derived from quantization theory.
 
-`tests/test_adapters.py` (28 tests, 2 skipped) covers both adapters' lifecycle
+`tests/test_adapters.py` (32 tests, 1 skipped) covers both adapters' lifecycle
 idempotency, failure isolation, all-or-nothing rollback, exact restoration
 across repeated activate/deactivate cycles, and telemetry that never overclaims.
-The 2 skips require a live Ollama server / installed vLLM.
+The single skip requires an installed vLLM; the Ollama live tests run.
