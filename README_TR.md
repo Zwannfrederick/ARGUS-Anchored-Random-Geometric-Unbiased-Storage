@@ -40,6 +40,9 @@ Ham ölçüm, min/max süreler ve komut:
 [`docs/measurements/downstream-2026-08-14.json`](docs/measurements/downstream-2026-08-14.json).
 Ayrıntılı değerlendirme:
 [`docs/findings-2026-08-14.md`](docs/findings-2026-08-14.md).
+Düşük context bypass, dengeli aktivasyon politikası ve daha hafif decode
+seçenekleri:
+[`docs/optimization-notes-2026-08-14-tr.md`](docs/optimization-notes-2026-08-14-tr.md).
 
 ## Gecikme neden yüksek?
 
