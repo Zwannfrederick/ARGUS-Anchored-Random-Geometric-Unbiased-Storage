@@ -17,6 +17,7 @@ from .quantization import (
 from .tier_registry import PipelineConfig, TierSpec, QuantizationBackend, EvictionPolicy, ScoringFunction
 from .zero_copy_pool import ZeroCopyHostPool
 from .jl_operators import JLOperatorCache
+from .pool_allocator import StaticPoolAllocator
 from .triton_kernels import triton_fused_paged_attention
 
 # ─── Compiled Attention Core ────────────────────────────────────────────────
@@ -555,6 +556,10 @@ class PagedDynamicKVCache:
             on_full_page_cuda=self._publish_jl_operator,
         )
         
+        # Per-tier compressed page pools. Shapes come from each tier's declared
+        # codec, not from its name, so plugin tiers get pools too.
+        self._pool_allocator = StaticPoolAllocator(page_size=self.page_size)
+
         # Static buffer state (allocated on demand during ensure_pools_allocated)
         self._pools_allocated = False
         
@@ -762,6 +767,16 @@ class PagedDynamicKVCache:
         pass
 
     @property
+    def pools_by_tier(self):
+        """The live ``{f"{tier}_{field}": tensor}`` mapping owned by the allocator.
+
+        Read-only by design: pools are created through the allocator so their
+        shapes stay derived from tier capabilities. Mutating entries in place
+        (which the tier-removal path does) is still fine.
+        """
+        return self._pool_allocator.pools
+
+    @property
     def fp8_pool_k_q(self):
         return self.pools_by_tier.get("fp8_key_q")
     @property
@@ -899,12 +914,10 @@ class PagedDynamicKVCache:
         return self.static_v_buffer[..., :self.buffer_length, :]
 
     def _get_pool_tensor(self, tier_name, key, shape, dtype, device):
-        pool_key = f"{tier_name}_{key}"
-        if pool_key not in self.pools_by_tier:
-            spec = self.tier_name_to_spec[tier_name]
-            max_pages = spec.max_pages
-            self.pools_by_tier[pool_key] = torch.zeros(max_pages, *shape, dtype=dtype, device=device)
-        return self.pools_by_tier[pool_key]
+        return self._pool_allocator.ensure(
+            tier_name, key, self.tier_name_to_spec[tier_name].max_pages,
+            shape, dtype, device,
+        )
 
     def _ensure_pools_allocated(self, keys: torch.Tensor, values: torch.Tensor):
         batch, num_heads, _, head_dim = keys.shape
@@ -929,7 +942,7 @@ class PagedDynamicKVCache:
         self.active_pool_v = torch.zeros(self.max_active_pages, batch, num_heads, self.page_size, head_dim, device=device, dtype=dtype)
         self.active_pool_idx = 0
         
-        self.pools_by_tier = {}
+        self._pool_allocator.reset()
         # Pre-allocate pools for default tiers if they are in the pipeline config
         for spec in self.tier_specs:
             if not spec.use_static_pool:
@@ -952,35 +965,12 @@ class PagedDynamicKVCache:
             device = self.active_pool_k.device
             dtype = self.active_pool_k.dtype
 
-        if name == "fp8":
-            self.pools_by_tier["fp8_key_q"] = torch.zeros(max_pages, batch, num_heads, self.page_size, head_dim, device=device, dtype=torch.int8)
-            self.pools_by_tier["fp8_value_q"] = torch.zeros(max_pages, batch, num_heads, self.page_size, head_dim, device=device, dtype=torch.int8)
-            self.pools_by_tier["fp8_key_scales"] = torch.zeros(max_pages, batch, num_heads, self.page_size, 1, device=device, dtype=dtype)
-            self.pools_by_tier["fp8_value_scales"] = torch.zeros(max_pages, batch, num_heads, self.page_size, 1, device=device, dtype=dtype)
-        elif name == "int8":
-            self.pools_by_tier["int8_key_q"] = torch.zeros(max_pages, batch, num_heads, self.page_size, head_dim, device=device, dtype=torch.int8)
-            self.pools_by_tier["int8_value_q"] = torch.zeros(max_pages, batch, num_heads, self.page_size, head_dim, device=device, dtype=torch.int8)
-            self.pools_by_tier["int8_key_scales"] = torch.zeros(max_pages, batch, num_heads, self.page_size, 1, device=device, dtype=dtype)
-            self.pools_by_tier["int8_value_scales"] = torch.zeros(max_pages, batch, num_heads, self.page_size, 1, device=device, dtype=dtype)
-        elif name == "int4":
-            self.pools_by_tier["int4_key_q"] = torch.zeros(max_pages, batch, num_heads, self.page_size // 2, head_dim, device=device, dtype=torch.uint8)
-            self.pools_by_tier["int4_value_q"] = torch.zeros(max_pages, batch, num_heads, self.page_size // 2, head_dim, device=device, dtype=torch.uint8)
-            self.pools_by_tier["int4_key_scales"] = torch.zeros(max_pages, batch, num_heads, self.page_size, 1, device=device, dtype=dtype)
-            self.pools_by_tier["int4_value_scales"] = torch.zeros(max_pages, batch, num_heads, self.page_size, 1, device=device, dtype=dtype)
-            self.pools_by_tier["int4_key_min_vals"] = torch.zeros(max_pages, batch, num_heads, self.page_size, 1, device=device, dtype=dtype)
-            self.pools_by_tier["int4_value_min_vals"] = torch.zeros(max_pages, batch, num_heads, self.page_size, 1, device=device, dtype=dtype)
-        elif name == "int2":
-            self.pools_by_tier["int2_key_q"] = torch.zeros(max_pages, batch, num_heads, self.page_size // 4, head_dim, device=device, dtype=torch.uint8)
-            self.pools_by_tier["int2_value_q"] = torch.zeros(max_pages, batch, num_heads, self.page_size // 4, head_dim, device=device, dtype=torch.uint8)
-            self.pools_by_tier["int2_key_scales"] = torch.zeros(max_pages, batch, num_heads, self.page_size, 1, device=device, dtype=dtype)
-            self.pools_by_tier["int2_value_scales"] = torch.zeros(max_pages, batch, num_heads, self.page_size, 1, device=device, dtype=dtype)
-            self.pools_by_tier["int2_key_min_vals"] = torch.zeros(max_pages, batch, num_heads, self.page_size, 1, device=device, dtype=dtype)
-            self.pools_by_tier["int2_value_min_vals"] = torch.zeros(max_pages, batch, num_heads, self.page_size, 1, device=device, dtype=dtype)
-        elif name == "one_bit":
-            self.pools_by_tier["one_bit_key_q"] = torch.zeros(max_pages, batch, num_heads, self.page_size // 8, head_dim, device=device, dtype=torch.uint8)
-            self.pools_by_tier["one_bit_value_q"] = torch.zeros(max_pages, batch, num_heads, self.page_size // 8, head_dim, device=device, dtype=torch.uint8)
-            self.pools_by_tier["one_bit_key_scales"] = torch.zeros(max_pages, batch, num_heads, self.page_size, 1, device=device, dtype=dtype)
-            self.pools_by_tier["one_bit_value_scales"] = torch.zeros(max_pages, batch, num_heads, self.page_size, 1, device=device, dtype=dtype)
+        spec = self.tier_name_to_spec.get(name)
+        if spec is None:
+            return
+        self._pool_allocator.allocate_for_tier(
+            spec, max_pages, device, dtype, batch, num_heads, head_dim
+        )
 
     def _is_projection_tier(self, tier_name: str) -> bool:
         """Whether a tier's backend is a linear projection rather than a quantizer.
