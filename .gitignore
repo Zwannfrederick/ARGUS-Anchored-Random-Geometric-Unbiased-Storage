@@ -23,3 +23,4 @@ build/
 scratch/
 
 !scratch/README.md
+.venv-vllm/
