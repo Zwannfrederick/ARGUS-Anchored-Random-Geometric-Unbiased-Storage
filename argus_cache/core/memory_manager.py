@@ -908,11 +908,11 @@ class PagedDynamicKVCache:
 
         self._pool_allocator.reset()
         
-        # Pre-initialize JL projection and reconstruction matrices if "jl" is in the tier specifications
-        if any(spec.is_projection for spec in self.tier_specs):
-            self.get_jl_projection_matrix(device, dtype)
-            self.get_jl_reconstruction_operator(device, dtype)
-        
+        # JL operators are intentionally lazy.  The native manager invokes the
+        # providers registered in __init__ only when a page actually reaches a
+        # projection tier; building a page_size x page_size/4 inverse on every
+        # layer made even sub-page requests pay the deepest archive's startup
+        # and memory cost.
         self._pools_allocated = True
 
     def _allocate_pool_for_tier(self, name, max_pages, device=None, dtype=None, batch=None, num_heads=None, head_dim=None):

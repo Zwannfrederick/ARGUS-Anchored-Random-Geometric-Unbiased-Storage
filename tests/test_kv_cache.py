@@ -24,6 +24,7 @@ def test_large_prefill_does_not_leave_an_exact_sized_staging_mirror():
     assert cache.active_pool_k is None
     assert cache.active_pool_v is None
     assert cache.pools_by_tier == {}
+    assert cache._jl_operators.cache_size() == 0
 
 
 def test_close_breaks_native_callback_ownership_cycle():
