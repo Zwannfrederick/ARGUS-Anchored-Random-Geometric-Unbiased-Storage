@@ -1,0 +1,30 @@
+{
+  "git_commit": "4db0e357697149d0857b028cb6290571c1e3bcfc",
+  "git_dirty": false,
+  "environment": {
+    "python": "3.14.7",
+    "platform": "Linux-7.1.6-zen1-1-zen-x86_64-with-glibc2.44",
+    "torch": "2.12.0+cu130",
+    "cuda_available": true,
+    "gpu": "NVIDIA GeForce RTX 3050 Ti Laptop GPU",
+    "gpu_total_mib": 3770,
+    "cuda": "13.0",
+    "capability": "8.6",
+    "triton": "3.7.0"
+  },
+  "file_sizes": {
+    "argus_cache/core/memory_manager.py": 2662,
+    "argus_cache/core/telemetry.py": null,
+    "argus_cache/core/jl_operators.py": null,
+    "argus_cache/core/pool_allocator.py": null,
+    "argus_cache/core/granularity.py": null,
+    "argus_cache/core/host_spill.py": null,
+    "argus_cache/csrc/manager.cpp": 774,
+    "argus_cache/csrc/quantization_kernels.cu": 81,
+    "argus_cache/csrc/tier_codec.cpp": 96
+  },
+  "test_summary": {
+    "exit_code": 0,
+    "summary": "135 passed, 1 skipped, 14 warnings in 14.54s"
+  }
+}
