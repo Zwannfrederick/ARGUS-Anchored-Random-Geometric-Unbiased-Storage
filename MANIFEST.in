@@ -1,0 +1,15 @@
+# The sdist must be able to build the native extension on the installing
+# machine. setuptools infers the .cpp/.cu sources from ext_modules but not the
+# headers they include, so without this an sdist install fails at
+# "fatal error: manager.h: No such file or directory" -- sources present,
+# headers missing.
+include LICENSE
+include README.md
+include CHANGELOG.md
+recursive-include argus_cache/csrc *.h *.cuh *.cpp *.cu
+
+# Never ship build artifacts or local measurement scratch.
+prune build
+prune dist
+prune scratch
+global-exclude *.so *.o *.pyc

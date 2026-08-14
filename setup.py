@@ -3,7 +3,7 @@ from torch.utils.cpp_extension import BuildExtension, CUDAExtension
 
 setup(
     name="argus_cache",
-    version="0.2.0",
+    version="0.3.0",
     author="Muhammed Emin Çelik",
     description="ARGUS: Anchored Random Geometric Unbiased Storage - Advanced Dynamic Quantized KV Cache",
     long_description=open("README.md").read() if open("README.md") else "",

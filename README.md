@@ -99,6 +99,13 @@ We believe in reproducible, honest benchmarks. ARGUS does not promise magical "1
 > ```bash
 > python benchmarks/bench_native_runtime.py --json results.json
 > ```
+>
+> As of **v0.3.0** every published figure is backed by a committed artifact
+> under [`docs/measurements/`](docs/measurements/) recorded on a clean tree,
+> and each carries the command that regenerates it. Two things were verified
+> against reality rather than assumed: the Ollama adapter against a live
+> server, and the JL tier against real model activations. See
+> [CHANGELOG.md](CHANGELOG.md).
 
 ### KV Cache Memory Avoided *(NOT REVALIDATED — see warning above)*
 *(TinyLlama-1.1B on RTX 3050 Ti Laptop, 4GB VRAM)*
