@@ -43,12 +43,26 @@ def _git_commit() -> str:
     ).strip()
 
 
+#: Paths whose state cannot affect reproducibility of the measured code:
+#: this script's own output directory, and build artifacts.
+_DIRT_EXEMPT = ("docs/measurements/", "argus_cache.egg-info/", "build/", "dist/")
+
+
 def _git_dirty() -> bool:
-    """A snapshot taken on a dirty tree cannot be reproduced from the commit."""
+    """Whether the *measured code* differs from the recorded commit.
+
+    A snapshot taken on a dirty tree cannot be reproduced from its commit
+    alone. The harness writing its own result into the repo does not count --
+    nor do build artifacts -- or every snapshot would report itself dirty.
+    """
     status = subprocess.check_output(
         ["git", "status", "--porcelain"], cwd=REPO, text=True
     )
-    return bool(status.strip())
+    for line in status.splitlines():
+        path = line[3:].strip()
+        if path and not path.startswith(_DIRT_EXEMPT):
+            return True
+    return False
 
 
 def _environment() -> dict:
