@@ -28,6 +28,35 @@ are adapters. Neither is baked into the engine.
 └──────────────────────────────────────────────────────────────┘
 ```
 
+### 1.1 Inside `argus_cache/core/`
+
+`memory_manager.py` was a 2662-line god object holding every responsibility at
+once. It is now a coordinator that owns page lifecycle and tier policy, with
+five collaborators it delegates to. Each is independently testable, and each
+was moved only after characterization tests pinned its existing behavior.
+
+| module | responsibility | lines |
+|---|---|---:|
+| `memory_manager.py` | page lifecycle, tier cascade policy, attention assembly | 1785 |
+| `telemetry.py` | compression/bandwidth accounting, VRAM and fragmentation reports | 397 |
+| `granularity.py` | experimental page split/merge (ACTIVE pages only) | 317 |
+| `host_spill.py` | lossless spill to pinned host memory, both directions idempotent | 185 |
+| `jl_operators.py` | cached JL projection/reconstruction operators | 128 |
+| `pool_allocator.py` | per-tier compressed page pools, shaped from capabilities | 119 |
+| `outliers.py` | outlier isolation and restoration | 85 |
+
+The split target was five separated responsibilities, not a line count;
+`memory_manager.py` landed at 1785 rather than the 1400–1600 originally
+estimated, because attention assembly and the cascade policy genuinely belong
+to the coordinator and were not split further to hit a number.
+
+`pool_allocator.py` is where the **last name-based dispatch in Python** was
+removed. Pool shapes now derive from a tier's declared codec — sub-byte kinds
+pack `8 // bits` values per byte, affine kinds get a zero-point pool, signed
+kinds store `int8` — so a third-party plugin tier gets a correctly shaped pool.
+Previously it matched none of the five hardcoded name branches, received no
+pool, and silently fell back to uncompressed spill with no error raised.
+
 **Ownership.** Python owns *decisions* (which page to evict, which tier is
 next, when to spill). C++ owns *mechanics* (where bytes live, how they are
 packed, when kernels launch). The boundary is crossed synchronously from Python

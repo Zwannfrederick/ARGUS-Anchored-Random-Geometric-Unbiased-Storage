@@ -19,6 +19,7 @@ from .zero_copy_pool import ZeroCopyHostPool
 from .jl_operators import JLOperatorCache
 from .pool_allocator import StaticPoolAllocator
 from .granularity import GranularityManager
+from .host_spill import HostSpillManager
 from .triton_kernels import triton_fused_paged_attention
 
 # ─── Compiled Attention Core ────────────────────────────────────────────────
@@ -509,6 +510,7 @@ class PagedDynamicKVCache:
         
         # Context swapping / Zero-OOM multi-tenant guard state
         self.is_swapped_out = False
+        self._host_spill = HostSpillManager(self)
 
         # Telemetry metrics
         self.num_resurrections = 0
@@ -1768,164 +1770,12 @@ class PagedDynamicKVCache:
             self._cpp_manager.wait_for_prefetch_idle()
 
     def swap_out_to_host(self):
-        """
-        Moves all compressed page tensors of Tiers 2-7 to CPU host memory
-        using Zero-Copy PCIe pinned/device-mapped memory (cuMemHostAlloc).
-
-        If the CUDA Driver API is unavailable, falls back to plain
-        ``tensor.cpu()`` (legacy behaviour).
-
-        After this call, GPU Triton kernels can still read the swapped
-        pages directly via PCIe device pointers — no cudaMemcpy needed.
-        """
-        if self.is_swapped_out:
-            return
-
-        import time
-        use_cuda_event = torch.cuda.is_available()
-
-        def swap_tensor_to_pinned(item, page_id):
-            """Recursively move tensors to zero-copy pinned host memory."""
-            if isinstance(item, torch.Tensor):
-                pinned = self.zero_copy_pool.tensor_to_pinned(item)
-                # Track for later cleanup
-                if page_id is not None:
-                    self._zero_copy_tensor_registry.setdefault(page_id, []).append(pinned)
-                return pinned
-            elif isinstance(item, dict):
-                for k, v in list(item.items()):
-                    item[k] = swap_tensor_to_pinned(v, page_id)
-            elif isinstance(item, list):
-                for i in range(len(item)):
-                    item[i] = swap_tensor_to_pinned(item[i], page_id)
-            return item
-
-        if use_cuda_event:
-            start_event = torch.cuda.Event(enable_timing=True)
-            end_event = torch.cuda.Event(enable_timing=True)
-            start_event.record()
-        else:
-            t0 = time.perf_counter()
-
-        total_bytes = 0
-        for spec in self.tier_specs:
-            for page in self.pages_by_tier.get(spec.name, []):
-                page_id = page.get('page_id')
-                # Calculate bytes before swap
-                for tensor_key in ['key_compressed', 'value_compressed',
-                                   'key_out_indices', 'key_out_values',
-                                   'value_out_indices', 'value_out_values']:
-                    t = page.get(tensor_key)
-                    if isinstance(t, torch.Tensor):
-                        total_bytes += t.nelement() * t.element_size()
-                    elif isinstance(t, dict):
-                        for v in t.values():
-                            if isinstance(v, torch.Tensor):
-                                total_bytes += v.nelement() * v.element_size()
-                swap_tensor_to_pinned(page, page_id)
-
-        if use_cuda_event:
-            end_event.record()
-            torch.cuda.synchronize()
-            latency_ms = start_event.elapsed_time(end_event)
-        else:
-            latency_ms = (time.perf_counter() - t0) * 1000.0
-
-        self.pcie_swap_latencies.append(latency_ms)
-        self.num_pcie_swaps += 1
-        self.pcie_bytes_swapped += total_bytes
-        self.zero_copy_pool.record_pcie_transfer(latency_ms, total_bytes)
-
-        frag = self.zero_copy_pool.get_fragmentation_report()
-        argus_log("INFO",
-                  f"Zero-Copy PCIe swap-out complete | "
-                  f"{total_bytes / (1024**2):.1f}MB → pinned host | "
-                  f"latency: {latency_ms:.2f}ms | "
-                  f"pool: {frag['pool_total_allocated_bytes'] / (1024**2):.1f}MB | "
-                  f"frag_risk: {frag['fragmentation_risk']}",
-                  line_no=2122)
-
-        self.is_swapped_out = True
-        self._invalidate_decompressed_cache()
+        """Spill the whole cache to pinned host memory. See HostSpillManager."""
+        return self._host_spill.spill_out()
 
     def swap_in_to_device(self, device="cuda"):
-        """
-        Swaps all host-resident page tensors back to GPU active VRAM.
-
-        For zero-copy tensors, this performs a PCIe DMA read (measured
-        separately from dequant latency).  For fallback tensors, uses
-        standard ``tensor.to(device)``.
-
-        After swap-in, all pinned host allocations for the moved pages
-        are freed from the ZeroCopyHostPool.
-        """
-        if not self.is_swapped_out:
-            return
-
-        import time
-        target_device = torch.device(device if torch.cuda.is_available() else "cpu")
-        use_cuda_event = torch.cuda.is_available() and target_device.type == "cuda"
-
-        if use_cuda_event:
-            start_event = torch.cuda.Event(enable_timing=True)
-            end_event = torch.cuda.Event(enable_timing=True)
-            start_event.record()
-        else:
-            t0 = time.perf_counter()
-
-        total_bytes = 0
-        zc_tensors_to_free = []
-
-        def swap_tensor_to_device(item, target_device, page_id):
-            nonlocal total_bytes
-            if isinstance(item, torch.Tensor):
-                total_bytes += item.nelement() * item.element_size()
-                # If this is a zero-copy tensor, read via PCIe then free the pinned buffer
-                is_zc = self.zero_copy_pool.is_zero_copy_tensor(item)
-                result = item.to(target_device)
-                if is_zc:
-                    zc_tensors_to_free.append(item)
-                return result
-            elif isinstance(item, dict):
-                for k, v in list(item.items()):
-                    item[k] = swap_tensor_to_device(v, target_device, page_id)
-            elif isinstance(item, list):
-                for i in range(len(item)):
-                    item[i] = swap_tensor_to_device(item[i], target_device, page_id)
-            return item
-
-        for spec in self.tier_specs:
-            for page in self.pages_by_tier.get(spec.name, []):
-                page_id = page.get('page_id')
-                swap_tensor_to_device(page, target_device, page_id)
-
-        # Clear the registry
-        self._zero_copy_tensor_registry.clear()
-
-        if use_cuda_event:
-            end_event.record()
-            torch.cuda.synchronize()
-            latency_ms = start_event.elapsed_time(end_event)
-        else:
-            latency_ms = (time.perf_counter() - t0) * 1000.0
-
-        # Now that we synchronized and the GPU has finished reading, we can safely free the host tensors
-        for t in zc_tensors_to_free:
-            self.zero_copy_pool.free_tensor(t)
-
-        self.pcie_swap_latencies.append(latency_ms)
-        self.num_pcie_swaps += 1
-        self.pcie_bytes_swapped += total_bytes
-        self.zero_copy_pool.record_pcie_transfer(latency_ms, total_bytes)
-
-        argus_log("INFO",
-                  f"Zero-Copy PCIe swap-in complete | "
-                  f"{total_bytes / (1024**2):.1f}MB ← device | "
-                  f"latency: {latency_ms:.2f}ms",
-                  line_no=2147)
-
-        self.is_swapped_out = False
-        self._invalidate_decompressed_cache()
+        """Restore a spilled cache to ``device``. See HostSpillManager."""
+        return self._host_spill.spill_in(device)
 
     def get_allocator_fragmentation_report(self) -> dict:
         return self._telemetry.allocator_fragmentation()
