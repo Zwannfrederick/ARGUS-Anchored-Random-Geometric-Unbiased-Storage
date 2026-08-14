@@ -1,5 +1,39 @@
 # Changelog
 
+## Unreleased — downstream revalidation and memory-path repair
+
+### Fixed
+- Removed persistent decompressed FP16 KV mirrors. Attention assembly now
+  fills one transient output tensor directly from native pages.
+- Streamed complete prefill pages into the native manager instead of retaining
+  a full-prompt Python staging buffer per layer.
+- Stopped allocating unused Python tier pools beside native-owned storage;
+  legacy pools now allocate only when the legacy path is used.
+- Native callbacks now hold weak cache references, and explicit teardown clears
+  them immediately. Completed caches can no longer remain alive through a
+  C++→Python→C++ reference cycle or contaminate later benchmark arms.
+- Made JL operators lazy, avoiding per-layer projection setup until a page
+  actually reaches the archival tier.
+- Fixed the downstream harness to retain only final-position prefill logits,
+  warm up both arms, release caches between arms, and record exact provenance.
+
+### Changed
+- `VLLMAdapter` now fails closed. A probe against vLLM 0.27.1 confirmed the
+  model-class forward wrapper did not own or modify vLLM KV blocks. The adapter
+  reports `manages_kv_cache=False` until a `KVConnectorBase_V1` and/or custom
+  `AttentionBackend` implementation exists.
+- The package root uses lazy exports so adapter inspection works in an isolated
+  environment with a different torch ABI from the compiled ARGUS extension.
+- Withdrawn vLLM/OOM/throughput claims were removed from both READMEs and
+  replaced with the revalidated downstream result.
+
+### Measured
+- Qwen2.5-0.5B-Instruct on RTX 3050 Ti Laptop: at 16K, peak VRAM falls from
+  1722.5 to 1590.6 MiB (7.7%), while TPOT rises from 18.84 to 79.78 ms (4.2x).
+  This proves a memory reduction, not baseline-OOM survival.
+- Token-by-token perplexity delta is -0.0176 with only ACTIVE and FP8 tiers
+  occupied; no downstream claim is made for deeper lossy tiers.
+
 ## v0.3.0 — Native tier-codec engine, plugin system, runtime adapters
 
 ### Added

@@ -235,7 +235,7 @@ server. ARGUS does not manage this KV cache, so these numbers are not an ARGUS
 result and no speedup may be derived from them. They exist as a reference point
 for the adapter, nothing more.
 
-### vLLM (`IN_PROCESS`, experimental)
+### vLLM (`IN_PROCESS`, unavailable and fail-closed)
 
 The previous integration divided vLLM's `block_tables` by 4 or 16. Those
 entries are physical block **indices**, not byte offsets — dividing them aliases
@@ -243,11 +243,18 @@ unrelated sequences onto shared blocks. It compressed nothing and corrupted
 attention. It has been removed; `inject_argus_to_vllm()` now raises with that
 explanation.
 
-`VLLMAdapter` instead: guards on a supported vLLM version range rather than
-guessing at an unknown seam; patches one recorded attribute per target and
-restores it exactly (`is_fully_restored()`); and rolls back **every** patch if
-any target fails, because a half-patched vLLM mixing ARGUS and native attention
-is worse than no patch. It does **not** replace vLLM's block allocator.
+The later model-class wrapper was also ineffective. It attached an
+`_argus_cache` attribute to `LlamaAttention`, but vLLM never read it: vLLM's
+own block pool and attention implementation remained authoritative. The
+isolated vLLM 0.27.1 probe therefore found no safe model-level patch seam.
+
+`VLLMAdapter` now has an empty supported-version range, reports
+`manages_kv_cache=False`, performs no mutations, and refuses initialization
+with an actionable error. A real implementation must use vLLM's
+`KVConnectorBase_V1` and/or a registered custom `AttentionBackend`. The former
+can move/offload runtime-owned blocks; the latter is required to consume a
+custom compressed page layout without materializing a full FP16 cache first.
+See `docs/vllm-verification.md` for the recorded environment and probe result.
 
 ### Adding SGLang
 
@@ -324,13 +331,33 @@ Decode cost grows roughly linearly in resident pages, because every compressed
 page is decompressed and concatenated each step. Larger pages amortize better
 at equal context (4096 tokens: 11.35 ms at page 256 vs 7.97 ms at page 512).
 
-### 5.3 Not measured
+### 5.3 End-to-end HuggingFace result
 
-The following are **not** produced by this run and no claim is made about them:
-TTFT and TPOT on a real model, perplexity delta, NIAH/RULER retrieval, vLLM
-throughput, CPU-spill overhead under real memory pressure, multi-GPU. Any
-figure for these in older documentation predates this refactor and has not
-been revalidated.
+`docs/measurements/downstream-2026-08-14.json`, regenerate with the exact
+command stored in its `command` field. Qwen2.5-0.5B-Instruct, FP16, batch 1,
+page size 1024, 64 decode tokens, three repeats after one warm-up.
+
+| context | baseline TTFT | ARGUS TTFT | baseline TPOT | ARGUS TPOT | baseline VRAM | ARGUS VRAM |
+|---:|---:|---:|---:|---:|---:|---:|
+| 512 | 0.044 s | 0.148 s | 18.62 ms | 28.69 ms | 982.2 MiB | 988.2 MiB |
+| 1,024 | 0.076 s | 0.181 s | 18.55 ms | 30.21 ms | 1007.1 MiB | 1007.1 MiB |
+| 2,048 | 0.152 s | 0.273 s | 19.24 ms | 30.85 ms | 1056.8 MiB | 1056.9 MiB |
+| 4,096 | 0.316 s | 0.385 s | 19.14 ms | 40.21 ms | 1149.4 MiB | 1137.4 MiB |
+| 8,192 | 0.718 s | 0.880 s | 17.85 ms | 52.51 ms | 1340.4 MiB | 1280.5 MiB |
+| 16,384 | 1.819 s | 3.992 s | 18.84 ms | 79.78 ms | 1722.5 MiB | 1590.6 MiB |
+
+The persistent-memory crossover appears around 4K. At 16K ARGUS saves
+131.95 MiB (7.7%), but TPOT is 4.2x baseline. The HF interface requires a
+contiguous K/V tensor, so every decode step still decompresses and concatenates
+stored pages. Storage is compressed; the attention input is not.
+
+Token-by-token perplexity was 33.9169 baseline versus 33.8993 ARGUS. Tier
+occupancy was only ACTIVE plus FP8, so the -0.0176 delta does not validate any
+lossy archival tier.
+
+Still not measured: NIAH/RULER retrieval, vLLM throughput, CPU-spill overhead
+under real pressure, concurrent serving, multi-GPU, or a baseline-OOM run that
+ARGUS survives. No claim is made for those outcomes.
 
 ### 5.4 The JL tier on real activations — verdict
 
@@ -413,12 +440,21 @@ a JL page had no cached reconstruction operator (it cannot build one — no GIL
 on that thread), which surfaced later as an empty page during attention. It now
 skips the speculation.
 
+The end-to-end pass found four more implementation costs that had masked the
+intended memory curve: a persistent decompressed FP16 mirror, a full-prompt
+prefill staging buffer, unused Python pools beside native storage, and native
+callback cycles that kept completed benchmark caches alive. Pages now fill one
+transient output directly, prefill streams complete pages to C++, legacy pools
+allocate only on demand, and native callbacks hold weak cache references;
+cache reset also clears them immediately. JL reconstruction operators are
+initialized only when a page actually reaches the projection tier.
+
 ---
 
 ## 7. Testing
 
 ```bash
-pytest tests/ -q     # 132 passed, 2 skipped
+pytest tests/ -q     # 193 passed, 1 skipped before weak-callback hardening
 ```
 
 `tests/test_plugin_system.py` (32 tests) covers registration, removal, invalid
@@ -426,7 +462,7 @@ configurations, capability filtering, tier replacement, single-tier pipelines,
 native-codec propagation to C++, and per-tier round-trip fidelity with error
 budgets derived from quantization theory.
 
-`tests/test_adapters.py` (32 tests, 1 skipped) covers both adapters' lifecycle
-idempotency, failure isolation, all-or-nothing rollback, exact restoration
-across repeated activate/deactivate cycles, and telemetry that never overclaims.
-The single skip requires an installed vLLM; the Ollama live tests run.
+Adapter coverage includes lifecycle idempotency, failure isolation, teardown,
+and telemetry that never overclaims. The vLLM subset additionally passes
+10 tests in the isolated vLLM 0.27.1 environment; initialization must fail
+closed because no ARGUS KV-block integration exists.

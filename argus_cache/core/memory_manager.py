@@ -1,5 +1,6 @@
 import torch
 import argus_cpp_backend
+import weakref
 from .quantization import (
     quantize_to_int8,
     dequantize_from_int8,
@@ -398,27 +399,48 @@ class PagedDynamicKVCache:
         # actually reaches the tier, which isn't known at construction time.
         # Register lazy providers so C++ can request them on first use instead
         # of relying on an eagerly-built (and possibly wrongly-shaped) default.
-        self._cpp_manager.set_jl_projection_provider(
-            lambda sample: self.get_jl_projection_matrix(sample.device, sample.dtype, sample.shape[-2])
-        )
-        self._cpp_manager.set_jl_recon_provider(
-            lambda compressed_sample, seq_len: self.get_jl_reconstruction_operator(
-                compressed_sample.device, compressed_sample.dtype, seq_len=seq_len)
-        )
+        cache_ref = weakref.ref(self)
+
+        def _jl_projection_provider(sample):
+            cache = cache_ref()
+            if cache is None:
+                raise RuntimeError("ARGUS cache was released before JL projection")
+            return cache.get_jl_projection_matrix(
+                sample.device, sample.dtype, sample.shape[-2]
+            )
+
+        def _jl_recon_provider(compressed_sample, seq_len):
+            cache = cache_ref()
+            if cache is None:
+                raise RuntimeError("ARGUS cache was released before JL reconstruction")
+            return cache.get_jl_reconstruction_operator(
+                compressed_sample.device, compressed_sample.dtype, seq_len=seq_len
+            )
+
+        self._cpp_manager.set_jl_projection_provider(_jl_projection_provider)
+        self._cpp_manager.set_jl_recon_provider(_jl_recon_provider)
 
         # Restore the pluggable eviction-policy hooks into the C++ hot path:
         # which page leaves the active pool, and per-page access bookkeeping
         # (reference bits / heat registers / importance recalculation).
         if self.eviction_policy is not None:
             def _select_active_victim(pages):
-                victim = self.eviction_policy.select_victim(list(pages), context={})
+                cache = cache_ref()
+                if cache is None:
+                    return 0
+                victim = cache.eviction_policy.select_victim(
+                    list(pages), context={}
+                )
                 return list(pages).index(victim)
             self._cpp_manager.set_active_pool_victim_selector(_select_active_victim)
 
         def _on_page_access(page, block_w, step):
-            if self.eviction_policy is not None and hasattr(self.eviction_policy, 'on_access'):
-                self.eviction_policy.on_access(page, block_w, step)
-            self._calculate_importance(page)
+            cache = cache_ref()
+            if cache is None:
+                return
+            if cache.eviction_policy is not None and hasattr(cache.eviction_policy, 'on_access'):
+                cache.eviction_policy.on_access(page, block_w, step)
+            cache._calculate_importance(page)
         self._cpp_manager.set_on_page_access_callback(_on_page_access)
         self._cpp_manager.set_force_qos(getattr(self.config, 'force_qos', False))
 

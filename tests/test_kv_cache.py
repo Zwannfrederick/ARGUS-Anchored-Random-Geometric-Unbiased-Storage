@@ -37,6 +37,16 @@ def test_close_breaks_native_callback_ownership_cycle():
 
     assert reference() is None
 
+
+def test_native_callbacks_do_not_keep_an_unclosed_cache_alive():
+    cache = PagedDynamicKVCache(page_size=8, sink_tokens=0)
+    reference = weakref.ref(cache)
+
+    del cache
+    gc.collect()
+
+    assert reference() is None
+
 def test_cache_transitions():
     print("Testing 7-Tier PagedDynamicKVCache transitions...")
     
