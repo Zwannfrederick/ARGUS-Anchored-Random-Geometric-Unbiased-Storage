@@ -31,3 +31,10 @@ dependencies = [
     "matplotlib",
     "pytest"
 ]
+
+[tool.pytest.ini_options]
+# scratch/ holds throwaway experiment scripts, several named test_*.py. They
+# are manual scripts, not tests; collecting them would inflate the suite's pass
+# count with code nobody maintains.
+norecursedirs = ["scratch", "build", "dist", ".venv", "*.egg-info"]
+testpaths = ["tests"]

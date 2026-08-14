@@ -45,3 +45,17 @@ def test_shim_accepts_pipeline_argument():
     params = inspect.signature(PagedDynamicQuantizedCache.__init__).parameters
     assert "pipeline" in params
     assert "balloon_driver" in params
+
+
+def test_scratch_is_excluded_from_test_collection():
+    """scratch/ holds throwaway scripts named test_*; collecting them would
+    make the suite's pass count meaningless."""
+    config = (REPO / "pyproject.toml").read_text(encoding="utf-8")
+    assert "norecursedirs" in config
+    assert "scratch" in config
+
+
+def test_scratch_is_documented_as_unsupported():
+    readme = REPO / "scratch" / "README.md"
+    assert readme.exists(), "scratch/ must state that it is unsupported"
+    assert "not part of the package" in readme.read_text(encoding="utf-8").lower()

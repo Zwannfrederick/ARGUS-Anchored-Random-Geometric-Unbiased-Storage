@@ -22,3 +22,4 @@ build/
 # Local Scratch Directory
 scratch/
 
+!scratch/README.md
