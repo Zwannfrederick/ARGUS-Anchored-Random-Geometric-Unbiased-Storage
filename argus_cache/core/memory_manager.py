@@ -18,6 +18,7 @@ from .tier_registry import PipelineConfig, TierSpec, QuantizationBackend, Evicti
 from .zero_copy_pool import ZeroCopyHostPool
 from .jl_operators import JLOperatorCache
 from .pool_allocator import StaticPoolAllocator
+from .granularity import GranularityManager
 from .triton_kernels import triton_fused_paged_attention
 
 # ─── Compiled Attention Core ────────────────────────────────────────────────
@@ -257,73 +258,8 @@ def calculate_tensor_entropy(tensor):
     entropy = -torch.sum(p * torch.log(p)).item()
     return entropy
 
-def _apply_outlier_restoration(k: torch.Tensor, page: dict, key: str = 'key') -> torch.Tensor:
-    """
-    Safely applies saved outlier values back to a decompressed tensor.
+from .outliers import _apply_outlier_restoration, isolate_outliers  # noqa: F401  (re-exported)
 
-    Handles two sources of subtle bugs that plagued the original inline code:
-    1. int16 overflow: indices stored as int16 are converted to int64 safely.
-    2. Bounds safety: out-of-range indices (from memory corruption or cascade
-       across swap cycles) are silently skipped instead of crashing with IndexError.
-    3. Device mismatch: indices/values are moved to the same device as k.
-    """
-    idx = page.get(f'{key}_out_indices')
-    vals = page.get(f'{key}_out_values')
-    if idx is None or idx.numel() == 0 or vals is None:
-        return k
-
-    # Ensure int64 for indexing (int16 is stored to save VRAM, but indexing needs int64)
-    idx_long = idx.to(dtype=torch.int64, device=k.device)
-    vals = vals.to(device=k.device, dtype=k.dtype)
-
-    # Validate bounds — skip silently if stale/corrupted (e.g., after swap cycles)
-    shape = k.shape
-    ndim = len(shape)
-    if idx_long.shape[-1] != ndim:
-        return k  # dimension mismatch — skip
-    valid_mask = torch.ones(idx_long.shape[0], dtype=torch.bool, device=k.device)
-    for dim in range(ndim):
-        col = idx_long[:, dim]
-        valid_mask &= (col >= 0) & (col < shape[dim])
-
-    if not valid_mask.any():
-        return k
-
-    idx_long = idx_long[valid_mask]
-    vals = vals[valid_mask]
-
-    k = k.clone()
-    # Unpack multi-dim indices into tuple for advanced indexing
-    index_tuple = tuple(idx_long[:, d] for d in range(ndim))
-    k[index_tuple] = vals
-    return k
-
-
-def isolate_outliers(tensor, threshold_sigma=3.0):
-    """
-    Isolates extreme value outliers globally using a highly optimized, fast 1-pass filter:
-    Bypasses heavy double std/mean calculations to prevent latency spikes during lifecycle cascades.
-    NaN/Inf Robustness filter: Isolates and recovers corrupted elements.
-    """
-    # Robustness filter: Cleanse NaNs and Infs to avoid cascading attention degradation
-    nan_mask = torch.isnan(tensor) | torch.isinf(tensor)
-    if nan_mask.any():
-        tensor = torch.where(~nan_mask, tensor, torch.zeros(1, dtype=tensor.dtype, device=tensor.device))
-
-    if threshold_sigma <= 0:
-        return tensor, torch.zeros_like(tensor), torch.zeros_like(tensor, dtype=torch.bool)
-        
-    abs_t = torch.abs(tensor)
-    
-    # Fast 1-pass channel-wise mean-based outlier filter (avoids costly std)
-    mean_ch = torch.mean(abs_t, dim=-2, keepdim=True)
-    outlier_mask = abs_t > (mean_ch * threshold_sigma)
-    
-    # Extract outliers in FP16, zero them out in normal part to reduce quantization range
-    outlier_vals = torch.where(outlier_mask, tensor, torch.zeros(1, dtype=tensor.dtype, device=tensor.device))
-    normal_vals = torch.where(~outlier_mask, tensor, torch.zeros(1, dtype=tensor.dtype, device=tensor.device))
-    
-    return normal_vals, outlier_vals, outlier_mask
 
 class PagedDynamicKVCache:
     @property
@@ -515,6 +451,7 @@ class PagedDynamicKVCache:
             # time a split micro-page cascades into one of those tiers. Callers
             # that explicitly pass micro_page_size opt out of this guard.
             self.micro_page_size = max(8, (self.page_size // 4 // 8) * 8)
+        self._granularity = GranularityManager(self, self.micro_page_size)
         self.balloon_driver = getattr(pipeline, 'balloon_driver', None)
         if self.balloon_driver is None:
             self.balloon_driver = getattr(self.config, 'balloon_driver', None)
@@ -1735,266 +1672,19 @@ class PagedDynamicKVCache:
         return attn_output
 
     def _write_compressed_field(self, page, prefix, comp):
-        """
-        Writes a pluggable backend.compress() dict ({'q', 'scales', 'min_vals'})
-        into the C++ Page struct's fixed fields (<prefix>_compressed/_scale/_min).
-        The C++ struct only holds one scalar scale/min per tensor (matching its
-        own hardcoded fp8/int8/int4/int2/one_bit tiers), so per-channel scale
-        tensors from Python backends are collapsed to their mean. This trades a
-        little precision for structural compatibility on the split/merge path.
-        """
-        page[f'{prefix}_compressed'] = comp['q']
-        scales = comp.get('scales')
-        min_vals = comp.get('min_vals')
-        page[f'{prefix}_scale'] = float(scales.float().mean().item()) if scales is not None else 1.0
-        page[f'{prefix}_min'] = float(min_vals.float().mean().item()) if min_vals is not None else 0.0
+        return self._granularity._write_compressed_field(page, prefix, comp)
 
     def split_page(self, page, tier_name=None):
-        """
-        Splits a Mega-page (size page_size) into multiple Micro-pages (size micro_page_size).
-        """
-        micro_size = self.micro_page_size
-        current_size = page.get('page_size', self.page_size)
-        if current_size <= micro_size or current_size % micro_size != 0:
-            return []
-
-        num_splits = current_size // micro_size
-        split_pages = []
-
-        if 'key_compressed' in page or 'value_compressed' in page:
-            spec = self.tier_name_to_spec.get(tier_name)
-            if spec is None:
-                return []
-
-            decomp_args = {"seq_dim": -2}
-            if self._is_projection_tier(tier_name):
-                recon_op = self.get_jl_reconstruction_operator(
-                    page['key_proj'].device, page['key_proj'].dtype,
-                    seq_len=page.get('page_size', self.page_size))
-                decomp_args['recon_operator'] = recon_op
-
-            k_raw = spec.backend.decompress(page['key_compressed'], **decomp_args)
-            v_raw = spec.backend.decompress(page['value_compressed'], **decomp_args)
-
-            k_raw = _apply_outlier_restoration(k_raw, page, key='key')
-            v_raw = _apply_outlier_restoration(v_raw, page, key='value')
-
-            for i in range(num_splits):
-                start = i * micro_size
-                end = start + micro_size
-                k_part = k_raw[..., start:end, :]
-                v_part = v_raw[..., start:end, :]
-
-                if spec.use_outlier_isolation:
-                    k_part_norm, k_part_out, k_part_mask = isolate_outliers(k_part, self.threshold_sigma)
-                    v_part_norm, v_part_out, v_part_mask = isolate_outliers(v_part, self.threshold_sigma)
-                    part_k_out_indices = torch.nonzero(k_part_mask).to(torch.int16)
-                    part_k_out_values = k_part_out[k_part_mask]
-                    part_v_out_indices = torch.nonzero(v_part_mask).to(torch.int16)
-                    part_v_out_values = v_part_out[v_part_mask]
-                else:
-                    k_part_norm, v_part_norm = k_part, v_part
-                    part_k_out_indices, part_k_out_values = None, None
-                    part_v_out_indices, part_v_out_values = None, None
-
-                comp_args = {"seq_dim": -2}
-                if spec.is_projection:
-                    w_proj = self.get_jl_projection_matrix(k_part_norm.device, k_part_norm.dtype, k_part_norm.shape[-2])
-                    comp_args['w_proj'] = w_proj
-
-                part_k_comp = spec.backend.compress(k_part_norm, **comp_args)
-                part_v_comp = spec.backend.compress(v_part_norm, **comp_args)
-
-                part_page = argus_cpp_backend.create_page()
-                part_page['page_id'] = self._cpp_manager.next_page_id()
-                part_page['tier_name'] = tier_name
-                part_page['orig_dtype'] = k_part_norm.dtype
-                self._write_compressed_field(part_page, 'key', part_k_comp)
-                self._write_compressed_field(part_page, 'value', part_v_comp)
-                part_page['pool_idx'] = -1
-                part_page['attention_sum'] = page.get('attention_sum', 0.0) / num_splits
-                part_page['last_step_accessed'] = page.get('last_step_accessed', self.generation_step)
-                part_page['importance_score'] = page.get('importance_score', 0.0)
-                part_page['page_size'] = micro_size
-
-                # NOTE: Outliers are currently unsupported in C++ Page struct
-                # If needed, we must add key_out_indices etc. to C++ Page.
-
-                split_pages.append(part_page)
-        else:
-            k_raw = page['key']
-            v_raw = page['value']
-
-            for i in range(num_splits):
-                start = i * micro_size
-                end = start + micro_size
-                k_part = k_raw[..., start:end, :]
-                v_part = v_raw[..., start:end, :]
-
-                part_page = argus_cpp_backend.create_page()
-                part_page['page_id'] = self._cpp_manager.next_page_id()
-                part_page['tier_name'] = 'active'
-                part_page['orig_dtype'] = k_part.dtype
-                part_page['key'] = k_part
-                part_page['value'] = v_part
-                part_page['pool_idx'] = -1
-                part_page['attention_sum'] = page.get('attention_sum', 0.0) / num_splits
-                part_page['last_step_accessed'] = page.get('last_step_accessed', self.generation_step)
-                part_page['importance_score'] = page.get('importance_score', 0.0)
-                part_page['page_size'] = micro_size
-                split_pages.append(part_page)
-
-        return split_pages
+        """Split a mega-page into micro-pages. See GranularityManager."""
+        return self._granularity.split(page, tier_name)
 
     def merge_pages(self, pages, tier_name=None):
-        """
-        Merges a list of Micro-pages back into a single Mega-page (size page_size).
-        """
-        if not pages:
-            return None
-
-        total_size = sum(p.get('page_size', self.page_size) for p in pages)
-        k_list = []
-        v_list = []
-        spec = self.tier_name_to_spec.get(tier_name) if tier_name else None
-
-        for p in pages:
-            if 'key_compressed' in p or 'value_compressed' in p:
-                decomp_args = {"seq_dim": -2}
-                if self._is_projection_tier(tier_name):
-                    recon_op = self.get_jl_reconstruction_operator(
-                        p['key_proj'].device, p['key_proj'].dtype,
-                        seq_len=p.get('page_size', self.page_size))
-                    decomp_args['recon_operator'] = recon_op
-
-                k_raw = spec.backend.decompress(p['key_compressed'], **decomp_args)
-                v_raw = spec.backend.decompress(p['value_compressed'], **decomp_args)
-
-                k_raw = _apply_outlier_restoration(k_raw, p, key='key')
-                v_raw = _apply_outlier_restoration(v_raw, p, key='value')
-            else:
-                k_raw = p['key']
-                v_raw = p['value']
-
-            k_list.append(k_raw)
-            v_list.append(v_raw)
-
-        k_merged = torch.cat(k_list, dim=-2)
-        v_merged = torch.cat(v_list, dim=-2)
-
-        next_id = self._cpp_manager.next_page_id()
-
-        if tier_name is not None and spec is not None:
-            if spec.use_outlier_isolation:
-                k_norm, k_out, k_mask = isolate_outliers(k_merged, self.threshold_sigma)
-                v_norm, v_out, v_mask = isolate_outliers(v_merged, self.threshold_sigma)
-                k_out_indices = torch.nonzero(k_mask).to(torch.int16)
-                k_out_values = k_out[k_mask]
-                v_out_indices = torch.nonzero(v_mask).to(torch.int16)
-                v_out_values = v_out[v_mask]
-            else:
-                k_norm, v_norm = k_merged, v_merged
-                k_out_indices, k_out_values = None, None
-                v_out_indices, v_out_values = None, None
-
-            comp_args = {"seq_dim": -2}
-            if spec.is_projection:
-                w_proj = self.get_jl_projection_matrix(k_norm.device, k_norm.dtype, k_norm.shape[-2])
-                comp_args['w_proj'] = w_proj
-
-            key_comp = spec.backend.compress(k_norm, **comp_args)
-            value_comp = spec.backend.compress(v_norm, **comp_args)
-
-            merged_page = argus_cpp_backend.create_page()
-            merged_page['page_id'] = next_id
-            merged_page['tier_name'] = tier_name
-            merged_page['orig_dtype'] = k_norm.dtype
-            self._write_compressed_field(merged_page, 'key', key_comp)
-            self._write_compressed_field(merged_page, 'value', value_comp)
-            merged_page['pool_idx'] = -1
-            merged_page['attention_sum'] = sum(p.get('attention_sum', 0.0) for p in pages)
-            merged_page['last_step_accessed'] = max(p.get('last_step_accessed', self.generation_step) for p in pages)
-            merged_page['importance_score'] = max(p.get('importance_score', 0.0) for p in pages)
-            merged_page['page_size'] = total_size
-            # NOTE: outliers skipped for now as C++ doesn't support them
-        else:
-            merged_page = argus_cpp_backend.create_page()
-            merged_page['page_id'] = next_id
-            merged_page['tier_name'] = 'active'
-            merged_page['orig_dtype'] = k_merged.dtype
-            merged_page['key'] = k_merged
-            merged_page['value'] = v_merged
-            merged_page['pool_idx'] = -1
-            merged_page['attention_sum'] = sum(p.get('attention_sum', 0.0) for p in pages)
-            merged_page['last_step_accessed'] = max(p.get('last_step_accessed', self.generation_step) for p in pages)
-            merged_page['importance_score'] = max(p.get('importance_score', 0.0) for p in pages)
-            merged_page['page_size'] = total_size
-
-        return merged_page
+        """Merge micro-pages back into a mega-page. See GranularityManager."""
+        return self._granularity.merge(pages, tier_name)
 
     def manage_variable_granularity(self):
-        """
-        Scans pages, splits cold Mega-pages into Micro-pages,
-        and merges hot contiguous Micro-pages into Mega-pages.
-        """
-        micro_size = self.micro_page_size
-
-        # 1. Manage active pages
-        new_active = []
-        i = 0
-        while i < len(self.active_pages):
-            page = self.active_pages[i]
-            p_size = page.get('page_size', self.page_size)
-
-            if p_size == self.page_size and page.get('importance_score', 0.0) < 0.5:
-                splits = self.split_page(page)
-                if splits:
-                    new_active.extend(splits)
-                    argus_log("INFO", f"Splitting Page {page['page_id']} (ACTIVE) -> {len(splits)} Micro-pages", line_no=500)
-                    i += 1
-                    continue
-
-            needed_pages = self.page_size // micro_size
-            if p_size == micro_size and i + needed_pages <= len(self.active_pages):
-                candidate_pages = self.active_pages[i : i + needed_pages]
-                if all(p.get('page_size', self.page_size) == micro_size and p.get('importance_score', 0.0) > 1.5 for p in candidate_pages):
-                    merged = self.merge_pages(candidate_pages)
-                    if merged is not None:
-                        new_active.append(merged)
-                        argus_log("INFO", f"Merging {len(candidate_pages)} Micro-pages -> Page {merged['page_id']} (ACTIVE)", line_no=510)
-                        i += needed_pages
-                        continue
-
-            new_active.append(page)
-            i += 1
-        
-        # Modify active pages
-        self.active_pages = new_active
-
-        # 2. Manage compressed tiers
-        #
-        # Splitting/merging a page that's already in a compressed tier would
-        # decompress and re-compress it via the pluggable Python backend
-        # (spec.backend.compress/decompress, called with seq_dim=-2 — it
-        # packs along the sequence axis). C++'s own dequant kernels for these
-        # same tier names (fp8/int8/int4/int2/one_bit) always pack along the
-        # last axis (head_dim) instead, with a hardcoded, unrelated layout.
-        # The two are byte-incompatible: a page split here and later
-        # resurrected through the C++ path reads back the wrong shape/values.
-        # Until the two compression implementations are unified, variable
-        # granularity is restricted to ACTIVE (uncompressed FP16) pages,
-        # which have no packing format to clash over. Intentionally a no-op
-        # below — left structured for when tier-level splitting is revisited.
-        for spec in self.tier_specs:
-            pages_list = self.pages_by_tier.get(spec.name, [])
-            new_list = list(pages_list)
-
-            # Modify pages            # Apply changes
-            # Since self.pages_by_tier returns the dictionary directly, we can assign the new list to it
-            pages_dict = self.pages_by_tier
-            pages_dict[spec.name] = new_list
-            self.pages_by_tier = pages_dict
-        self._invalidate_decompressed_cache()
+        """Split cold pages and merge hot runs. See GranularityManager."""
+        return self._granularity.rebalance()
 
     def speculate_and_prefetch(self, attn_weights=None):
         """
