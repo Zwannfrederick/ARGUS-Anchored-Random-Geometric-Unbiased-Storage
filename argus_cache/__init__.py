@@ -1,6 +1,26 @@
+"""ARGUS — a configurable heterogeneous KV-cache management runtime.
+
+ARGUS is a control layer for KV-cache memory, not a single quantization
+algorithm. Python owns configuration, policy, and the public API; a native
+C++/CUDA engine owns the data plane (page storage, compression kernels, fused
+attention). Quantization tiers are plugins (:mod:`argus_cache.plugins`) and
+inference runtimes are adapters (:mod:`argus_cache.adapters`), so neither is
+baked into the cache manager.
+"""
+
 from .models.attention_wrapper import PagedDynamicQuantizedCache
 from .core.memory_manager import PagedDynamicKVCache
 from .core.balloon_driver import ElasticCacheBalloonDriver
+from .core.tier_registry import PipelineConfig, TierSpec
+from .plugins import (
+    BackendCapabilities,
+    NativeCodecSpec,
+    available_quantizers,
+    get_capabilities,
+    list_quantizers,
+    register_quantizer,
+    unregister_quantizer,
+)
 
 def patch_model_with_argus(
     model, 
@@ -40,8 +60,20 @@ def patch_model_with_argus(
     return model
 
 __all__ = [
+    # Cache runtime
     "PagedDynamicQuantizedCache",
     "PagedDynamicKVCache",
     "ElasticCacheBalloonDriver",
-    "patch_model_with_argus"
+    "patch_model_with_argus",
+    # Tier configuration
+    "PipelineConfig",
+    "TierSpec",
+    # Plugin system
+    "BackendCapabilities",
+    "NativeCodecSpec",
+    "register_quantizer",
+    "unregister_quantizer",
+    "list_quantizers",
+    "available_quantizers",
+    "get_capabilities",
 ]

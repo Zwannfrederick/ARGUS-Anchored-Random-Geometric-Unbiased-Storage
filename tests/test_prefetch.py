@@ -46,7 +46,7 @@ def test_prefetch_without_weights():
     # Ensure the pages in FP8/INT8 are prefetched
     fp8_page = cache.pages_by_tier['fp8'][0]
     int8_page = cache.pages_by_tier['int8'][0]
-    assert id(fp8_page) in prefetched_page_ids or id(int8_page) in prefetched_page_ids
+    assert fp8_page.get('page_id') in prefetched_page_ids or int8_page.get('page_id') in prefetched_page_ids
     
     # Run attention and verify prefetch_hits
     q = torch.randn(1, 1, 1, 16, dtype=torch.float16)
@@ -95,7 +95,7 @@ def test_prefetch_with_weights():
     cache.speculate_and_prefetch(attn_weights)
     
     # Check that INT8 page is prefetched
-    assert id(int8_page) in cache.prefetch_cache
+    assert int8_page.get('page_id') in cache.prefetch_cache
     
     # Retrieve prefetch hit count
     initial_hits = cache.prefetch_hits

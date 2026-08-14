@@ -1,203 +1,318 @@
-# ARGUS Cache Architecture Reference
+# ARGUS Architecture
 
-This document provides a comprehensive technical overview of the **ARGUS (Anchored Random Geometric Unbiased Storage)** KV Cache virtual memory runtime. It outlines the internal state machine, compression cascade mechanics, API contracts, custom Triton JIT kernels, attention integration, and the host memory paging subsystem.
+ARGUS is a **configurable heterogeneous KV-cache management runtime**. It is a
+control layer for cache memory, not a quantization algorithm. The six
+compression tiers it ships with are plugins; the inference runtimes it supports
+are adapters. Neither is baked into the engine.
 
 ---
 
-## 1. Page Lifecycle & State Machine
+## 1. Layering
 
-ARGUS operates as a virtual memory paging manager for Large Language Model (LLM) Key-Value (KV) attention states. Rather than keeping all KV tensors in uncompressed FP16 format, ARGUS implements a cascading, multi-tiered memory hierarchy.
-
-### 1.1. Virtual Memory Hierarchy Flow
-
-The lifecycle of an attention cache page flows through progressive stages of compression and hardware relocation under memory pressure:
-
-```mermaid
-graph TD
-    A["Active Page Buffer<br/>(Uncompressed FP16)"] --> B["Active Tier<br/>(Symmetric INT8 / FP8)"]
-    B --> C["Warm Tier<br/>(Asymmetric INT4 / INT2)"]
-    C --> D["Cold Tier<br/>(Sign-Packed 1-Bit)"]
-    D --> E["Deep Archive Tier<br/>(Laplacian-Regularized JL Projection)"]
-    E --> F["Host Memory Spill<br/>(PCIe Paged CPU Swap)"]
-    
-    %% Resurrection Paths
-    B -. "On Cache Hit" .-> A
-    C -. "On Cache Hit" .-> A
-    D -. "On Cache Hit" .-> A
-    E -. "On Cache Hit" .-> A
-    F -. "On Cache Hit" .-> A
+```
+┌──────────────────────────────────────────────────────────────┐
+│  Public Python API            argus_cache/__init__.py        │
+│  PagedDynamicKVCache, PagedDynamicQuantizedCache, TierSpec    │
+├──────────────────────────────────────────────────────────────┤
+│  Runtime adapters (edge)      argus_cache/adapters/          │
+│  vLLM · Ollama · (SGLang: additive)                          │
+├──────────────────────────────────────────────────────────────┤
+│  Policy & configuration       argus_cache/core/, plugins/    │
+│  tier pipeline · eviction · importance · telemetry           │
+├──────────────────────────────────────────────────────────────┤
+│  Native engine (C++)          argus_cache/csrc/manager.cpp   │
+│  page pool · tier cascade · zero-copy host spill · SDPA      │
+├──────────────────────────────────────────────────────────────┤
+│  Data plane (CUDA / Triton)   csrc/quantization_kernels.cu   │
+│  one generic pack/unpack kernel · Triton fused attention     │
+└──────────────────────────────────────────────────────────────┘
 ```
 
-### 1.2. Eviction & Tier Transition Policy
-
-Transition between tiers is governed by an **Importance-Scored Least Recently Used (IS-LRU)** eviction policy. Instead of a naive LRU that only tracks temporal recency, the score $S_p$ of page $p$ is calculated as:
-
-$$S_p = \lambda_1 \cdot \text{Recency} + \lambda_2 \cdot \text{AccessFrequency} + \lambda_3 \cdot H(K_p, V_p)$$
-
-Where:
-- **Recency:** Time elapsed since the page was last queried in the attention lookup.
-- **AccessFrequency:** Historical reuse counter within a shifting window.
-- **Entropy ($H$):** Information entropy of the page's KV activations. High-entropy states (containing critical outlier features) are protected from lossy compression tiers and preserved in high-precision tiers longer.
-
-When VRAM allocated to active pages exceeds the configured safety threshold (e.g., 90% of available capacity), pages with the lowest $S_p$ scores are evicted downward through the compression cascade:
-1. **FP16 → INT8/FP8:** Lossless dynamic range packing.
-2. **INT8 → INT4/INT2:** Asymmetric sub-byte packing with outlier sidecar generation.
-3. **INT4/INT2 → 1-Bit:** Sign-packing to single bits with localized channel scaling factors.
-4. **1-Bit → JL Archive:** Multi-dimensional random projection shrinking sequence length.
-5. **VRAM → Host DRAM:** Paged asynchronous transfer over PCIe to system RAM.
-
-### 1.3. Resurrection Path
-
-When a compressed or spilled page is needed for attention computation:
-1. It is fetched from its current location (spilled pages are read back from Host DRAM asynchronously).
-2. The page is **resurrected** back into active GPU SRAM.
-3. Inside custom Triton JIT kernels, it is decompressed on-the-fly into **transient FP16 tensors** directly in SRAM.
-4. Scale-dot product attention is calculated immediately. The transient FP16 block is discarded from SRAM after attention, preserving the compressed format in storage.
+**Ownership.** Python owns *decisions* (which page to evict, which tier is
+next, when to spill). C++ owns *mechanics* (where bytes live, how they are
+packed, when kernels launch). The boundary is crossed synchronously from Python
+calls, so the GIL is held for every callback into Python — with one deliberate
+exception, the background prefetch worker, which is forbidden from invoking
+Python callbacks at all.
 
 ---
 
-## 2. Compression Cascade Mechanics
+## 2. The tier codec — how tiers stopped being hardcoded
 
-To preserve extreme semantic accuracy while reducing storage footprint up to 10x, ARGUS uses a structured compression cascade that pairs quantization with geometric dimensionality reduction.
+Previously, `manager.cpp` decided how to compress and decompress a page by
+comparing the tier's **name**:
 
-### 2.1. Outlier Isolation & Sidecar Storage
-
-Model cognition resides heavily in a small subset of "outlier features" (attention channels with disproportionately large magnitudes). Standard uniform quantization collapses these features, causing severe perplexity degradation.
-
-ARGUS isolates outliers using a **1-Pass $\sigma$-Threshold Filter** during tier-downward transitions:
-
-1. For a page $X$, channel-wise standard deviation $\sigma_c$ and mean $\mu_c$ are calculated.
-2. Outlier channels are identified where $|X_{t, c} - \mu_c| > k \cdot \sigma_c$ (typically $k = 3.2$).
-3. These outlier coordinates and their exact FP16 values are saved to a lightweight **Outlier Sidecar** metadata structure.
-4. The remaining "non-outlier" background distribution is tightly quantized to INT4 or INT2.
-5. During reconstruction, the quantized background is unpacked, and the exact FP16 outlier features are re-injected (scattered) back into their original spatial coordinates.
-
-### 2.2. Sign-Packed 1-Bit Quantization
-
-For the cold-storage tier, KV tensors are binarized using sign packing:
-
-$$B_{i, j} = \operatorname{sign}(X_{i, j}) \in \{-1, +1\}$$
-
-These sign bits are packed along the channel dimension into 32-bit integers (`uint32`). Scale vectors are stored per head and per page to scale the reconstructed signs back to the appropriate activation range:
-
-$$\hat{X}_{i, j} = S_{head} \cdot B_{i, j}$$
-
-### 2.3. Laplacian-Regularized Johnson-Lindenstrauss Projection
-
-When context grows past the 1-bit threshold, sequence-length compression is required. ARGUS applies the Johnson-Lindenstrauss (JL) lemma using an orthogonal random projection matrix $W \in \mathbb{R}^{m \times n}$ (where $m = n / 4$ is the compressed dimension):
-
-$$Y = W X$$
-
-Standard JL reconstruction using the transpose $W^T Y$ yields poor accuracy because it treats the projected signal as unstructured white noise. ARGUS exploits the **temporal continuity and smoothness** of attention states along the sequence dimension by solving a Laplacian-regularized inverse problem:
-
-$$\min_{X} \| D_{diff} X \|_F^2 \quad \text{subject to} \quad W X = Y$$
-
-Where $D_{diff}$ is the finite-difference operator representing sequence derivative. This yields the closed-form, deterministic reconstruction operator:
-
-$$R = A^{-1} W^T (W A^{-1} W^T)^{-1}$$
-
-Where $A = L + \alpha I$ is the regularized graph Laplacian matrix representing sequence-temporal connections. This operator $R$ is precomputed and cached ahead-of-time during initial context packing, ensuring that reconstruction is a simple, non-iterative matrix multiplication at runtime.
-
----
-
-## 3. Cache Manager API Contracts
-
-ARGUS integrates into standard LLM execution frameworks (e.g., HuggingFace Transformers, vLLM) via a clean, structured cache abstraction layer.
-
-### 3.1. `PagedDynamicKVCache` Interface
-
-The primary orchestrator of the physical and virtual pages is `PagedDynamicKVCache`:
-
-*   **`allocate_session(session_id, max_seq_len)`**: Initializes page metadata structures and assigns virtual page tables for a new generation session.
-*   **`append_keys_values(session_id, keys, values)`**: Appends raw FP16 key and value tensors. Triggers the cascading eviction sequence if active memory headroom falls below threshold bounds.
-*   **`get_keys_values_for_step(session_id, step)`**: Returns the transient FP16 keys and values required for attention calculation at a specific generation index, performing on-the-fly JIT decompression where necessary.
-*   **`evict_tier_down(page_id)`**: Forcefully compresses and migrates a specific physical page to the next lower tier in the virtual memory cascade.
-*   **`resurrect_page(page_id)`**: Restores a compressed or spilled page back to active residency.
-
-### 3.2. Adaptor & Model Patching Patterns
-
-To support plug-and-play installation without manually rewritten forward passes, ARGUS provides:
-
-*   **`PagedDynamicQuantizedCache`**: A HuggingFace-compatible subclass of `transformers.Cache`. It exposes standard `update()` and `get_seq_len()` methods while secretly driving the paged virtual memory manager underneath.
-*   **`patch_model_with_argus(model, config)`**: Dynamically monkey-patches the target model's self-attention modules. It replaces standard KV cache allocations with the ARGUS virtual cache runtime and swaps standard scaled-dot-product attention with the `inplace_paged_attention` execution path.
-
----
-
-## 4. Triton JIT Kernels
-
-Performance is maintained by keeping all unpacking, scaling, and sidecar injection logic fused within custom CUDA kernels written in **Triton**. This avoids launching multiple small kernels and prevents high-precision activations from spilling back into high-latency VRAM.
-
-### 4.1. Fused Pack/Dequant Triton Kernels
-
-*   **`triton_pack_int4_kernel` / `triton_unpack_int4_kernel`**: Unrolls channel blocks, extracts sign/magnitude scales, performs asymmetric quantization, and packs pairs of 4-bit values into single bytes. Unpacking reads the packed bytes directly to GPU registers, performs register-level scale-and-bias offset calculations, and yields FP16 results inside the register space.
-*   **`triton_pack_1bit_kernel` / `triton_unpack_1bit_kernel`**: Fuses binarization and scale computation. Unpacking performs bitwise shifts (`>>`) and masking (`& 0x01`) on `uint32` values in registers, mapping bits back to $[-1.0, 1.0]$ scales.
-
-### 4.2. CPU/PyTorch Fallbacks
-
-To ensure absolute reliability on systems where Triton or CUDA is unavailable (e.g., local CPU execution or legacy hardware), ARGUS maintains PyTorch-native CPU fallbacks for every kernel:
-
-*   Unpacking is expressed as PyTorch vectorized tensor operations.
-*   The fallback is structurally isolated and unit-tested to guarantee exact bitwise alignment with Triton outputs.
-
----
-
-## 5. Attention Integration & In-Place Execution
-
-To maximize performance on consumer GPUs, ARGUS avoids allocating large intermediate tensors during attention calculation.
-
-### 5.1. `get_all_keys_values` Materialization
-
-For tools or modules requiring full cache access (e.g., speculative decoding validation), `get_all_keys_values()` provides a materialization path:
-- It processes virtual tables step-by-step.
-- It decompresses all compressed and swapped blocks.
-- It returns a single, contiguous FP16 tensor.
-- *Caution:* This operation demands high VRAM overhead and is bypassed during standard decoding iterations.
-
-### 5.2. `inplace_paged_attention` execution
-
-Standard attention concatenates key/value states into contiguous arrays, triggering massive temporary allocations and potential OOMs. 
-
-ARGUS uses **In-Place Block-by-Block Attention**:
-1. The attention output accumulator tensor $O$ is pre-allocated.
-2. The query tensor $Q$ is held in registers.
-3. The kernel loops over cache blocks (pages) sequentially.
-4. Each block is fetched, unpacked in SRAM to FP16, and dot-product attention weights are calculated locally:
-
-$$S_{block} = Q \cdot K_{block}^T$$
-
-5. Attention weights are normalized using running online softmax (following FlashAttention principles).
-6. Value vectors $V_{block}$ are multiplied and accumulated directly into the output tensor $O$.
-7. Intermediate FP16 key/value states are immediately discarded from registers/SRAM before moving to the next block, ensuring flat memory scaling regardless of context length.
-
----
-
-## 6. Host Memory Spill Subsystem
-
-When physical VRAM is completely exhausted, the Host Memory Spill Subsystem shifts pages between system RAM (Host) and graphics card memory (Device).
-
-### 6.1. PCIe Page Swapping Mechanics
-
-Page swapping uses a dedicated dual-buffered asynchronous stream architecture:
-
-```text
-[ GPU VRAM Active Pages ]
-         │
-         ▼ (Page eviction decision)
-[ Pin-Buffered GPU VRAM ]
-         │
-         ├── Async Copy (CUDA Stream 1) ──► [ Host Pinned Memory ]
-         │                                          │
-         │                                          ▼ (DRAM Swap Out)
-                                            [ Host DRAM Page Archive ]
+```cpp
+if (tier == "fp8")        { launch_dequantize_fp8(...); }
+else if (tier == "int8")  { launch_dequantize_int8(...); }
+else if (tier == "int4")  { launch_dequantize_int4_flat(...); }
+// ... and so on, repeated in four separate call sites
 ```
 
-*   **Pinned Memory Buffer:** ARGUS allocates a small pool of page-locked (pinned) CPU memory. Standard pageable host memory transfers require an extra CPU-side copy. Pinned memory enables direct-memory-access (DMA) transfers, maximizing PCIe transfer saturation.
-*   **Asynchronous Overlap:** Page uploads (`swap_out_to_host`) and downloads (`swap_in_to_device`) are queued on separate non-default CUDA streams. This allows GPU compute kernels (attention decoding) to run concurrently with PCIe data transfers, effectively hiding swap latency.
+That chain existed in `demote_to_next_tier`, `resurrect_page`,
+`peek_decompress_page`, and the prefetch worker. Adding a tier meant editing
+all four, and a plugin tier could never be more than an uncompressed spill.
 
-### 6.2. Multi-Tenant Zero-OOM Guard
+A tier's storage format is now described **numerically**, by
+`argus::TierCodec` (`csrc/tier_codec.h`):
 
-Under high-load, multi-session environments, the spill manager monitors memory allocations:
-- A reserved memory pool (guard state) is maintained at all times.
-- If total system activations approach hard limits, the manager blocks active execution streams.
-- It prioritizes background page eviction to CPU memory before releasing the execution locks.
-- This creates an absolute defense against random memory allocation collapse.
+| field | meaning |
+|---|---|
+| `kind` | `SignedLinear` · `UnsignedAffine` · `SignPacked` · `Projection` · `Passthrough` |
+| `bits` | bits per stored element |
+| `pack_factor` | derived: `8/bits` for sub-byte codecs |
+| `levels` | derived from kind and bits |
+| `compression_ratio` | storage cost relative to fp16 |
+| `lossy` | capability metadata |
+
+All four call sites now share exactly two methods — `compress_page()` and
+`decompress_page()` — and the five bespoke CUDA kernels collapsed into one
+parameterized `dequantize_generic_kernel`. **Adding a tier is a registry entry,
+not a new branch.**
+
+The only remaining name comparison in the engine is `tier_name == "active"`,
+which is a *state*, not a format.
+
+| file | before | after |
+|---|---:|---:|
+| `csrc/manager.cpp` | 1207 | 763 |
+| `csrc/quantization_kernels.cu` | 183 | 81 |
+
+---
+
+## 3. Plugin architecture
+
+A quantization backend is four methods (`compress`, `decompress`,
+`decompress_batch`, `memory_bytes`) plus a `BackendCapabilities` declaration:
+
+```python
+BackendCapabilities(
+    name="int4",
+    effective_bits=4.0,          # cost, used instead of name checks
+    lossy=True,
+    supported_devices=frozenset({"cuda", "cpu"}),
+    supported_dtypes=frozenset({torch.float16, torch.bfloat16, torch.float32}),
+    requires_calibration=False,
+    supports_reconstruction=True,
+    native_codec=NativeCodecSpec(kind="unsigned_affine", bits=4),
+)
+```
+
+Declaring a `native_codec` is what promotes a plugin from Python-side-only to a
+tier the **native engine compresses itself**, using the same generic kernel as
+the built-ins. A plugin that declares none still works — its pages spill
+losslessly rather than being decoded with a guessed bit layout.
+
+### Capability-based policy
+
+Policy code asks what a backend *costs*, never what it is *called*:
+
+```python
+available_quantizers(device="cuda", dtype=torch.float16, max_effective_bits=4.0)
+# ['jl', 'int4', 'int2', 'one_bit']  — ordered most-expensive-first
+```
+
+Former name checks such as `spec.name == 'jl'` are now `spec.is_projection`,
+which reads the backend's declared codec kind. A projection backend registered
+under any name is handled correctly.
+
+### Replacing a tier — removing 1-bit
+
+```python
+from argus_cache import (
+    PagedDynamicKVCache, PipelineConfig, TierSpec,
+    BackendCapabilities, NativeCodecSpec,
+    register_quantizer, unregister_quantizer,
+)
+
+class TernaryBackend:
+    def compress(self, tensor, **kw):
+        scale = tensor.abs().amax().clamp_min(1e-8)
+        return {"q": torch.round(tensor / scale).clamp(-1, 1).to(torch.int8),
+                "scales": scale}
+    def decompress(self, c, **kw):
+        return (c["q"].to(torch.float32) * c["scales"]).to(torch.float16)
+    def decompress_batch(self, cs, **kw):
+        return [self.decompress(c, **kw) for c in cs]
+    def memory_bytes(self, c):
+        return c["q"].nelement() * c["q"].element_size()
+
+unregister_quantizer("one_bit")                       # 1-bit is gone
+register_quantizer("ternary", TernaryBackend,
+    BackendCapabilities(name="ternary", effective_bits=2.0,
+        native_codec=NativeCodecSpec(kind="unsigned_affine", bits=2)))
+
+cache = PagedDynamicKVCache(pipeline=PipelineConfig(tiers=[
+    TierSpec(name="fp8",     backend="fp8",     max_pages=1),
+    TierSpec(name="ternary", backend="ternary", max_pages=8),
+]))
+```
+
+The memory manager is not modified. Covered by
+`tests/test_plugin_system.py::test_disable_one_bit_and_install_custom_quantizer`.
+
+> **Packing-axis warning.** A backend's `native_codec` describes how the **C++
+> engine** stores the tier. The Python backend classes in
+> `argus_cache/backends/quantization.py` pack along a *different axis* than the
+> native kernels. A page compressed by one must never be decoded by the other.
+> Read back native-tier pages with `peek_decompress_page()`.
+
+---
+
+## 4. Runtime adapters
+
+Adapters live at the edge; the core never imports one. Each declares what it
+can actually do, and adapters distinguish two fundamentally different cases:
+
+| kind | meaning | example |
+|---|---|---|
+| `IN_PROCESS` | runtime runs here; ARGUS can own its KV cache | vLLM |
+| `EXTERNAL` | separate process with its own cache | Ollama |
+
+Lifecycle is explicit and idempotent — `initialize → activate → deactivate →
+shutdown` — with teardown guaranteed non-raising, so an adapter failure can
+never leave a runtime half-patched or disturb ARGUS state.
+
+### Ollama (`EXTERNAL`, `manages_kv_cache=False`)
+
+Ollama wraps llama.cpp behind an HTTP server owning its own KV cache in its own
+address space. **ARGUS cannot manage it**, and the adapter says so in its
+capabilities and in every telemetry payload. What it legitimately provides:
+lifecycle-managed connection, model-presence validation with an actionable
+error, pass-through of Ollama's own `num_ctx` / `cache_type_k|v` settings, and
+per-request timings for use as an external baseline. Transport is injected, so
+it is testable without a running server.
+
+### vLLM (`IN_PROCESS`, experimental)
+
+The previous integration divided vLLM's `block_tables` by 4 or 16. Those
+entries are physical block **indices**, not byte offsets — dividing them aliases
+unrelated sequences onto shared blocks. It compressed nothing and corrupted
+attention. It has been removed; `inject_argus_to_vllm()` now raises with that
+explanation.
+
+`VLLMAdapter` instead: guards on a supported vLLM version range rather than
+guessing at an unknown seam; patches one recorded attribute per target and
+restores it exactly (`is_fully_restored()`); and rolls back **every** patch if
+any target fails, because a half-patched vLLM mixing ARGUS and native attention
+is worse than no patch. It does **not** replace vLLM's block allocator.
+
+### Adding SGLang
+
+Subclass `RuntimeAdapter`, implement `_do_initialize/_do_activate/_do_deactivate`,
+add one line to `_ADAPTERS` in `adapters/__init__.py`. No engine change.
+
+---
+
+## 5. Benchmarks
+
+Numbers are separated by the kind of claim they support. **Synthetic
+reconstruction fidelity is not downstream model accuracy** and is never
+presented as such.
+
+Reproduce with:
+
+```bash
+python benchmarks/bench_native_runtime.py --json results.json
+```
+
+**Environment:** RTX 3050 Ti Laptop (4 GB, SM 8.6) · CUDA 13.0 · torch
+2.12.0+cu130 · Triton 3.7.0 · Python 3.14.7 · seed 1234 · fp16 ·
+batch 1 · 8 heads · head_dim 64 · page_size 128.
+
+### 5.1 Synthetic reconstruction + codec runtime
+
+Random Gaussian tensors. Fidelity here measures the codec, **not** the model.
+
+| tier | ratio | compress (ms) | decompress (ms, median) | rel. L2 | cosine |
+|---|---:|---:|---:|---:|---:|
+| fp8 | 2.00× | 54.27 | 0.0725 | 0.0097 | 1.0000 |
+| int8 | 2.00× | 1.66 | 0.0718 | 0.0097 | 1.0000 |
+| int4 | 4.00× | 10.12 | 0.0515 | 0.1593 | 0.9876 |
+| int2 | 8.00× | 1.92 | 0.0399 | 0.8332 | 0.8135 |
+| one_bit | 16.00× | 12.40 | 0.0358 | 0.6023 | 0.7983 |
+| jl | 4.00× | 221.44 | 0.1058 | 1.1733 | 0.2666 |
+
+Notes, stated rather than glossed:
+
+* **fp8/int8 compress timings include one-time CUDA context and pool warmup**
+  on the first tier measured; int8 (1.66 ms) is the steady-state cost of the
+  same operation.
+* **JL fidelity on random input is not meaningful.** Reconstructing a 4×
+  rank-reduced projection of white noise is information-theoretically
+  impossible, so `cos = 0.27` here is a property of the input, not of the
+  tier. JL targets the low-rank structure of real KV tensors; it must be
+  evaluated on real activations, which this run does not do.
+* **int2's error matches theory.** Round-to-nearest over 4 levels spanning
+  ~6.6σ gives RMS ≈ step/√12 ≈ 0.64 relative; the measured 0.83 is within
+  seed variance for a single page.
+
+### 5.2 Decode latency and peak VRAM vs context
+
+int4 tier, single decode step, median over 30 steps.
+
+| context tokens | page size | pages | ms/step | peak VRAM (MiB) |
+|---:|---:|---:|---:|---:|
+| 256 | 128 | 2 | 0.79 | 51.6 |
+| 1024 | 128 | 8 | 4.72 | 61.6 |
+| 2048 | 128 | 16 | 10.05 | 73.1 |
+| 512 | 256 | 2 | 0.72 | 75.3 |
+| 2048 | 256 | 8 | 5.07 | 95.3 |
+| 4096 | 256 | 16 | 10.74 | 118.3 |
+| 1024 | 512 | 2 | 0.83 | 122.6 |
+| 4096 | 512 | 8 | 7.43 | 162.7 |
+| 8192 | 512 | 16 | 13.98 | 208.7 |
+
+Decode cost grows roughly linearly in resident pages, because every compressed
+page is decompressed and concatenated each step. Larger pages amortize better
+at equal context (4096 tokens: 10.74 ms at page 256 vs 7.43 ms at page 512).
+
+### 5.3 Not measured
+
+The following are **not** produced by this run and no claim is made about them:
+TTFT and TPOT on a real model, perplexity delta, NIAH/RULER retrieval, vLLM
+throughput, CPU-spill overhead under real memory pressure, multi-GPU. Any
+figure for these in older documentation predates this refactor and has not
+been revalidated.
+
+---
+
+## 6. Correctness fixes found during the refactor
+
+Both were pre-existing and are covered by tests.
+
+1. **Truncation instead of rounding.** Quantization cast float→int directly,
+   which truncates toward zero and biases every value by up to half a
+   quantization step, roughly doubling reconstruction error on the low-bit
+   affine tiers. Now rounds to nearest. `int4` relative L2 went from ≈0.27 to
+   0.159.
+
+2. **1-bit used the wrong magnitude.** `SignPacked` reconstructs as ±`scale`,
+   and used the per-page **maximum** as that magnitude. The L2-optimal scalar
+   is the **mean absolute value** (`argmin_s E[(|x|−s)²] = E[|x|]`); using the
+   max inflated the reconstructed norm ~3.5× for Gaussian input. Relative L2
+   dropped from **3.51 to 0.60** at identical storage cost and identical
+   cosine similarity.
+
+Additionally, the prefetch worker previously cached **undefined tensors** when
+a JL page had no cached reconstruction operator (it cannot build one — no GIL
+on that thread), which surfaced later as an empty page during attention. It now
+skips the speculation.
+
+---
+
+## 7. Testing
+
+```bash
+pytest tests/ -q     # 132 passed, 2 skipped
+```
+
+`tests/test_plugin_system.py` (32 tests) covers registration, removal, invalid
+configurations, capability filtering, tier replacement, single-tier pipelines,
+native-codec propagation to C++, and per-tier round-trip fidelity with error
+budgets derived from quantization theory.
+
+`tests/test_adapters.py` (28 tests, 2 skipped) covers both adapters' lifecycle
+idempotency, failure isolation, all-or-nothing rollback, exact restoration
+across repeated activate/deactivate cycles, and telemetry that never overclaims.
+The 2 skips require a live Ollama server / installed vLLM.

@@ -17,6 +17,7 @@ tests/*.jsonl
 dist/
 build/
 *.egg-info/
+*.so
 
 # Local Scratch Directory
 scratch/

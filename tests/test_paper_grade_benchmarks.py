@@ -126,7 +126,7 @@ def test_repetition_loop_stress():
     print("Checking for entropy collapse in deepest archive tiers...")
     # Verify that the JL projection / archived layers still preserve reasonable entropy (non-zero representation capacity)
     for p in cache.jl_pages:
-        ent = calculate_tensor_entropy(p['key_proj'])
+        ent = calculate_tensor_entropy(p['key_q'])
         assert ent > 0.5, "Token entropy collapsed! Compression loop corrupted."
         
     print("Repetition Loop Stress check passed!")
@@ -172,7 +172,9 @@ def test_attention_fidelity():
     
     # Get reconstructed probs from event logic or reconstructed tensors
     k_rec, v_rec = cache.get_all_keys_values()
-    attn_rec = torch.softmax(torch.matmul(q, k_rec.transpose(-1, -2)) / 4.0, dim=-1)
+    q_rec = q.to(k_rec.device)
+    attn_rec = torch.softmax(torch.matmul(q_rec, k_rec.transpose(-1, -2)) / 4.0, dim=-1)
+    attn_rec = attn_rec.to(attn_orig.device)
     
     # Calculate KL Divergence
     kl = torch.sum(attn_orig * (torch.log(attn_orig + 1e-9) - torch.log(attn_rec + 1e-9))).item()
@@ -389,10 +391,11 @@ def test_compression_transition_stability():
     
     # Measure numerical drift and similarity (normalized error)
     norm_init = torch.norm(k_init).item()
-    relative_l2_error = torch.norm(k_init - res_page['key']).item() / norm_init if norm_init > 0 else 0.0
+    k_init_dev = k_init.to(res_page['key'].device)
+    relative_l2_error = torch.norm(k_init_dev - res_page['key']).item() / norm_init if norm_init > 0 else 0.0
     
-    dot_prod = torch.sum(k_init * res_page['key']).item()
-    denom = torch.norm(k_init).item() * torch.norm(res_page['key']).item()
+    dot_prod = torch.sum(k_init_dev * res_page['key']).item()
+    denom = torch.norm(k_init_dev).item() * torch.norm(res_page['key']).item()
     cosine_similarity = dot_prod / denom if denom > 0 else 1.0
     
     print(f"Initial vs Resurrected After 6-tier Cascade:")

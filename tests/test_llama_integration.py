@@ -48,9 +48,13 @@ def test_llama_gqa_integration_and_generation():
         outputs = model(input_ids)
     assert outputs.logits.shape == (1, 8, 100)
     
-    # Test generation (auto-regressive execution)
+    # Test generation (auto-regressive execution).
+    # min_new_tokens forces exactly max_new_tokens to be produced — without it
+    # this randomly-initialized (untrained) model can emit the EOS token at
+    # any step by pure chance and stop generation early, making the expected
+    # output shape flaky.
     with torch.no_grad():
-        gen_out = model.generate(input_ids, max_new_tokens=10)
+        gen_out = model.generate(input_ids, max_new_tokens=10, min_new_tokens=10)
     assert gen_out.shape == (1, 18)
 
 def test_llama_with_custom_pipeline_config():
@@ -93,5 +97,5 @@ def test_llama_with_custom_pipeline_config():
     assert outputs.logits.shape == (1, 12, 100)
     
     with torch.no_grad():
-        gen_out = model.generate(input_ids, max_new_tokens=8)
+        gen_out = model.generate(input_ids, max_new_tokens=8, min_new_tokens=8)
     assert gen_out.shape == (1, 20)

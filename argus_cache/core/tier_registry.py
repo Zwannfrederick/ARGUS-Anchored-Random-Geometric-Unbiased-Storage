@@ -34,14 +34,66 @@ class ScoringFunction(Protocol):
 
 @dataclass
 class TierSpec:
-    """Defines a single memory cache tier in the cascading hierarchy."""
+    """Defines a single memory cache tier in the cascading hierarchy.
+
+    ``backend`` may be either a backend instance or the name of a quantizer
+    registered in :mod:`argus_cache.plugins`. Passing a name is preferred: it
+    keeps tier configuration declarative and lets the tier pick up whatever
+    backend is registered under that name, which is what makes replacing a
+    quantizer a configuration change rather than a code change.
+    """
     name: str                                    # e.g., "fp8", "int8", "one_bit", "jl"
-    backend: QuantizationBackend                 # Pluggable compression backend
+    backend: Any = None                          # Backend instance, or a registered plugin name
     max_pages: int = 2                           # Maximum pages allowed in this tier
     priority: int = 0                            # Priority of the tier (lower = colder)
     use_outlier_isolation: bool = True            # Enable outlier isolation sidecar
     use_static_pool: bool = True                 # Use pre-allocated static pool
     description: str = ""                        # Text description
+
+    def __post_init__(self):
+        # Resolve a plugin name (or an omitted backend, which defaults to a
+        # plugin registered under the tier's own name) into an instance.
+        if self.backend is None or isinstance(self.backend, str):
+            plugin_name = self.backend or self.name
+            from argus_cache.plugins import get_quantizer
+            self.backend = get_quantizer(plugin_name)
+            self._plugin_name = plugin_name
+        else:
+            # An instance was supplied directly. It still carries capabilities
+            # if the same-named plugin is registered, which is the common case
+            # for the built-in tiers.
+            self._plugin_name = self.name
+
+    @property
+    def capabilities(self):
+        """Declared capabilities of this tier's backend, or None if unregistered.
+
+        Policy code should prefer this over comparing ``spec.name`` against
+        known tier names — a tier is defined by what its backend costs and
+        supports, not by what it is called.
+        """
+        from argus_cache.plugins import PluginError, get_capabilities
+        try:
+            return get_capabilities(getattr(self, "_plugin_name", self.name))
+        except PluginError:
+            return None
+
+    @property
+    def effective_bits(self) -> float:
+        """Storage cost per original fp16 element, or 16.0 when unknown."""
+        caps = self.capabilities
+        return caps.effective_bits if caps is not None else 16.0
+
+    @property
+    def is_projection(self) -> bool:
+        """True for tiers whose backend is a linear projection rather than a
+        quantizer. Replaces ``spec.name == 'jl'`` checks."""
+        caps = self.capabilities
+        return (
+            caps is not None
+            and caps.native_codec is not None
+            and caps.native_codec.kind == "projection"
+        )
 
 @dataclass
 class PipelineConfig:

@@ -155,7 +155,8 @@ def test_cache_transitions():
     assert all_v.shape == (1, 1, 64, 16)
     
     # Compare with the original concat of keys
-    original_k = torch.cat([k1, k2, k3, k4, k5, k6, k7, k8, k9], dim=-2)
+    original_k = torch.cat([k1, k2, k3, k4, k5, k6, k7, k8, k9], dim=-2).to(all_k.device)
+    original_v = torch.cat([v1, v2, v3, v4, v5, v6, v7, v8, v9], dim=-2).to(all_v.device)
     reconstruction_error = torch.mean(torch.abs(original_k - all_k)).item()
     print(f"Total 7-Tier Reconstruction Error: {reconstruction_error:.4f}")
     assert reconstruction_error < 0.8, "Error too high!"
@@ -169,7 +170,7 @@ def test_cache_transitions():
     
     # 12. Test inplace_paged_attention
     print("Testing inplace_paged_attention vs standard reconstructed attention...")
-    q = torch.randn(1, 1, 1, 16, dtype=torch.float16) # 1 query token
+    q = torch.randn(1, 1, 1, 16, dtype=torch.float16).to(all_k.device) # 1 query token
     
     # Standard reconstructed attention
     attn_weights = torch.matmul(q, all_k.transpose(-1, -2)) / 4.0 # head_dim = 16, sqrt = 4

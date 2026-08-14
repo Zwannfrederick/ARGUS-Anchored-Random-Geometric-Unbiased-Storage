@@ -16,6 +16,24 @@ from argus_cache.core.quantization import (
     dequantize_from_jl_projection,
 )
 
+def _expand_scalar_metadata(compressed: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(compressed, dict):
+        return compressed
+    q = compressed.get("q")
+    if q is None:
+        return compressed
+    scales = compressed.get("scales")
+    min_vals = compressed.get("min_vals")
+    
+    res = compressed.copy()
+    if scales is not None and scales.dim() == 0:
+        res["scales"] = scales.expand(q.shape[0], q.shape[1], q.shape[-2], 1)
+    if min_vals is not None and min_vals.dim() == 0:
+        res["min_vals"] = min_vals.expand(q.shape[0], q.shape[1], q.shape[-2], 1)
+        
+    return res
+
+
 class FP8Backend(QuantizationBackend):
     """Wraps simulated FP8 quantization backend."""
     def compress(self, tensor: torch.Tensor, **kwargs) -> Dict[str, Any]:
@@ -28,6 +46,7 @@ class FP8Backend(QuantizationBackend):
     def decompress_batch(self, compressed_list: list, **kwargs) -> list:
         if not compressed_list:
             return []
+        compressed_list = [_expand_scalar_metadata(c) for c in compressed_list]
         qs = torch.stack([c["q"] for c in compressed_list], dim=0)
         scales = torch.stack([c["scales"] for c in compressed_list], dim=0)
         decompressed = dequantize_from_fp8_simulated(qs, scales)
@@ -50,6 +69,7 @@ class INT8Backend(QuantizationBackend):
     def decompress_batch(self, compressed_list: list, **kwargs) -> list:
         if not compressed_list:
             return []
+        compressed_list = [_expand_scalar_metadata(c) for c in compressed_list]
         qs = torch.stack([c["q"] for c in compressed_list], dim=0)
         scales = torch.stack([c["scales"] for c in compressed_list], dim=0)
         decompressed = dequantize_from_int8(qs, scales)
@@ -63,13 +83,13 @@ class INT8Backend(QuantizationBackend):
 class INT4Backend(QuantizationBackend):
     """Wraps packed asymmetric INT4 quantization backend."""
     def compress(self, tensor: torch.Tensor, **kwargs) -> Dict[str, Any]:
-        seq_dim = kwargs.get("seq_dim", -2)
+        seq_dim = kwargs.get("seq_dim", -1)
         quant_dim = kwargs.get("quant_dim", -1)
         q, scales, min_vals = quantize_to_int4_packed(tensor, seq_dim=seq_dim, quant_dim=quant_dim)
         return {"q": q, "scales": scales, "min_vals": min_vals}
 
     def decompress(self, compressed: Dict[str, Any], **kwargs) -> torch.Tensor:
-        seq_dim = kwargs.get("seq_dim", -2)
+        seq_dim = kwargs.get("seq_dim", -1)
         return dequantize_from_int4_packed(
             compressed["q"], compressed["scales"], compressed["min_vals"], seq_dim=seq_dim
         )
@@ -77,16 +97,21 @@ class INT4Backend(QuantizationBackend):
     def decompress_batch(self, compressed_list: list, **kwargs) -> list:
         if not compressed_list:
             return []
+        compressed_list = [_expand_scalar_metadata(c) for c in compressed_list]
         if len(compressed_list) == 1:
-            return [self.decompress(compressed_list[0], **kwargs)]
+            pack_dim = kwargs.get("pack_dim", -1)
+            kwargs_single = kwargs.copy()
+            kwargs_single["seq_dim"] = pack_dim
+            return [self.decompress(compressed_list[0], **kwargs_single)]
         
         seq_dim = kwargs.get("seq_dim", -2)
+        pack_dim = kwargs.get("pack_dim", -1)
         qs = torch.cat([c["q"] for c in compressed_list], dim=seq_dim)
         scales = torch.cat([c["scales"] for c in compressed_list], dim=seq_dim)
         min_vals = torch.cat([c["min_vals"] for c in compressed_list], dim=seq_dim)
         
-        decompressed = dequantize_from_int4_packed(qs, scales, min_vals, seq_dim=seq_dim)
-        split_sizes = [c["q"].shape[seq_dim] * 2 for c in compressed_list]
+        decompressed = dequantize_from_int4_packed(qs, scales, min_vals, seq_dim=pack_dim)
+        split_sizes = [c["q"].shape[seq_dim] for c in compressed_list]
         return list(torch.split(decompressed, split_sizes, dim=seq_dim))
 
     def memory_bytes(self, compressed: Dict[str, Any]) -> int:
@@ -98,13 +123,13 @@ class INT4Backend(QuantizationBackend):
 class INT2Backend(QuantizationBackend):
     """Wraps packed asymmetric INT2 quantization backend."""
     def compress(self, tensor: torch.Tensor, **kwargs) -> Dict[str, Any]:
-        seq_dim = kwargs.get("seq_dim", -2)
+        seq_dim = kwargs.get("seq_dim", -1)
         quant_dim = kwargs.get("quant_dim", -1)
         q, scales, min_vals = quantize_to_int2_packed(tensor, seq_dim=seq_dim, quant_dim=quant_dim)
         return {"q": q, "scales": scales, "min_vals": min_vals}
 
     def decompress(self, compressed: Dict[str, Any], **kwargs) -> torch.Tensor:
-        seq_dim = kwargs.get("seq_dim", -2)
+        seq_dim = kwargs.get("seq_dim", -1)
         return dequantize_from_int2_packed(
             compressed["q"], compressed["scales"], compressed["min_vals"], seq_dim=seq_dim
         )
@@ -112,16 +137,21 @@ class INT2Backend(QuantizationBackend):
     def decompress_batch(self, compressed_list: list, **kwargs) -> list:
         if not compressed_list:
             return []
+        compressed_list = [_expand_scalar_metadata(c) for c in compressed_list]
         if len(compressed_list) == 1:
-            return [self.decompress(compressed_list[0], **kwargs)]
+            pack_dim = kwargs.get("pack_dim", -1)
+            kwargs_single = kwargs.copy()
+            kwargs_single["seq_dim"] = pack_dim
+            return [self.decompress(compressed_list[0], **kwargs_single)]
             
         seq_dim = kwargs.get("seq_dim", -2)
+        pack_dim = kwargs.get("pack_dim", -1)
         qs = torch.cat([c["q"] for c in compressed_list], dim=seq_dim)
         scales = torch.cat([c["scales"] for c in compressed_list], dim=seq_dim)
         min_vals = torch.cat([c["min_vals"] for c in compressed_list], dim=seq_dim)
         
-        decompressed = dequantize_from_int2_packed(qs, scales, min_vals, seq_dim=seq_dim)
-        split_sizes = [c["q"].shape[seq_dim] * 4 for c in compressed_list]
+        decompressed = dequantize_from_int2_packed(qs, scales, min_vals, seq_dim=pack_dim)
+        split_sizes = [c["q"].shape[seq_dim] for c in compressed_list]
         return list(torch.split(decompressed, split_sizes, dim=seq_dim))
 
     def memory_bytes(self, compressed: Dict[str, Any]) -> int:
@@ -133,27 +163,32 @@ class INT2Backend(QuantizationBackend):
 class OneBitBackend(QuantizationBackend):
     """Wraps packed binarized 1-Bit quantization backend."""
     def compress(self, tensor: torch.Tensor, **kwargs) -> Dict[str, Any]:
-        seq_dim = kwargs.get("seq_dim", -2)
+        seq_dim = kwargs.get("seq_dim", -1)
         quant_dim = kwargs.get("quant_dim", -1)
         q, scales = quantize_to_1bit_packed(tensor, seq_dim=seq_dim, quant_dim=quant_dim)
         return {"q": q, "scales": scales}
 
     def decompress(self, compressed: Dict[str, Any], **kwargs) -> torch.Tensor:
-        seq_dim = kwargs.get("seq_dim", -2)
+        seq_dim = kwargs.get("seq_dim", -1)
         return dequantize_from_1bit_packed(compressed["q"], compressed["scales"], seq_dim=seq_dim)
 
     def decompress_batch(self, compressed_list: list, **kwargs) -> list:
         if not compressed_list:
             return []
+        compressed_list = [_expand_scalar_metadata(c) for c in compressed_list]
         if len(compressed_list) == 1:
-            return [self.decompress(compressed_list[0], **kwargs)]
+            pack_dim = kwargs.get("pack_dim", -1)
+            kwargs_single = kwargs.copy()
+            kwargs_single["seq_dim"] = pack_dim
+            return [self.decompress(compressed_list[0], **kwargs_single)]
             
         seq_dim = kwargs.get("seq_dim", -2)
+        pack_dim = kwargs.get("pack_dim", -1)
         qs = torch.cat([c["q"] for c in compressed_list], dim=seq_dim)
         scales = torch.cat([c["scales"] for c in compressed_list], dim=seq_dim)
         
-        decompressed = dequantize_from_1bit_packed(qs, scales, seq_dim=seq_dim)
-        split_sizes = [c["q"].shape[seq_dim] * 8 for c in compressed_list]
+        decompressed = dequantize_from_1bit_packed(qs, scales, seq_dim=pack_dim)
+        split_sizes = [c["q"].shape[seq_dim] for c in compressed_list]
         return list(torch.split(decompressed, split_sizes, dim=seq_dim))
 
     def memory_bytes(self, compressed: Dict[str, Any]) -> int:
@@ -177,7 +212,7 @@ class JLProjectionBackend(QuantizationBackend):
         recon_operator = kwargs.get("recon_operator")
         alpha = kwargs.get("alpha", 1e-3)
         return dequantize_from_jl_projection(
-            compressed["q"], compressed["w_proj"], recon_operator=recon_operator, alpha=alpha
+            compressed["q"], compressed.get("w_proj"), recon_operator=recon_operator, alpha=alpha
         )
 
     def decompress_batch(self, compressed_list: list, **kwargs) -> list:

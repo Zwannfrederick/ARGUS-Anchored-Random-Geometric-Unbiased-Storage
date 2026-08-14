@@ -1,4 +1,5 @@
 from setuptools import setup, find_packages
+from torch.utils.cpp_extension import BuildExtension, CUDAExtension
 
 setup(
     name="argus_cache",
@@ -9,6 +10,25 @@ setup(
     long_description_content_type="text/markdown",
     license="Apache-2.0",
     packages=find_packages(),
+    ext_modules=[
+        CUDAExtension(
+            name="argus_cpp_backend",
+            sources=[
+                "argus_cache/csrc/bindings.cpp",
+                "argus_cache/csrc/manager.cpp",
+                "argus_cache/csrc/tier_codec.cpp",
+                "argus_cache/csrc/zero_copy_pool.cpp",
+                "argus_cache/csrc/quantization_kernels.cu"
+            ],
+            extra_compile_args={
+                "cxx": ["-O3", "-std=c++17"],
+                "nvcc": ["-O3"]
+            }
+        )
+    ],
+    cmdclass={
+        "build_ext": BuildExtension
+    },
     classifiers=[
         "Development Status :: 4 - Beta",
         "Intended Audience :: Science/Research",

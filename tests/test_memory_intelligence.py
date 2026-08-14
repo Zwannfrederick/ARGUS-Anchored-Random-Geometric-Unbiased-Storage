@@ -104,7 +104,15 @@ def test_qos_importance_scoring_and_eviction():
 
 def test_hot_page_resurrection():
     print("Testing Hot-Page Resurrection and Hierarchical VRAM Flattening...")
-    
+
+    # Seeded: importance_score for the just-resurrected page and the other
+    # active page both start from equal recency (touched in the same
+    # attention step), so which one wins the very next eviction check comes
+    # down to the random attention-weight split between them. Pin the seed
+    # so this test exercises one consistent, known outcome instead of being
+    # a coin flip across runs.
+    torch.manual_seed(42)
+
     # Setup cache
     cache = PagedDynamicKVCache(
         page_size=8,

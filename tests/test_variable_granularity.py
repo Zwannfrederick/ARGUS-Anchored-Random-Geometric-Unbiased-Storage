@@ -8,6 +8,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from argus_cache.core.memory_manager import PagedDynamicKVCache, ArgusConfig
 from argus_cache.core.tier_registry import PipelineConfig, TierSpec
 from argus_cache.backends.quantization import INT8Backend
+import argus_cpp_backend
 
 def test_variable_granularity_splitting():
     """
@@ -80,15 +81,14 @@ def test_variable_granularity_merging():
     for i in range(4):
         k = torch.randn(1, 1, micro_size, 16, dtype=torch.float16)
         v = torch.randn(1, 1, micro_size, 16, dtype=torch.float16)
-        page = {
-            'page_id': i + 1,
-            'key': k,
-            'value': v,
-            'pool_idx': None,
-            'importance_score': 2.0,  # Hot, triggers merge
-            'page_size': micro_size
-        }
-        cache.active_pages.append(page)
+        page = argus_cpp_backend.create_page()
+        page['page_id'] = i + 1
+        page['key'] = k
+        page['value'] = v
+        page['pool_idx'] = -1
+        page['importance_score'] = 2.0
+        page['page_size'] = micro_size
+        cache.active_pages = cache.active_pages + [page]
         
     assert len(cache.active_pages) == 4
     
@@ -120,31 +120,29 @@ def test_mixed_granularity_attention():
     cache = PagedDynamicKVCache(config=config)
     
     # Add sink tokens
-    cache.sink_k = torch.randn(1, 1, 2, 16, dtype=torch.float16)
-    cache.sink_v = torch.randn(1, 1, 2, 16, dtype=torch.float16)
+    cache.sink_k = torch.randn(1, 1, 2, 16, dtype=torch.float16, device='cuda')
+    cache.sink_v = torch.randn(1, 1, 2, 16, dtype=torch.float16, device='cuda')
     
-    # Add a Mega-page
-    cache.active_pages.append({
-        'page_id': 1,
-        'key': torch.randn(1, 1, page_size, 16, dtype=torch.float16),
-        'value': torch.randn(1, 1, page_size, 16, dtype=torch.float16),
-        'pool_idx': None,
-        'importance_score': 1.0,
-        'page_size': page_size
-    })
+    page1 = argus_cpp_backend.create_page()
+    page1['page_id'] = 1
+    page1['key'] = torch.randn(1, 1, page_size, 16, dtype=torch.float16, device='cuda')
+    page1['value'] = torch.randn(1, 1, page_size, 16, dtype=torch.float16, device='cuda')
+    page1['pool_idx'] = -1
+    page1['importance_score'] = 1.0
+    page1['page_size'] = page_size
+    cache.active_pages = cache.active_pages + [page1]
     
-    # Add a Micro-page
-    cache.active_pages.append({
-        'page_id': 2,
-        'key': torch.randn(1, 1, micro_size, 16, dtype=torch.float16),
-        'value': torch.randn(1, 1, micro_size, 16, dtype=torch.float16),
-        'pool_idx': None,
-        'importance_score': 1.0,
-        'page_size': micro_size
-    })
+    page2 = argus_cpp_backend.create_page()
+    page2['page_id'] = 2
+    page2['key'] = torch.randn(1, 1, micro_size, 16, dtype=torch.float16, device='cuda')
+    page2['value'] = torch.randn(1, 1, micro_size, 16, dtype=torch.float16, device='cuda')
+    page2['pool_idx'] = -1
+    page2['importance_score'] = 1.0
+    page2['page_size'] = micro_size
+    cache.active_pages = cache.active_pages + [page2]
     
     # Run attention
-    q = torch.randn(1, 1, 1, 16, dtype=torch.float16)
+    q = torch.randn(1, 1, 1, 16, dtype=torch.float16, device='cuda')
     out = cache.inplace_paged_attention(q)
     
     assert out is not None

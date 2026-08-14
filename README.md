@@ -1,4 +1,6 @@
-# ARGUS: Hierarchical Virtual-Memory-Inspired Runtime for Transformer KV Caches
+# ARGUS: A Configurable Heterogeneous KV-Cache Management Runtime
+
+*Hierarchical, virtual-memory-inspired cache management for transformer KV caches.*
 
 [![PyPI version](https://img.shields.io/pypi/v/argus_cache.svg)](https://pypi.org/project/argus_cache/)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
@@ -73,7 +75,32 @@ ARGUS introduces a hierarchical virtual-memory-inspired runtime for transformer 
 
 We believe in reproducible, honest benchmarks. ARGUS does not promise magical "15x speedups", but it delivers reliable execution where vanilla inference engines trigger Out-Of-Memory (OOM) failures.
 
-### KV Cache Memory Avoided
+> [!WARNING]
+> **Revalidation status (post-native-refactor).**
+>
+> The native engine was refactored onto a generic tier-codec data plane, and
+> the previous vLLM integration was found to be incorrect and removed — it
+> divided vLLM's `block_tables` by a "reduction factor", but those entries are
+> physical block *indices*, not byte offsets, so it compressed nothing and
+> corrupted attention under load (see
+> [docs/architecture.md](docs/architecture.md#4-runtime-adapters)).
+>
+> **Every figure below that is attributed to "ARGUS-vLLM" was measured through
+> that path and is therefore not supported.** Treat those rows as withdrawn
+> pending revalidation against the new `VLLMAdapter`.
+>
+> Revalidated numbers from the current engine — per-tier compression ratio,
+> compress/decompress latency, reconstruction fidelity, decode-step latency and
+> peak VRAM across context lengths — are in
+> [docs/architecture.md §5](docs/architecture.md#5-benchmarks), together with an
+> explicit list of what was **not** measured (TTFT, TPOT, perplexity,
+> NIAH/RULER, vLLM throughput). Reproduce with:
+>
+> ```bash
+> python benchmarks/bench_native_runtime.py --json results.json
+> ```
+
+### KV Cache Memory Avoided *(NOT REVALIDATED — see warning above)*
 *(TinyLlama-1.1B on RTX 3050 Ti Laptop, 4GB VRAM)*
 
 | Context Length | Vanilla vLLM VRAM | ARGUS-vLLM VRAM | Net KV Memory Avoided |
@@ -293,15 +320,44 @@ print(tokenizer.decode(outputs[0], skip_special_tokens=True))
 
 ## Supported Features
 
-| Feature | Status |
-| :--- | :--- |
-| **vLLM** | Yes |
-| **HuggingFace** | Yes |
-| **llama.cpp** | In Progress |
-| **Predictive Paging** | Experimental |
-| **CPU Spill** | Yes |
-| **Fused Paged Attention** | Yes |
-| **Soft-Eviction Hysteresis** | Yes |
+| Feature | Status | Notes |
+| :--- | :--- | :--- |
+| **HuggingFace** | Yes | `patch_model_with_argus`; the validated path. |
+| **Pluggable quantizers** | Yes | `argus_cache.plugins`; replace or remove any tier. |
+| **Native C++/CUDA engine** | Yes | Generic tier codec; one parameterized kernel. |
+| **CPU Spill** | Yes | Zero-copy pinned host pool. |
+| **Fused Paged Attention** | Yes | Triton, with eager fallback. |
+| **Soft-Eviction Hysteresis** | Yes | |
+| **vLLM** | Experimental | `VLLMAdapter`: version-guarded, reversible. Does **not** replace vLLM's block allocator; throughput unvalidated. |
+| **Ollama** | Yes, as an *external* runtime | `OllamaAdapter` configures and measures Ollama. It does **not** manage Ollama's KV cache — that lives in a separate process. |
+| **SGLang** | Not implemented | Adapter interface is ready; see docs. |
+| **Predictive Paging** | Experimental | Disabled by default. |
+
+### Replacing a quantization tier
+
+ARGUS is a cache-management runtime, not a fixed quantization algorithm. Tiers
+are plugins — disabling 1-bit and installing your own quantizer requires no
+change to the memory manager:
+
+```python
+from argus_cache import (
+    BackendCapabilities, NativeCodecSpec,
+    register_quantizer, unregister_quantizer,
+)
+
+unregister_quantizer("one_bit")
+register_quantizer(
+    "my_codec",
+    MyBackend,                       # compress / decompress / decompress_batch / memory_bytes
+    BackendCapabilities(
+        name="my_codec",
+        effective_bits=2.0,
+        native_codec=NativeCodecSpec(kind="unsigned_affine", bits=2),
+    ),
+)
+```
+
+Full walkthrough: [docs/architecture.md §3](docs/architecture.md#3-plugin-architecture).
 
 ---
 

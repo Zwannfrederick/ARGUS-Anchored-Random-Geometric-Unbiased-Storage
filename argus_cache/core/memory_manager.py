@@ -1,4 +1,5 @@
 import torch
+import argus_cpp_backend
 from .quantization import (
     quantize_to_int8,
     dequantize_from_int8,
@@ -86,6 +87,29 @@ except Exception:
 
 class PageDict(dict):
     """A dictionary subclass that redirects legacy key lookups to the pluggable backend fields."""
+    def __init__(self, *args, **kwargs):
+        if len(args) == 1 and not isinstance(args[0], dict) and hasattr(args[0], 'page_id'):
+            obj = args[0]
+            d = {}
+            for k in [
+                'page_id', 'pool_slot', 'pool_idx', 'page_size', 'importance_score',
+                'attention_sum', 'last_step_accessed', 'tier_name', 'key', 'value',
+                'key_compressed', 'value_compressed', 'key_scale', 'value_scale',
+                'key_min', 'value_min'
+            ]:
+                try:
+                    val = obj[k]
+                    if val is not None:
+                        d[k] = val
+                except (KeyError, TypeError, IndexError):
+                    if hasattr(obj, k):
+                        val = getattr(obj, k)
+                        if val is not None:
+                            d[k] = val
+            super().__init__(d, **kwargs)
+        else:
+            super().__init__(*args, **kwargs)
+
     @property
     def key_q(self):
         return self.get('key_compressed', {}).get('q')
@@ -300,6 +324,48 @@ def isolate_outliers(tensor, threshold_sigma=3.0):
     return normal_vals, outlier_vals, outlier_mask
 
 class PagedDynamicKVCache:
+    @property
+    def active_pages(self):
+        return self._cpp_manager.active_pages
+
+    @active_pages.setter
+    def active_pages(self, val):
+        self._cpp_manager.active_pages = val
+
+    @property
+    def pages_by_tier(self):
+        return self._cpp_manager.pages_by_tier
+
+    @pages_by_tier.setter
+    def pages_by_tier(self, val):
+        self._cpp_manager.pages_by_tier = val
+
+    @property
+    def max_active_pages(self):
+        return self._cpp_manager.max_active_pages
+
+    @max_active_pages.setter
+    def max_active_pages(self, val):
+        self._cpp_manager.max_active_pages = val
+
+    @property
+    def generation_step(self):
+        return self._cpp_manager.generation_step
+
+    @generation_step.setter
+    def generation_step(self, val):
+        self._cpp_manager.generation_step = val
+
+    @property
+    def prefetch_cache(self):
+        """Page IDs currently held in the C++ manager's live prefetch cache."""
+        return {pid: True for pid in self._cpp_manager.get_prefetched_page_ids()}
+
+    @property
+    def prefetch_hits(self):
+        """Count of resurrections/reads served from the prefetch cache instead of a fresh dequant."""
+        return self._cpp_manager.get_prefetch_hit_count()
+
     def __init__(
         self, 
         page_size=4096, 
@@ -377,13 +443,76 @@ class PagedDynamicKVCache:
                 raise ValueError(f"page_size ({self.page_size}) must be a multiple of 128 for FlashAttention alignment when strict_alignment is enabled.")
             else:
                 argus_log("WARNING", f"page_size ({self.page_size}) is not a multiple of 128. FlashAttention block alignment is bypassed.", line_no=245)
+
+        import argus_cpp_backend
+        # 10. Load C++ Extension Backend
+        device_id = torch.cuda.current_device() if torch.cuda.is_available() else 0
+        self._cpp_manager = argus_cpp_backend.ArgusCppManager(self.page_size, self.config.max_active_pages, device_id)
+        
+        # Configure C++ parameters
+        if hasattr(self.config, "w_proj"):
+            self._cpp_manager.set_jl_projection_matrix(self.config.w_proj)
+        if hasattr(self.config, "recon_operator"):
+            self._cpp_manager.set_jl_recon_operator(self.config.recon_operator)
+
+        # JL matrices depend on the device/dtype of the first tensor that
+        # actually reaches the tier, which isn't known at construction time.
+        # Register lazy providers so C++ can request them on first use instead
+        # of relying on an eagerly-built (and possibly wrongly-shaped) default.
+        self._cpp_manager.set_jl_projection_provider(
+            lambda sample: self.get_jl_projection_matrix(sample.device, sample.dtype, sample.shape[-2])
+        )
+        self._cpp_manager.set_jl_recon_provider(
+            lambda compressed_sample, seq_len: self.get_jl_reconstruction_operator(
+                compressed_sample.device, compressed_sample.dtype, seq_len=seq_len)
+        )
+
+        # Restore the pluggable eviction-policy hooks into the C++ hot path:
+        # which page leaves the active pool, and per-page access bookkeeping
+        # (reference bits / heat registers / importance recalculation).
+        if self.eviction_policy is not None:
+            def _select_active_victim(pages):
+                victim = self.eviction_policy.select_victim(list(pages), context={})
+                return list(pages).index(victim)
+            self._cpp_manager.set_active_pool_victim_selector(_select_active_victim)
+
+        def _on_page_access(page, block_w, step):
+            if self.eviction_policy is not None and hasattr(self.eviction_policy, 'on_access'):
+                self.eviction_policy.on_access(page, block_w, step)
+            self._calculate_importance(page)
+        self._cpp_manager.set_on_page_access_callback(_on_page_access)
+        self._cpp_manager.set_force_qos(getattr(self.config, 'force_qos', False))
+
+
+        for spec in self.tier_specs:
+            self._cpp_manager.add_tier_cpp(spec.name)
+            self._cpp_manager.set_tier_max_pages(spec.name, spec.max_pages)
+            # Give the native engine this tier's storage format. Tiers whose
+            # backend declares no native codec stay unregistered and spill
+            # uncompressed rather than being decoded with the wrong layout.
+            self._sync_tier_codec(spec)
+
+        self._cpp_manager.set_tier_pipeline_cpp([s.name for s in self.tier_specs])
+        self.zero_copy_pool = ZeroCopyHostPool()
+        self.zero_copy_pool._backend = self._cpp_manager.get_host_pool()
+        self._zero_copy_tensor_registry = {}
+
+        # Synchronize tier specs with C++
+        for tier_name, spec in self.tier_name_to_spec.items():
+            self._cpp_manager.set_tier_max_pages(tier_name, spec.max_pages)
+
         self.max_active_pages = self.config.max_active_pages
         self.threshold_sigma = self.pipeline_config.threshold_sigma
         self.micro_page_size = getattr(self.pipeline_config, 'micro_page_size', None)
         if self.micro_page_size is None:
             self.micro_page_size = getattr(self.config, 'micro_page_size', None)
         if self.micro_page_size is None:
-            self.micro_page_size = self.page_size // 4
+            # Default micro-page size must stay a multiple of 8: the bit-packed
+            # tiers require it (one_bit packs 8-wide, int2 packs 4-wide, int4
+            # packs 2-wide) — anything not divisible by 8 crashes the first
+            # time a split micro-page cascades into one of those tiers. Callers
+            # that explicitly pass micro_page_size opt out of this guard.
+            self.micro_page_size = max(8, (self.page_size // 4 // 8) * 8)
         self.balloon_driver = getattr(pipeline, 'balloon_driver', None)
         if self.balloon_driver is None:
             self.balloon_driver = getattr(self.config, 'balloon_driver', None)
@@ -399,7 +528,6 @@ class PagedDynamicKVCache:
         
         # Generation step tracking for recency scoring
         self.generation_step = 0
-        self._page_counter = 0
         self.event_log = []
         
         # Outlier-Aware: Attention Sinks (First N tokens kept in FP16 permanently)
@@ -411,20 +539,23 @@ class PagedDynamicKVCache:
         self.anchor_k = None
         self.anchor_v = None
         
-        self.pages_by_tier = {spec.name: [] for spec in self.tier_specs}
-        self.active_pages = []     # Tier 1: FP16 active pool (uncompressed)
+        # (pages_by_tier and active_pages are now dynamic descriptors delegating to C++)
         self.active_pool_k = None
         self.active_pool_v = None
         
-        # Shared static JL projection matrix
+        # Shared static JL projection matrix (page_size-length, back-compat attribute)
         self.w_proj = None
+        # Per-(device, dtype, seq_len) cache — variable-granularity micro-pages
+        # need a differently-shaped projection/reconstruction matrix than
+        # full-size pages, since JL projects along the sequence axis.
+        self._jl_w_proj_cache = {}
+        self._jl_recon_operator_cache = {}
         
         # Static buffer state (allocated on demand during ensure_pools_allocated)
         self._pools_allocated = False
         
-        # Speculative prefetching cache
-        self.prefetch_cache = {}
-        self.prefetch_hits = 0
+        # Speculative prefetching (prefetch_cache/prefetch_hits are properties
+        # backed by the C++ manager's real prefetch state; see above)
         self.prefetch_misses = 0
         
         # CUDA Stream for async prefetching
@@ -432,10 +563,6 @@ class PagedDynamicKVCache:
         
         # Context swapping / Zero-OOM multi-tenant guard state
         self.is_swapped_out = False
-
-        # ── Zero-Copy PCIe Streaming Host Pool ──────────────────────────
-        self.zero_copy_pool = ZeroCopyHostPool()
-        self._zero_copy_tensor_registry = {}  # page_id -> list of pinned tensors
 
         # Telemetry metrics
         self.num_resurrections = 0
@@ -702,31 +829,47 @@ class PagedDynamicKVCache:
     def one_bit_pool_v_scales(self):
         return self.pools_by_tier.get("one_bit_value_scales")
 
-    def get_jl_projection_matrix(self, device, dtype):
+    def get_jl_projection_matrix(self, device, dtype, seq_len=None):
         """
-        Generates/caches a single static random orthogonal projection matrix shared by all pages.
-        Shape: [page_size // 4, page_size]
+        Generates/caches a random orthogonal projection matrix for a given
+        sequence length, shared by all pages of that length. Micro-pages
+        (variable granularity) need a differently-shaped matrix than
+        full-size pages, since JL projects along the sequence axis.
+        Shape: [seq_len // 4, seq_len]
         """
-        if self.w_proj is None or self.w_proj.device != device or self.w_proj.dtype != dtype:
-            n = self.page_size
-            m = self.page_size // 4
+        seq_len = seq_len or self.page_size
+        cache_key = (device, dtype, seq_len)
+        cached = self._jl_w_proj_cache.get(cache_key)
+        if cached is None:
+            n = seq_len
+            m = max(1, seq_len // 4)
             torch.manual_seed(42) # Keep it deterministic
             raw_randn = torch.randn(n, m, dtype=torch.float32, device=device)
             q, _ = torch.linalg.qr(raw_randn)
-            self.w_proj = q.t().to(dtype) # [M, N]
-        return self.w_proj
+            cached = q.t().to(dtype) # [M, N]
+            self._jl_w_proj_cache[cache_key] = cached
+            # Only mirror into the C++ manager for CUDA matrices — its own
+            # auto-cascade always operates on CUDA tensors, so pushing a CPU
+            # matrix here (e.g. from split_page processing a swapped-out
+            # page) would silently poison it for the next CUDA demotion.
+            if seq_len == self.page_size and torch.device(device).type == 'cuda':
+                self.w_proj = cached
+                if hasattr(self, '_cpp_manager'):
+                    self._cpp_manager.set_jl_projection_matrix(cached)
+        return cached
 
-    def get_jl_reconstruction_operator(self, device, dtype, alpha=1e-3):
+    def get_jl_reconstruction_operator(self, device, dtype, alpha=1e-3, seq_len=None):
         """
         Precomputes and caches the smooth Laplacian-regularized reconstruction operator
-        associated with the current static JL projection matrix.
-        Shape: [page_size, page_size // 4]
+        associated with the JL projection matrix for a given sequence length.
+        Shape: [seq_len, seq_len // 4]
         """
-        if (not hasattr(self, '_jl_recon_operator') or self._jl_recon_operator is None or 
-            self._jl_recon_operator.device != device or self._jl_recon_operator.dtype != dtype):
-            
+        seq_len = seq_len or self.page_size
+        cache_key = (device, dtype, seq_len)
+        cached = self._jl_recon_operator_cache.get(cache_key)
+        if cached is None:
             # Fetch the projection matrix w_proj [M, N]
-            w_proj = self.get_jl_projection_matrix(device, dtype)
+            w_proj = self.get_jl_projection_matrix(device, dtype, seq_len)
             M, N = w_proj.shape
             
             # Construct standard 1D Laplacian L [N, N]
@@ -754,10 +897,18 @@ class PagedDynamicKVCache:
             
             # Compute final reconstruction operator: A_inv @ WT @ inv_term
             recon_operator = torch.matmul(torch.matmul(A_inv, W.t()), inv_term)
-            
-            self._jl_recon_operator = recon_operator.to(dtype)
-            
-        return self._jl_recon_operator
+
+            cached = recon_operator.to(dtype)
+            self._jl_recon_operator_cache[cache_key] = cached
+            # Same CUDA-only guard as get_jl_projection_matrix — never let a
+            # CPU-built operator (e.g. from split_page on a swapped page)
+            # clobber the one C++'s CUDA auto-cascade relies on.
+            if seq_len == self.page_size and torch.device(device).type == 'cuda':
+                self._jl_recon_operator = cached
+                if hasattr(self, '_cpp_manager'):
+                    self._cpp_manager.set_jl_recon_operator(cached)
+
+        return cached
 
 
     def log_event(self, event_type, page_id, **kwargs):
@@ -832,6 +983,11 @@ class PagedDynamicKVCache:
                 continue
             self._allocate_pool_for_tier(spec.name, spec.max_pages, device, dtype, batch, num_heads, head_dim)
         
+        # Pre-initialize JL projection and reconstruction matrices if "jl" is in the tier specifications
+        if any(spec.is_projection for spec in self.tier_specs):
+            self.get_jl_projection_matrix(device, dtype)
+            self.get_jl_reconstruction_operator(device, dtype)
+        
         self._pools_allocated = True
 
     def _allocate_pool_for_tier(self, name, max_pages, device=None, dtype=None, batch=None, num_heads=None, head_dim=None):
@@ -873,20 +1029,69 @@ class PagedDynamicKVCache:
             self.pools_by_tier["one_bit_key_scales"] = torch.zeros(max_pages, batch, num_heads, self.page_size, 1, device=device, dtype=dtype)
             self.pools_by_tier["one_bit_value_scales"] = torch.zeros(max_pages, batch, num_heads, self.page_size, 1, device=device, dtype=dtype)
 
+    def _is_projection_tier(self, tier_name: str) -> bool:
+        """Whether a tier's backend is a linear projection rather than a quantizer.
+
+        Capability lookup, not a name check: a projection tier needs a
+        ``w_proj``/``recon_operator`` threaded through compress/decompress,
+        and that requirement belongs to the backend, not to the string "jl".
+        """
+        spec = self.tier_name_to_spec.get(tier_name)
+        return spec is not None and spec.is_projection
+
+    def _sync_tier_codec(self, spec: TierSpec):
+        """Publish a tier's native storage format to the C++ engine.
+
+        Without this, a plugin tier reaches C++ as an unknown name and its
+        pages spill uncompressed. With it, the native engine compresses the
+        tier using the same generic kernel path as the built-ins.
+        """
+        cpp = getattr(self, '_cpp_manager', None)
+        if cpp is None:
+            return
+
+        caps = spec.capabilities
+        native = caps.native_codec if caps is not None else None
+        if native is None:
+            # No declared native format: leave the tier unregistered so C++
+            # falls back to a lossless host spill rather than guessing a
+            # bit layout and corrupting the page.
+            if cpp.has_codec(spec.name):
+                cpp.unregister_codec(spec.name)
+            return
+
+        import argus_cpp_backend
+        codec = argus_cpp_backend.TierCodec()
+        codec.name = spec.name
+        codec.kind = {
+            "signed_linear": argus_cpp_backend.CodecKind.SIGNED_LINEAR,
+            "unsigned_affine": argus_cpp_backend.CodecKind.UNSIGNED_AFFINE,
+            "sign_packed": argus_cpp_backend.CodecKind.SIGN_PACKED,
+            "projection": argus_cpp_backend.CodecKind.PROJECTION,
+            "passthrough": argus_cpp_backend.CodecKind.PASSTHROUGH,
+        }[native.kind]
+        codec.bits = native.bits
+        codec.lossy = caps.lossy
+        codec.compression_ratio = native.compression_ratio
+        cpp.register_codec(codec)
+
     def add_tier(self, spec: TierSpec, index: int = -1):
         """Adds a new cache tier spec dynamically to the pipeline."""
         if spec.name in self.tier_name_to_spec:
             raise ValueError(f"Tier with name {spec.name} already exists.")
-            
+
         if index == -1:
             self.tier_specs.append(spec)
         else:
             self.tier_specs.insert(index, spec)
-            
+
         self.tier_name_to_spec[spec.name] = spec
-        if spec.name not in self.pages_by_tier:
-            self.pages_by_tier[spec.name] = []
-            
+        if hasattr(self, '_cpp_manager'):
+            self._cpp_manager.add_tier_cpp(spec.name)
+            self._cpp_manager.set_tier_pipeline_cpp([s.name for s in self.tier_specs])
+            self._cpp_manager.set_tier_max_pages(spec.name, spec.max_pages)
+            self._sync_tier_codec(spec)
+
         if spec.use_static_pool:
             self._allocate_pool_for_tier(spec.name, spec.max_pages)
             
@@ -904,10 +1109,15 @@ class PagedDynamicKVCache:
         for p in pages:
             self._resurrect_page(p, name)
             
-        self.pages_by_tier.pop(name, None)
+        if hasattr(self, '_cpp_manager'):
+            self._cpp_manager.remove_tier_cpp(name)
         
         # Remove spec from list
         self.tier_specs = [s for s in self.tier_specs if s.name != name]
+        
+        if hasattr(self, '_cpp_manager'):
+            self._cpp_manager.set_tier_pipeline_cpp([s.name for s in self.tier_specs])
+
         
         # Clean up pools
         keys_to_remove = [k for k in self.pools_by_tier.keys() if k.startswith(f"{name}_")]
@@ -922,6 +1132,12 @@ class PagedDynamicKVCache:
         Pushes new key and value tensors into the cache. Segments pages automatically,
         while isolating the initial Attention Sinks and VIP anchors.
         """
+        # Anchors/sinks are extracted below from whatever device the caller
+        # passed in — if that's CPU, sink_k/sink_v end up CPU (and pinned) by
+        # design, since they're meant to sit in zero-copy host memory rather
+        # than consume GPU VRAM. Only the remainder of the sequence (the part
+        # that actually enters the paged cache) is moved to CUDA, and only
+        # after extraction so this ordering is preserved.
         self._check_and_prevent_oom()
         # 0. Extract Newline / Rhyme Anchors if is_anchor mask is provided
         if is_anchor is not None:
@@ -978,6 +1194,14 @@ class PagedDynamicKVCache:
                     self.sink_v = self.sink_v.pin_memory()
                 return
 
+        # Now that sinks/anchors have been carved off, move the rest of the
+        # sequence (the part that actually enters the paged cache) to CUDA.
+        if torch.cuda.is_available():
+            if keys.device.type == "cpu":
+                keys = keys.cuda()
+            if values.device.type == "cpu":
+                values = values.cuda()
+
         # Ensure pools are allocated with correct batch and head size
         self._ensure_pools_allocated(keys, values)
         
@@ -996,15 +1220,33 @@ class PagedDynamicKVCache:
         self.static_v_buffer[..., self.buffer_length : self.buffer_length + num_new, :].copy_(values)
         self.buffer_length += num_new
             
-        # 3. Segment into pages in-place
+        # Segment into pages in-place and delegate to C++ manager
         while self.buffer_length >= self.page_size:
-            # If active pages are full, evict the least important first!
-            if len(self.active_pages) >= self.max_active_pages:
-                self.manage_memory_lifecycle()
-                
-            idx = self._get_free_pool_idx(self.active_pages, self.max_active_pages)
-            self.active_pool_k[idx].copy_(self.static_k_buffer[..., :self.page_size, :])
-            self.active_pool_v[idx].copy_(self.static_v_buffer[..., :self.page_size, :])
+            page_k = self.static_k_buffer[..., :self.page_size, :].clone()
+            page_v = self.static_v_buffer[..., :self.page_size, :].clone()
+
+            # Record page list before push to detect demotions
+            before_active_ids = {p.page_id for p in self._cpp_manager.active_pages}
+            
+            # Delegate page creation to C++ manager
+            self._cpp_manager.push_new_tokens(page_k, page_v)
+            
+            # Detect demoted pages
+            after_active = self._cpp_manager.active_pages
+            after_active_ids = {p.page_id for p in after_active}
+            demoted_ids = before_active_ids - after_active_ids
+            for pid in demoted_ids:
+                tier_to = "fp8"
+                for spec in self.tier_specs:
+                    if any(p.page_id == pid for p in self.pages_by_tier.get(spec.name, [])):
+                        tier_to = spec.name
+                        break
+                self.log_event("demote", pid, tier_from="active", tier_to=tier_to)
+
+            # Find the new page that was created
+            new_page = [p for p in after_active if p.page_id not in before_active_ids]
+            if new_page:
+                self.log_event("create", new_page[0].page_id)
             
             # Shift remaining tokens in static buffer
             remaining = self.buffer_length - self.page_size
@@ -1012,25 +1254,6 @@ class PagedDynamicKVCache:
                 self.static_k_buffer[..., :remaining, :].copy_(self.static_k_buffer[..., self.page_size : self.page_size + remaining, :])
                 self.static_v_buffer[..., :remaining, :].copy_(self.static_v_buffer[..., self.page_size : self.page_size + remaining, :])
             self.buffer_length = remaining
-            
-            self._page_counter += 1
-            ent = calculate_tensor_entropy(self.active_pool_k[idx])
-            page_dict = PageDict({
-                'page_id': self._page_counter,
-                'key': self.active_pool_k[idx],
-                'value': self.active_pool_v[idx],
-                'pool_idx': idx,
-                'attention_sum': 0.0,
-                'last_step_accessed': self.generation_step,
-                'entropy': ent,
-                'importance_score': 0.0,
-                'page_size': self.page_size
-            })
-            self._calculate_importance(page_dict)
-            self.active_pages.append(page_dict)
-            self.log_event("create", page_dict['page_id'])
-            self.page_lifetimes[page_dict['page_id']] = self.generation_step
-            argus_log("INFO", f"Allocated Page {page_dict['page_id']} (FP16) | Pool Slot: {idx} | Entropy: {ent:.4f}", line_no=400)
 
     def _calculate_importance(self, page):
         alpha = self.config.importance_alpha
@@ -1445,23 +1668,17 @@ class PagedDynamicKVCache:
         else:
             start_time = time.perf_counter()
 
-        # 1. Dequantize
-        spec = self.tier_name_to_spec.get(tier)
-        if spec is None:
-            return
+        # Record page list before to detect demotions
+        before_active_ids = {p.page_id for p in self._cpp_manager.active_pages}
 
-        key_compressed = page.get('key_compressed')
-        value_compressed = page.get('value_compressed')
+        # Delegate actual resurrection and memory movement to C++
+        self._cpp_manager.resurrect_page(page, tier)
 
-        decomp_args = {"seq_dim": -2}
-        if tier == 'jl':
-            recon_op = self.get_jl_reconstruction_operator(page['key_proj'].device, page['key_proj'].dtype)
-            decomp_args['recon_operator'] = recon_op
-
-        k = spec.backend.decompress(key_compressed, **decomp_args)
-        v = spec.backend.decompress(value_compressed, **decomp_args)
-        
-        self.pages_by_tier[tier] = [p for p in self.pages_by_tier[tier] if p is not page]
+        # C++ only updates last_step_accessed on resurrection — recalculate
+        # importance_score now so the freshly-resurrected (hot) page doesn't
+        # look cold and get immediately re-evicted by manage_memory_lifecycle
+        # below, which runs the pluggable eviction policy on the active pool.
+        self._calculate_importance(page)
 
         if use_cuda_event:
             end_event.record()
@@ -1474,14 +1691,12 @@ class PagedDynamicKVCache:
             self.num_resurrections += 1
             self.dequant_latencies.append(dequant_time)
         try:
+            spec = self.tier_name_to_spec.get(tier)
             depth = self.tier_specs.index(spec) + 1
         except ValueError:
             depth = 1
         self.resurrection_depths.append(depth)
         self.page_lifetimes[page.get('page_id')] = self.generation_step
-
-        k = _apply_outlier_restoration(k, page, key='key')
-        v = _apply_outlier_restoration(v, page, key='value')
 
         # Determine resurrection reason & log it
         rec = 1.0 / (1.0 + float(self.generation_step - page.get('last_step_accessed', 0)))
@@ -1495,42 +1710,22 @@ class PagedDynamicKVCache:
         if tier in ['int4', 'int2', 'one_bit', 'jl']:
             argus_log("INFO", f"Attention spike detected on archived memory", line_no=702)
 
-        # 2. To insert into active_pages, we must ensure we have a slot!
-        while len(self.active_pages) >= self.max_active_pages:
-            if self.eviction_policy is not None:
-                demoted_page = self.eviction_policy.select_victim(self.active_pages, context={})
-                self.active_pages.remove(demoted_page)
-            else:
-                self.active_pages.sort(key=lambda x: x.get('importance_score', 0.0))
-                demoted_page = self.active_pages.pop(0)
-            self._demote_to_next_tier(demoted_page, -1)
+        # 2. Let C++ manager handle memory lifecycle / eviction for the active pool
+        self._cpp_manager.manage_memory_lifecycle()
+        self.log_event("resurrect", page.get('page_id'), tier=tier)
 
-        if k.shape[-2] == self.page_size:
-            idx = self._get_free_pool_idx(self.active_pages, self.max_active_pages)
-            self.active_pool_k[idx].copy_(k)
-            self.active_pool_v[idx].copy_(v)
-            key_tensor = self.active_pool_k[idx]
-            value_tensor = self.active_pool_v[idx]
-            pool_idx_val = idx
-        else:
-            key_tensor = k
-            value_tensor = v
-            pool_idx_val = None
+        # Detect demoted pages from manage_memory_lifecycle
+        after_active_ids = {p.page_id for p in self._cpp_manager.active_pages}
+        res_pid = page.get('page_id')
+        demoted_ids = (before_active_ids | {res_pid}) - after_active_ids
+        for pid in demoted_ids:
+            tier_to = "fp8"
+            for spec in self.tier_specs:
+                if any(p.page_id == pid for p in self.pages_by_tier.get(spec.name, [])):
+                    tier_to = spec.name
+                    break
+            self.log_event("demote", pid, tier_from="active", tier_to=tier_to)
 
-        resurrected_dict = PageDict({
-            'page_id': page.get('page_id'),
-            'key': key_tensor,
-            'value': value_tensor,
-            'pool_idx': pool_idx_val,
-            'attention_sum': page.get('attention_sum', 0.0),
-            'last_step_accessed': self.generation_step,
-            'entropy': page.get('entropy', 0.0),
-            'importance_score': page.get('importance_score', 0.0),
-            'page_size': k.shape[-2]
-        })
-        self._calculate_importance(resurrected_dict)
-        self.active_pages.append(resurrected_dict)
-        self.log_event("resurrect", resurrected_dict['page_id'], tier=tier)
         self._invalidate_decompressed_cache()
 
     def manage_memory_lifecycle(self):
@@ -1591,8 +1786,8 @@ class PagedDynamicKVCache:
                 v_out_indices, v_out_values = None, None
         else:
             # Demoting from a compressed tier
-            decomp_args = {"seq_dim": -2}
-            if current_spec.name == 'jl':
+            decomp_args = {"seq_dim": -1}
+            if current_spec.is_projection:
                 recon_op = self.get_jl_reconstruction_operator(page['key_proj'].device, page['key_proj'].dtype)
                 decomp_args['recon_operator'] = recon_op
             
@@ -1624,8 +1819,8 @@ class PagedDynamicKVCache:
                     v_out_indices, v_out_values = None, None
                     
         # 3. Sonraki katmanın backend'i ile compress et
-        comp_args = {"seq_dim": -2}
-        if next_spec.name == 'jl':
+        comp_args = {"seq_dim": -1}
+        if next_spec.is_projection:
             w_proj = self.get_jl_projection_matrix(k_norm.device, k_norm.dtype)
             comp_args['w_proj'] = w_proj
             
@@ -1702,56 +1897,30 @@ class PagedDynamicKVCache:
 
     def _decompress_tier_pages_batched(self, spec, pages):
         """
-        Decompresses all pages in a tier using a single batched kernel launch.
-        Returns: list of (k_tensor, v_tensor) tuples, one per page.
-        
-        Pages already in the prefetch cache are returned as-is.
-        Non-cached pages are grouped and sent through spec.backend.decompress_batch()
-        to minimize kernel launch overhead: O(1) per tier instead of O(N_pages).
+        Decompresses all pages in a tier, one per page.
+
+        Pages already in the prefetch cache are returned as-is. Everything
+        else goes through the C++ manager's native dequant kernels/JL matmul
+        (peek_decompress_page) rather than the pluggable Python
+        QuantizationBackend — the Python backends pack bits along the
+        sequence axis while these tiers are always compressed by C++ (which
+        packs along head_dim), so decoding via the Python side silently
+        produces wrong values for anything actually written by C++.
         """
         results = [None] * len(pages)
-        
-        # Separate prefetch-cached vs needs-decompression
-        to_decompress_k = []
-        to_decompress_v = []
-        decompress_indices = []  # Track original positions for reassembly
-        
+
         for i, page in enumerate(pages):
-            if id(page) in self.prefetch_cache:
-                k, v = self.prefetch_cache[id(page)]
-                self.prefetch_hits += 1
-                results[i] = (k, v)
+            cached = self._cpp_manager.get_prefetched_tensors(page.get('page_id'))
+            if cached is not None:
+                k, v = cached
             else:
                 self.prefetch_misses += 1
-                to_decompress_k.append(page['key_compressed'])
-                to_decompress_v.append(page['value_compressed'])
-                decompress_indices.append(i)
-        
-        # Batch decompress all non-cached pages in a single kernel launch
-        if to_decompress_k:
-            decomp_args = {"seq_dim": -2}
-            if spec.name == 'jl' and pages:
-                # JL needs reconstruction operator
-                sample_q = pages[decompress_indices[0]]['key_compressed'].get('q',
-                           pages[decompress_indices[0]].get('key_proj'))
-                if sample_q is not None:
-                    recon_op = self.get_jl_reconstruction_operator(sample_q.device, sample_q.dtype)
-                    decomp_args['recon_operator'] = recon_op
-            
-            batch_k = spec.backend.decompress_batch(to_decompress_k, **decomp_args)
-            batch_v = spec.backend.decompress_batch(to_decompress_v, **decomp_args)
-            
-            for idx_in_batch, orig_idx in enumerate(decompress_indices):
-                k = batch_k[idx_in_batch]
-                v = batch_v[idx_in_batch]
-                page = pages[orig_idx]
-                
-                # Outlier restoration (safe bounds-checked helper)
-                k = _apply_outlier_restoration(k, page, key='key')
-                v = _apply_outlier_restoration(v, page, key='value')
-                
-                results[orig_idx] = (k, v)
-        
+                k, v = self._cpp_manager.peek_decompress_page(page, spec.name)
+
+            k = _apply_outlier_restoration(k, page, key='key')
+            v = _apply_outlier_restoration(v, page, key='value')
+            results[i] = (k, v)
+
         return results
 
     def get_all_keys_values(self):
@@ -1784,6 +1953,13 @@ class PagedDynamicKVCache:
                     tier_keys.append(k)
                     tier_values.append(v)
             if tier_keys:
+                # Compressed-tier tensors live in pinned host (CPU) memory —
+                # decompressing them yields CPU tensors, while active pages
+                # are always on CUDA. Align to CUDA before concatenating so
+                # this doesn't crash the moment both are present at once.
+                target_dev = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+                tier_keys = [k.to(target_dev) if k.device != target_dev else k for k in tier_keys]
+                tier_values = [v.to(target_dev) if v.device != target_dev else v for v in tier_values]
                 self._decompressed_tiers_k = torch.cat(tier_keys, dim=-2)
                 self._decompressed_tiers_v = torch.cat(tier_values, dim=-2)
                 all_keys.append(self._decompressed_tiers_k)
@@ -1820,23 +1996,30 @@ class PagedDynamicKVCache:
             
         if not all_keys:
             return None, None
-            
-        return torch.cat(all_keys, dim=-2), torch.cat(all_values, dim=-2)
+
+        # Sinks (pinned CPU by design) and compressed tiers (pinned host
+        # memory) can each land on a different device than the active pool
+        # (always CUDA). Align everything to one device right before the
+        # final concatenation instead of assuming they already match.
+        target_dev = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+        all_keys = [t.to(target_dev) if t.device != target_dev else t for t in all_keys]
+        all_values = [t.to(target_dev) if t.device != target_dev else t for t in all_values]
+
+        return torch.cat(all_keys, dim=-2).to(torch.float16), torch.cat(all_values, dim=-2).to(torch.float16)
 
     def inplace_paged_attention(self, q: torch.Tensor, scale: float = None) -> torch.Tensor:
         """
         Computes scaled dot-product attention block-by-block/page-by-page.
-        Bypasses massive FP16 reconstruction of full KV tensors to save DRAM bandwidth and VRAM.
-        Works seamlessly on both:
-          1. Enterprise GPUs (vectorized batched attention over active + prefetched pages)
-          2. Consumer GPUs (low-VRAM sequential block-by-block calculation)
-        
-        q shape: [batch, num_heads, q_len, head_dim]
-        Returns:
-          attn_output: [batch, num_heads, q_len, head_dim]
+        Delegates to the C++ ArgusCppManager which triggers the optimal FlashAttention/SDPA paths.
         """
         import math
         batch, num_heads, q_len, head_dim = q.shape
+        orig_device = q.device
+        
+        if torch.cuda.is_available():
+            if q.device.type == "cpu":
+                q = q.cuda()
+
         device = q.device
         dtype = q.dtype
         
@@ -1844,188 +2027,71 @@ class PagedDynamicKVCache:
             scale = 1.0 / math.sqrt(head_dim)
             
         self.total_attention_calls += 1
-            
-        # Vectorized Attention is always faster on GPU than slow Python loops,
-        # and 32MB memory allocation is completely safe on 4GB VRAM.
-        is_enterprise = q.is_cuda
 
         # Automatic Swap-In Safeguard
         if self.is_swapped_out:
             self.swap_in_to_device(device=device)
 
-        # Let's collect all dequantized/active K and V tensors
-        keys_list = []
-        values_list = []
+        # Get C++ signature values:
+        # Default value for optional tensors: None or empty torch.Tensor()
+        # In python, we pass None to pybind11 which converts it to undefined torch::Tensor()
+        sink_k = self.sink_k if self.sink_k is not None else torch.Tensor()
+        sink_v = self.sink_v if self.sink_v is not None else torch.Tensor()
+        anchor_k = self.anchor_k if self.anchor_k is not None else torch.Tensor()
+        anchor_v = self.anchor_v if self.anchor_v is not None else torch.Tensor()
+        k_buffer = self.k_buffer if self.k_buffer is not None else torch.Tensor()
+        v_buffer = self.v_buffer if self.v_buffer is not None else torch.Tensor()
         
-        # 1. Outlier-Aware: Attention Sinks (FP16)
-        if self.sink_k is not None:
-            keys_list.append(self.sink_k)
-            values_list.append(self.sink_v)
-            
-        # 2. VIP Anchors (FP16)
-        if self.anchor_k is not None:
-            keys_list.append(self.anchor_k)
-            values_list.append(self.anchor_v)
-            
-        # 3. Active FP16 Pages
-        for page in self.active_pages:
-            keys_list.append(page['key'])
-            values_list.append(page['value'])
-            
-        # 4. Temp active buffer
-        if self.k_buffer is not None and self.k_buffer.shape[-2] > 0:
-            keys_list.append(self.k_buffer)
-            values_list.append(self.v_buffer)
-            
-        # 5. Compressed Pages (Tiers 2-7) — Batched Decompression
-        if self._tiers_version == self._cache_version and self._decompressed_tiers_k is not None:
-            if self._decompressed_tiers_k.numel() > 0:
-                keys_list.append(self._decompressed_tiers_k)
-                values_list.append(self._decompressed_tiers_v)
-        else:
-            tier_keys = []
-            tier_values = []
-            for spec in reversed(self.tier_specs):
-                tier_pages = self.pages_by_tier.get(spec.name, [])
-                if not tier_pages:
-                    continue
-                kv_pairs = self._decompress_tier_pages_batched(spec, tier_pages)
-                for k, v in kv_pairs:
-                    tier_keys.append(k)
-                    tier_values.append(v)
-            if tier_keys:
-                self._decompressed_tiers_k = torch.cat(tier_keys, dim=-2)
-                self._decompressed_tiers_v = torch.cat(tier_values, dim=-2)
-                keys_list.append(self._decompressed_tiers_k)
-                values_list.append(self._decompressed_tiers_v)
-            else:
-                self._decompressed_tiers_k = torch.empty(0, device=device, dtype=dtype)
-                self._decompressed_tiers_v = torch.empty(0, device=device, dtype=dtype)
-            self._tiers_version = self._cache_version
-        
-        if not keys_list:
-            return torch.zeros_like(q)
-            
-        # Handle GQA (Grouped Query Attention) and repeat KV heads if necessary
-        num_heads_q = q.shape[1]
-        num_heads_kv = keys_list[0].shape[1]
-        if num_heads_q != num_heads_kv:
-            n_rep = num_heads_q // num_heads_kv
-            assert num_heads_q % num_heads_kv == 0, f"Query heads ({num_heads_q}) must be divisible by KV heads ({num_heads_kv})"
-            
-            def repeat_kv(x, n_rep):
-                batch, num_key_value_heads, slen, head_dim = x.shape
-                if n_rep == 1:
-                    return x
-                x = x[:, :, None, :, :].expand(batch, num_key_value_heads, n_rep, slen, head_dim)
-                return x.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
-                
-            keys_list = [repeat_kv(k, n_rep) for k in keys_list]
-            values_list = [repeat_kv(v, n_rep) for v in values_list]
-            
-        # Single fast concatenated path — compiled into a fused CUDA graph.
-        # _compiled_sdp_attention uses torch.nn.functional.scaled_dot_product_attention
-        # which selects FlashAttention2 on Ampere+ or efficient_attention on older GPUs.
-        # On CPU it falls back to the math backend. Either way it's faster than the
-        # raw matmul→softmax→matmul chain because Python dispatch overhead is eliminated.
-        k_full = torch.cat(keys_list, dim=-2)
-        v_full = torch.cat(values_list, dim=-2)
+        if torch.cuda.is_available():
+            if sink_k.numel() > 0 and sink_k.device.type == "cpu":
+                sink_k = sink_k.cuda()
+            if sink_v.numel() > 0 and sink_v.device.type == "cpu":
+                sink_v = sink_v.cuda()
+            if anchor_k.numel() > 0 and anchor_k.device.type == "cpu":
+                anchor_k = anchor_k.cuda()
+            if anchor_v.numel() > 0 and anchor_v.device.type == "cpu":
+                anchor_v = anchor_v.cuda()
+            if k_buffer.numel() > 0 and k_buffer.device.type == "cpu":
+                k_buffer = k_buffer.cuda()
+            if v_buffer.numel() > 0 and v_buffer.device.type == "cpu":
+                v_buffer = v_buffer.cuda()
 
-        attn_output = _compiled_sdp_attention(q, k_full, v_full, scale)
-        # Expose attn_probs for the QoS weight update below.
-        # SDPA doesn't return attn_probs, so recompute a lightweight version
-        # only for the metrics path (no_grad, won't affect perf).
-        attn_probs = None  # computed lazily inside the QoS block below
+        resurrection_threshold = getattr(self.config, 'resurrection_threshold', 0.15)
 
-
-        self.generation_step += 1
-
-        # Eager Bypass: If there is no memory pressure (active pages within limit)
-        # and no compressed pages exist yet, skip the entire QoS weight update block.
-        # This allows ARGUS to run at 100% native vLLM/SDPA speed during normal operation.
-        has_compressed = any(self.pages_by_tier.get(spec.name) for spec in self.tier_specs)
-        under_pressure = len(self.active_pages) >= self.max_active_pages or self.is_swapped_out
-        force_qos = getattr(self.config, 'force_qos', False)
-        if not has_compressed and not under_pressure and not force_qos:
-            return attn_output
-
-        # Update QoS metrics and trigger Hot-Page Resurrection.
-        # SDPA doesn't expose attn_probs, so compute a lightweight weight-only
-        # forward pass for the QoS/resurrection path. This runs under no_grad and
-        # is ~2x cheaper than the full SDPA since we skip the value matmul.
-        with torch.no_grad():
-            weights = _compiled_qos_weights(q, k_full, scale)
-
-        pages_in_order = []
-        if self.sink_k is not None:
-            pages_in_order.append(None)
-        if self.anchor_k is not None:
-            pages_in_order.append(None)
-        for page in self.active_pages:
-            pages_in_order.append(page)
-        if self.k_buffer is not None and self.k_buffer.shape[-2] > 0:
-            pages_in_order.append(None)
-            
-        for spec in reversed(self.tier_specs):
-            for page in self.pages_by_tier.get(spec.name, []):
-                pages_in_order.append(page)
-        
-        # Stack page attention slices and transfer to CPU in ONE single batch operation
-        sums = []
-        idx_start = 0
-        for i, page in enumerate(pages_in_order):
-            if i >= len(keys_list):
-                break
-            block_len = keys_list[i].shape[-2]
-            if page is not None:
-                sums.append((page, weights[idx_start : idx_start + block_len].sum()))
-            idx_start += block_len
-
-        if sums:
-            sums_tensor = torch.stack([s[1] for s in sums]).cpu()
-            sums_list = sums_tensor.tolist()
-            
-            resurrect_ids = []
-            for idx, (page, _) in enumerate(sums):
-                block_w = sums_list[idx]
-                page['attention_sum'] = page.get('attention_sum', 0.0) + block_w
-                if block_w > 0.0:
-                    page['last_step_accessed'] = self.generation_step
-                
-                if self.eviction_policy is not None and hasattr(self.eviction_policy, 'on_access'):
-                    self.eviction_policy.on_access(page, block_w, self.generation_step)
-                
-                # Recalculate importance score
-                self._calculate_importance(page)
-                
-                # Check resurrection eligibility
-                pid = page['page_id']
-                is_compressed = any(
-                    any(p['page_id'] == pid for p in self.pages_by_tier.get(spec.name, []))
-                    for spec in self.tier_specs
-                )
-                if is_compressed and block_w > self.config.resurrection_threshold:
-                    resurrect_ids.append(pid)
-            
-            # Execute resurrection for eligible pages
-            for pid in resurrect_ids:
-                found_page = None
-                found_tier = None
-                for spec in self.tier_specs:
-                    for p in self.pages_by_tier.get(spec.name, []):
-                        if p['page_id'] == pid:
-                            found_page = p
-                            found_tier = spec.name
-                            break
-                    if found_page is not None:
-                        break
-                        
-                if found_page is not None and found_tier is not None:
-                    self._resurrect_page(found_page, found_tier)
+        # Delegate entirely to C++ manager
+        attn_output = self._cpp_manager.inplace_paged_attention(
+            q,
+            scale,
+            sink_k,
+            sink_v,
+            anchor_k,
+            anchor_v,
+            k_buffer,
+            v_buffer,
+            resurrection_threshold
+        )
 
         self.manage_variable_granularity()
 
+        if orig_device.type == "cpu":
+            attn_output = attn_output.cpu()
+
         return attn_output
+
+    def _write_compressed_field(self, page, prefix, comp):
+        """
+        Writes a pluggable backend.compress() dict ({'q', 'scales', 'min_vals'})
+        into the C++ Page struct's fixed fields (<prefix>_compressed/_scale/_min).
+        The C++ struct only holds one scalar scale/min per tensor (matching its
+        own hardcoded fp8/int8/int4/int2/one_bit tiers), so per-channel scale
+        tensors from Python backends are collapsed to their mean. This trades a
+        little precision for structural compatibility on the split/merge path.
+        """
+        page[f'{prefix}_compressed'] = comp['q']
+        scales = comp.get('scales')
+        min_vals = comp.get('min_vals')
+        page[f'{prefix}_scale'] = float(scales.float().mean().item()) if scales is not None else 1.0
+        page[f'{prefix}_min'] = float(min_vals.float().mean().item()) if min_vals is not None else 0.0
 
     def split_page(self, page, tier_name=None):
         """
@@ -2045,8 +2111,10 @@ class PagedDynamicKVCache:
                 return []
 
             decomp_args = {"seq_dim": -2}
-            if tier_name == 'jl':
-                recon_op = self.get_jl_reconstruction_operator(page['key_proj'].device, page['key_proj'].dtype)
+            if self._is_projection_tier(tier_name):
+                recon_op = self.get_jl_reconstruction_operator(
+                    page['key_proj'].device, page['key_proj'].dtype,
+                    seq_len=page.get('page_size', self.page_size))
                 decomp_args['recon_operator'] = recon_op
 
             k_raw = spec.backend.decompress(page['key_compressed'], **decomp_args)
@@ -2074,33 +2142,29 @@ class PagedDynamicKVCache:
                     part_v_out_indices, part_v_out_values = None, None
 
                 comp_args = {"seq_dim": -2}
-                if spec.name == 'jl':
-                    w_proj = self.get_jl_projection_matrix(k_part_norm.device, k_part_norm.dtype)
+                if spec.is_projection:
+                    w_proj = self.get_jl_projection_matrix(k_part_norm.device, k_part_norm.dtype, k_part_norm.shape[-2])
                     comp_args['w_proj'] = w_proj
 
                 part_k_comp = spec.backend.compress(k_part_norm, **comp_args)
                 part_v_comp = spec.backend.compress(v_part_norm, **comp_args)
 
-                self._page_counter += 1
-                part_dict = PageDict({
-                    'page_id': self._page_counter,
-                    'key_compressed': part_k_comp,
-                    'value_compressed': part_v_comp,
-                    'pool_idx': None,
-                    'attention_sum': page.get('attention_sum', 0.0) / num_splits,
-                    'last_step_accessed': page.get('last_step_accessed', self.generation_step),
-                    'entropy': calculate_tensor_entropy(k_part),
-                    'importance_score': page.get('importance_score', 0.0),
-                    'page_size': micro_size
-                })
-                if part_k_out_indices is not None:
-                    part_dict['key_out_indices'] = part_k_out_indices
-                    part_dict['key_out_values'] = part_k_out_values
-                if part_v_out_indices is not None:
-                    part_dict['value_out_indices'] = part_v_out_indices
-                    part_dict['value_out_values'] = part_v_out_values
+                part_page = argus_cpp_backend.create_page()
+                part_page['page_id'] = self._cpp_manager.next_page_id()
+                part_page['tier_name'] = tier_name
+                part_page['orig_dtype'] = k_part_norm.dtype
+                self._write_compressed_field(part_page, 'key', part_k_comp)
+                self._write_compressed_field(part_page, 'value', part_v_comp)
+                part_page['pool_idx'] = -1
+                part_page['attention_sum'] = page.get('attention_sum', 0.0) / num_splits
+                part_page['last_step_accessed'] = page.get('last_step_accessed', self.generation_step)
+                part_page['importance_score'] = page.get('importance_score', 0.0)
+                part_page['page_size'] = micro_size
 
-                split_pages.append(part_dict)
+                # NOTE: Outliers are currently unsupported in C++ Page struct
+                # If needed, we must add key_out_indices etc. to C++ Page.
+
+                split_pages.append(part_page)
         else:
             k_raw = page['key']
             v_raw = page['value']
@@ -2111,19 +2175,18 @@ class PagedDynamicKVCache:
                 k_part = k_raw[..., start:end, :]
                 v_part = v_raw[..., start:end, :]
 
-                self._page_counter += 1
-                part_dict = PageDict({
-                    'page_id': self._page_counter,
-                    'key': k_part,
-                    'value': v_part,
-                    'pool_idx': None,
-                    'attention_sum': page.get('attention_sum', 0.0) / num_splits,
-                    'last_step_accessed': page.get('last_step_accessed', self.generation_step),
-                    'entropy': calculate_tensor_entropy(k_part),
-                    'importance_score': page.get('importance_score', 0.0),
-                    'page_size': micro_size
-                })
-                split_pages.append(part_dict)
+                part_page = argus_cpp_backend.create_page()
+                part_page['page_id'] = self._cpp_manager.next_page_id()
+                part_page['tier_name'] = 'active'
+                part_page['orig_dtype'] = k_part.dtype
+                part_page['key'] = k_part
+                part_page['value'] = v_part
+                part_page['pool_idx'] = -1
+                part_page['attention_sum'] = page.get('attention_sum', 0.0) / num_splits
+                part_page['last_step_accessed'] = page.get('last_step_accessed', self.generation_step)
+                part_page['importance_score'] = page.get('importance_score', 0.0)
+                part_page['page_size'] = micro_size
+                split_pages.append(part_page)
 
         return split_pages
 
@@ -2142,8 +2205,10 @@ class PagedDynamicKVCache:
         for p in pages:
             if 'key_compressed' in p or 'value_compressed' in p:
                 decomp_args = {"seq_dim": -2}
-                if tier_name == 'jl':
-                    recon_op = self.get_jl_reconstruction_operator(p['key_proj'].device, p['key_proj'].dtype)
+                if self._is_projection_tier(tier_name):
+                    recon_op = self.get_jl_reconstruction_operator(
+                        p['key_proj'].device, p['key_proj'].dtype,
+                        seq_len=p.get('page_size', self.page_size))
                     decomp_args['recon_operator'] = recon_op
 
                 k_raw = spec.backend.decompress(p['key_compressed'], **decomp_args)
@@ -2161,7 +2226,7 @@ class PagedDynamicKVCache:
         k_merged = torch.cat(k_list, dim=-2)
         v_merged = torch.cat(v_list, dim=-2)
 
-        self._page_counter += 1
+        next_id = self._cpp_manager.next_page_id()
 
         if tier_name is not None and spec is not None:
             if spec.use_outlier_isolation:
@@ -2177,42 +2242,37 @@ class PagedDynamicKVCache:
                 v_out_indices, v_out_values = None, None
 
             comp_args = {"seq_dim": -2}
-            if spec.name == 'jl':
-                w_proj = self.get_jl_projection_matrix(k_norm.device, k_norm.dtype)
+            if spec.is_projection:
+                w_proj = self.get_jl_projection_matrix(k_norm.device, k_norm.dtype, k_norm.shape[-2])
                 comp_args['w_proj'] = w_proj
 
             key_comp = spec.backend.compress(k_norm, **comp_args)
             value_comp = spec.backend.compress(v_norm, **comp_args)
 
-            merged_page = PageDict({
-                'page_id': self._page_counter,
-                'key_compressed': key_comp,
-                'value_compressed': value_comp,
-                'pool_idx': None,
-                'attention_sum': sum(p.get('attention_sum', 0.0) for p in pages),
-                'last_step_accessed': max(p.get('last_step_accessed', self.generation_step) for p in pages),
-                'entropy': calculate_tensor_entropy(k_merged),
-                'importance_score': max(p.get('importance_score', 0.0) for p in pages),
-                'page_size': total_size
-            })
-            if k_out_indices is not None:
-                merged_page['key_out_indices'] = k_out_indices
-                merged_page['key_out_values'] = k_out_values
-            if v_out_indices is not None:
-                merged_page['value_out_indices'] = v_out_indices
-                merged_page['value_out_values'] = v_out_values
+            merged_page = argus_cpp_backend.create_page()
+            merged_page['page_id'] = next_id
+            merged_page['tier_name'] = tier_name
+            merged_page['orig_dtype'] = k_norm.dtype
+            self._write_compressed_field(merged_page, 'key', key_comp)
+            self._write_compressed_field(merged_page, 'value', value_comp)
+            merged_page['pool_idx'] = -1
+            merged_page['attention_sum'] = sum(p.get('attention_sum', 0.0) for p in pages)
+            merged_page['last_step_accessed'] = max(p.get('last_step_accessed', self.generation_step) for p in pages)
+            merged_page['importance_score'] = max(p.get('importance_score', 0.0) for p in pages)
+            merged_page['page_size'] = total_size
+            # NOTE: outliers skipped for now as C++ doesn't support them
         else:
-            merged_page = PageDict({
-                'page_id': self._page_counter,
-                'key': k_merged,
-                'value': v_merged,
-                'pool_idx': None,
-                'attention_sum': sum(p.get('attention_sum', 0.0) for p in pages),
-                'last_step_accessed': max(p.get('last_step_accessed', self.generation_step) for p in pages),
-                'entropy': calculate_tensor_entropy(k_merged),
-                'importance_score': max(p.get('importance_score', 0.0) for p in pages),
-                'page_size': total_size
-            })
+            merged_page = argus_cpp_backend.create_page()
+            merged_page['page_id'] = next_id
+            merged_page['tier_name'] = 'active'
+            merged_page['orig_dtype'] = k_merged.dtype
+            merged_page['key'] = k_merged
+            merged_page['value'] = v_merged
+            merged_page['pool_idx'] = -1
+            merged_page['attention_sum'] = sum(p.get('attention_sum', 0.0) for p in pages)
+            merged_page['last_step_accessed'] = max(p.get('last_step_accessed', self.generation_step) for p in pages)
+            merged_page['importance_score'] = max(p.get('importance_score', 0.0) for p in pages)
+            merged_page['page_size'] = total_size
 
         return merged_page
 
@@ -2251,47 +2311,48 @@ class PagedDynamicKVCache:
 
             new_active.append(page)
             i += 1
+        
+        # Modify active pages
         self.active_pages = new_active
 
         # 2. Manage compressed tiers
+        #
+        # Splitting/merging a page that's already in a compressed tier would
+        # decompress and re-compress it via the pluggable Python backend
+        # (spec.backend.compress/decompress, called with seq_dim=-2 — it
+        # packs along the sequence axis). C++'s own dequant kernels for these
+        # same tier names (fp8/int8/int4/int2/one_bit) always pack along the
+        # last axis (head_dim) instead, with a hardcoded, unrelated layout.
+        # The two are byte-incompatible: a page split here and later
+        # resurrected through the C++ path reads back the wrong shape/values.
+        # Until the two compression implementations are unified, variable
+        # granularity is restricted to ACTIVE (uncompressed FP16) pages,
+        # which have no packing format to clash over. Intentionally a no-op
+        # below — left structured for when tier-level splitting is revisited.
         for spec in self.tier_specs:
             pages_list = self.pages_by_tier.get(spec.name, [])
-            new_list = []
-            i = 0
-            while i < len(pages_list):
-                page = pages_list[i]
-                p_size = page.get('page_size', self.page_size)
+            new_list = list(pages_list)
 
-                if p_size == self.page_size and page.get('importance_score', 0.0) < 0.5:
-                    splits = self.split_page(page, tier_name=spec.name)
-                    if splits:
-                        new_list.extend(splits)
-                        argus_log("INFO", f"Splitting Page {page['page_id']} ({spec.name.upper()}) -> {len(splits)} Micro-pages", line_no=500)
-                        i += 1
-                        continue
-
-                needed_pages = self.page_size // micro_size
-                if p_size == micro_size and i + needed_pages <= len(pages_list):
-                    candidate_pages = pages_list[i : i + needed_pages]
-                    if all(p.get('page_size', self.page_size) == micro_size and p.get('importance_score', 0.0) > 1.5 for p in candidate_pages):
-                        merged = self.merge_pages(candidate_pages, tier_name=spec.name)
-                        if merged is not None:
-                            new_list.append(merged)
-                            argus_log("INFO", f"Merging {len(candidate_pages)} Micro-pages -> Page {merged['page_id']} ({spec.name.upper()})", line_no=510)
-                            i += needed_pages
-                            continue
-
-                new_list.append(page)
-                i += 1
-            self.pages_by_tier[spec.name] = new_list
+            # Modify pages            # Apply changes
+            # Since self.pages_by_tier returns the dictionary directly, we can assign the new list to it
+            pages_dict = self.pages_by_tier
+            pages_dict[spec.name] = new_list
+            self.pages_by_tier = pages_dict
         self._invalidate_decompressed_cache()
 
     def speculate_and_prefetch(self, attn_weights=None):
         """
-        Predicts and pre-dequantizes pages that will be heavily attended to in the next step.
-        Stores dequantized FP16 tensors in self.prefetch_cache to avoid dequantization latency.
+        Predicts which pages will be heavily attended to next and asks the
+        C++ manager to pre-dequantize them on its background prefetch stream,
+        so a later resurrect_page()/inplace_paged_attention() call can serve
+        them straight from prefetch_cache_ instead of paying dequant latency.
+
+        Page *selection* stays here (it needs attn_weights / tier_specs
+        heuristics); the actual dequantization is delegated to C++ so the
+        result lands in the same prefetch_cache_ the live hot path reads —
+        unlike the old Python-side simulation, which decompressed pages into
+        a separate dict that inplace_paged_attention never looked at.
         """
-        self.prefetch_cache.clear()
         if self.is_swapped_out:
             return
             
@@ -2354,49 +2415,11 @@ class PagedDynamicKVCache:
                     pages_to_prefetch.append((pages[-1], spec.name))
                     if len(pages_to_prefetch) >= 2:
                         break
-                
-        if self.prefetch_stream is None and torch.cuda.is_available():
-            self.prefetch_stream = torch.cuda.Stream()
-            
-        main_stream = torch.cuda.current_stream() if torch.cuda.is_available() else None
-        
-        for page, tier in pages_to_prefetch:
-            try:
-                spec = self.tier_name_to_spec.get(tier)
-                if spec is None:
-                    continue
-                if self.prefetch_stream is not None:
-                    # Run pre-dequantization asynchronously on dedicated stream
-                    with torch.cuda.stream(self.prefetch_stream):
-                        decomp_args = {"seq_dim": -2}
-                        if tier == 'jl':
-                            recon_op = self.get_jl_reconstruction_operator(page['key_proj'].device, page['key_proj'].dtype)
-                            decomp_args['recon_operator'] = recon_op
-                        k = spec.backend.decompress(page['key_compressed'], **decomp_args)
-                        v = spec.backend.decompress(page['value_compressed'], **decomp_args)
-                             
-                        k = _apply_outlier_restoration(k, page, key='key')
-                        v = _apply_outlier_restoration(v, page, key='value')
-                            
-                        # Record consumer stream to prevent premature recycling by CUDA allocator
-                        if k.is_cuda:
-                            k.record_stream(main_stream)
-                        if v.is_cuda:
-                            v.record_stream(main_stream)
-                else:
-                    decomp_args = {"seq_dim": -2}
-                    if tier == 'jl':
-                        recon_op = self.get_jl_reconstruction_operator(page['key_proj'].device, page['key_proj'].dtype)
-                        decomp_args['recon_operator'] = recon_op
-                    k = spec.backend.decompress(page['key_compressed'], **decomp_args)
-                    v = spec.backend.decompress(page['value_compressed'], **decomp_args)
-                         
-                    k = _apply_outlier_restoration(k, page, key='key')
-                    v = _apply_outlier_restoration(v, page, key='value')
-                     
-                self.prefetch_cache[id(page)] = (k, v)
-            except Exception:
-                pass
+
+        page_ids = [page.get('page_id') for page, _tier in pages_to_prefetch]
+        if page_ids:
+            self._cpp_manager.speculate_and_prefetch(page_ids)
+            self._cpp_manager.wait_for_prefetch_idle()
 
     def swap_out_to_host(self):
         """
