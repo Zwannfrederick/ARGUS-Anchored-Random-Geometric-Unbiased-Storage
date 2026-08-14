@@ -291,10 +291,9 @@ Notes, stated rather than glossed:
   on the first tier measured; int8 (1.66 ms) is the steady-state cost of the
   same operation.
 * **JL fidelity on random input is not meaningful.** Reconstructing a 4×
-  rank-reduced projection of white noise is information-theoretically
-  impossible, so `cos = 0.27` here is a property of the input, not of the
-  tier. JL targets the low-rank structure of real KV tensors; it must be
-  evaluated on real activations, which this run does not do.
+  projection of white noise is information-theoretically impossible, so
+  `cos = 0.27` here is a property of the input, not of the tier. It is
+  evaluated on real activations in §5.4 instead.
 * **int2's error matches theory.** Round-to-nearest over 4 levels spanning
   ~6.6σ gives RMS ≈ step/√12 ≈ 0.64 relative; the measured 0.83 is within
   seed variance for a single page.
@@ -326,6 +325,50 @@ TTFT and TPOT on a real model, perplexity delta, NIAH/RULER retrieval, vLLM
 throughput, CPU-spill overhead under real memory pressure, multi-GPU. Any
 figure for these in older documentation predates this refactor and has not
 been revalidated.
+
+### 5.4 The JL tier on real activations — verdict
+
+`docs/measurements/jl-2026-08-14.json`, regenerate with:
+
+```bash
+python benchmarks/bench_jl_fidelity.py --json <path> --date <date> --tokens 512
+```
+
+Real K activations from Qwen2.5-0.5B-Instruct, all 24 layers, measured
+**per 64-token page** (the unit the tier actually compresses), against two
+equal-budget 4× controls.
+
+**First, a correction to how this tier was described.** JL was justified above
+by "the low-rank structure of real KV tensors". That reasoning was wrong. The
+operator is a *smoothness*-regularized least-squares inverse — a 1-D Laplacian
+prior along the sequence axis — and it recovers a rank-4 random signal no
+better than white noise (rel. error 1.106 vs 1.111, measured). Low effective
+rank is not what it exploits, and `tests/test_jl_operators.py` now asserts
+this so the framing cannot quietly drift back.
+
+What it does exploit is **token-to-token smoothness**, and the measurement is
+unambiguous: relative reconstruction error tracks page roughness with
+**r = 0.988** across all 24 layers.
+
+| result | value |
+|---|---|
+| JL median rel. L2 | **0.413** |
+| int2 single-scale control | 0.630 |
+| int2 as shipped (per-group scales) | 0.565 |
+| JL cosine range | 0.841 – 0.9996 |
+| JL beats shipped int2 | **20 / 24 layers** |
+| median page roughness | 0.427 |
+
+**Verdict: the tier is justified, and it is kept.** It beats the strictly
+harder control — the int2 backend ARGUS actually ships, not a strawman — on
+20 of 24 layers at the same storage cost. The four losses (layers 6, 13, 16,
+18) are precisely the four roughest pages, which is the failure mode the
+prior predicts rather than a surprise.
+
+Two honest limits on this result. It is one model, one prompt, keys only —
+values were not measured. And it is claim class `reconstruction`: JL wins on
+tensor fidelity, which is not the same as winning on perplexity. §5.3 still
+applies.
 
 ---
 

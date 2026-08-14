@@ -98,6 +98,34 @@ def test_projection_is_deterministic_across_instances():
     assert torch.equal(a, b)
 
 
+def test_low_rank_input_is_not_recovered_any_better_than_noise():
+    """Guards a claim benchmarks/bench_jl_fidelity.py rests on.
+
+    It is tempting to describe this tier as a rank reducer and to justify it
+    by the low effective rank of KV activations. That reasoning is wrong: the
+    operator carries a smoothness prior, not a low-rank one, and recovers a
+    rank-reduced random signal no better than white noise. If this ever stops
+    holding, the benchmark's framing needs revisiting -- so it is asserted
+    rather than left as a comment.
+    """
+    cache = JLOperatorCache(page_size=64, ratio=4)
+    device, dtype = torch.device("cpu"), torch.float32
+    w = cache.projection(device, dtype, seq_len=64)
+    recon = cache.reconstruction(device, dtype, seq_len=64)
+
+    def rel_error(x):
+        return ((recon @ (w @ x)) - x).norm().item() / x.norm().item()
+
+    torch.manual_seed(0)
+    low_rank = torch.randn(64, 4, dtype=dtype) @ torch.randn(4, 8, dtype=dtype)
+    white_noise = torch.randn(64, 8, dtype=dtype)
+
+    assert rel_error(low_rank) > 0.8 * rel_error(white_noise), (
+        "low-rank input is now recovered much better than noise; the tier may "
+        "actually have a low-rank prior after all"
+    )
+
+
 def test_observer_is_notified_only_for_full_page_cuda_operators():
     """The C++ manager keeps a single projection for its CUDA auto-cascade.
     A CPU or micro-page operator must never overwrite it."""
