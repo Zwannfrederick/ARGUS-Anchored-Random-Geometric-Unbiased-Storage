@@ -16,6 +16,7 @@ from .quantization import (
 )
 from .tier_registry import PipelineConfig, TierSpec, QuantizationBackend, EvictionPolicy, ScoringFunction
 from .zero_copy_pool import ZeroCopyHostPool
+from .jl_operators import JLOperatorCache
 from .triton_kernels import triton_fused_paged_attention
 
 # ─── Compiled Attention Core ────────────────────────────────────────────────
@@ -543,13 +544,16 @@ class PagedDynamicKVCache:
         self.active_pool_k = None
         self.active_pool_v = None
         
-        # Shared static JL projection matrix (page_size-length, back-compat attribute)
+        # Shared static JL operators (page_size-length, back-compat attributes)
         self.w_proj = None
-        # Per-(device, dtype, seq_len) cache — variable-granularity micro-pages
-        # need a differently-shaped projection/reconstruction matrix than
-        # full-size pages, since JL projects along the sequence axis.
-        self._jl_w_proj_cache = {}
-        self._jl_recon_operator_cache = {}
+        self._jl_recon_operator = None
+        # Per-(device, dtype, seq_len) cache lives in JLOperatorCache —
+        # variable-granularity micro-pages need differently-shaped operators
+        # than full-size pages, since JL projects along the sequence axis.
+        self._jl_operators = JLOperatorCache(
+            page_size=self.page_size,
+            on_full_page_cuda=self._publish_jl_operator,
+        )
         
         # Static buffer state (allocated on demand during ensure_pools_allocated)
         self._pools_allocated = False
@@ -834,86 +838,30 @@ class PagedDynamicKVCache:
     def one_bit_pool_v_scales(self):
         return self.pools_by_tier.get("one_bit_value_scales")
 
+    def _publish_jl_operator(self, kind, tensor):
+        """Mirror a full-page CUDA operator into the native manager.
+
+        Only CUDA, full-page operators reach here: the C++ auto-cascade holds
+        exactly one of each and always works on CUDA tensors, so a CPU-built
+        or micro-page operator (e.g. from split_page on a swapped-out page)
+        would silently poison the next demotion.
+        """
+        if kind == "projection":
+            self.w_proj = tensor
+            if hasattr(self, '_cpp_manager'):
+                self._cpp_manager.set_jl_projection_matrix(tensor)
+        else:
+            self._jl_recon_operator = tensor
+            if hasattr(self, '_cpp_manager'):
+                self._cpp_manager.set_jl_recon_operator(tensor)
+
     def get_jl_projection_matrix(self, device, dtype, seq_len=None):
-        """
-        Generates/caches a random orthogonal projection matrix for a given
-        sequence length, shared by all pages of that length. Micro-pages
-        (variable granularity) need a differently-shaped matrix than
-        full-size pages, since JL projects along the sequence axis.
-        Shape: [seq_len // 4, seq_len]
-        """
-        seq_len = seq_len or self.page_size
-        cache_key = (device, dtype, seq_len)
-        cached = self._jl_w_proj_cache.get(cache_key)
-        if cached is None:
-            n = seq_len
-            m = max(1, seq_len // 4)
-            torch.manual_seed(42) # Keep it deterministic
-            raw_randn = torch.randn(n, m, dtype=torch.float32, device=device)
-            q, _ = torch.linalg.qr(raw_randn)
-            cached = q.t().to(dtype) # [M, N]
-            self._jl_w_proj_cache[cache_key] = cached
-            # Only mirror into the C++ manager for CUDA matrices — its own
-            # auto-cascade always operates on CUDA tensors, so pushing a CPU
-            # matrix here (e.g. from split_page processing a swapped-out
-            # page) would silently poison it for the next CUDA demotion.
-            if seq_len == self.page_size and torch.device(device).type == 'cuda':
-                self.w_proj = cached
-                if hasattr(self, '_cpp_manager'):
-                    self._cpp_manager.set_jl_projection_matrix(cached)
-        return cached
+        """Projection matrix [seq_len // 4, seq_len]. See JLOperatorCache."""
+        return self._jl_operators.projection(device, dtype, seq_len)
 
     def get_jl_reconstruction_operator(self, device, dtype, alpha=1e-3, seq_len=None):
-        """
-        Precomputes and caches the smooth Laplacian-regularized reconstruction operator
-        associated with the JL projection matrix for a given sequence length.
-        Shape: [seq_len, seq_len // 4]
-        """
-        seq_len = seq_len or self.page_size
-        cache_key = (device, dtype, seq_len)
-        cached = self._jl_recon_operator_cache.get(cache_key)
-        if cached is None:
-            # Fetch the projection matrix w_proj [M, N]
-            w_proj = self.get_jl_projection_matrix(device, dtype, seq_len)
-            M, N = w_proj.shape
-            
-            # Construct standard 1D Laplacian L [N, N]
-            L = torch.zeros(N, N, dtype=torch.float32, device=device)
-            for i in range(N):
-                L[i, i] = 2.0
-                if i > 0:
-                    L[i, i-1] = -1.0
-                if i < N - 1:
-                    L[i, i+1] = -1.0
-            L[0, 0] = 1.0
-            L[N-1, N-1] = 1.0
-            
-            # Regularize: A = L + alpha * I
-            A = L + alpha * torch.eye(N, dtype=torch.float32, device=device)
-            A_inv = torch.inverse(A)
-            
-            # Compute: W = w_proj
-            W = w_proj.to(torch.float32)
-            
-            # Compute: inv_term = (W @ A_inv @ WT)^-1
-            W_A_inv = torch.matmul(W, A_inv)
-            W_A_inv_WT = torch.matmul(W_A_inv, W.t())
-            inv_term = torch.inverse(W_A_inv_WT)
-            
-            # Compute final reconstruction operator: A_inv @ WT @ inv_term
-            recon_operator = torch.matmul(torch.matmul(A_inv, W.t()), inv_term)
-
-            cached = recon_operator.to(dtype)
-            self._jl_recon_operator_cache[cache_key] = cached
-            # Same CUDA-only guard as get_jl_projection_matrix — never let a
-            # CPU-built operator (e.g. from split_page on a swapped page)
-            # clobber the one C++'s CUDA auto-cascade relies on.
-            if seq_len == self.page_size and torch.device(device).type == 'cuda':
-                self._jl_recon_operator = cached
-                if hasattr(self, '_cpp_manager'):
-                    self._cpp_manager.set_jl_recon_operator(cached)
-
-        return cached
+        """Reconstruction operator [seq_len, seq_len // 4]. See JLOperatorCache."""
+        return self._jl_operators.reconstruction(device, dtype, alpha, seq_len)
 
 
     def log_event(self, event_type, page_id, **kwargs):
