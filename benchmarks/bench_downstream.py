@@ -119,6 +119,9 @@ def measure_latency(model, input_ids, new_tokens: int, cache_factory):
         if torch.cuda.is_available()
         else 0.0
     )
+    if past is not None and hasattr(past, "reset"):
+        past.reset()
+    del out, past
     return ttft, statistics.median(step_times), peak
 
 
@@ -276,6 +279,9 @@ def main() -> int:
         for arm, factory in ppl_arms.items()
     }
     tiers_used = tier_occupancy(occupancy.get("_cache"))
+    measured_cache = occupancy.pop("_cache", None)
+    if measured_cache is not None:
+        measured_cache.reset()
     print(f"tier occupancy during scoring: {tiers_used}")
     delta = round(perplexity["argus"] - perplexity["baseline"], 4)
     print(
@@ -290,11 +296,16 @@ def main() -> int:
         "git_commit": subprocess.check_output(
             ["git", "rev-parse", "HEAD"], text=True
         ).strip(),
-        "git_dirty": bool(
-            subprocess.check_output(
+        # Regenerating a tracked output naturally makes that one path dirty
+        # before the JSON is written.  Ignore only the requested output path;
+        # every source/config change still invalidates clean-tree provenance.
+        "git_dirty": any(
+            line[3:] != args.json
+            for line in subprocess.check_output(
                 ["git", "status", "--porcelain", "--untracked-files=no"],
                 text=True,
-            ).strip()
+            ).splitlines()
+            if line[3:]
         ),
         "model": args.model,
         "device": device,
@@ -322,12 +333,24 @@ def main() -> int:
                 "cache is actually exercised. A batched scoring pass would "
                 "bypass it and report a meaningless zero delta."
             ),
+            "caveat": (
+                "Only fp8 (2x, near-lossless) was reached at this passage "
+                "length. Deeper lossy tiers were not exercised, so this delta "
+                "does not characterize int4/int2/one_bit/JL quality."
+            ),
         },
+        "status": "COMPLETE",
+        "harness_note": (
+            "Prefill uses logits_to_keep=1. Every latency run explicitly "
+            "resets its cache so native callback cycles cannot contaminate "
+            "later baseline arms."
+        ),
     }
 
     if args.json:
         with open(args.json, "w", encoding="utf-8") as fh:
             json.dump(result, fh, indent=2)
+            fh.write("\n")
         print(f"\nWrote {args.json}")
     return 0
 

@@ -1,6 +1,8 @@
 import torch
 import sys
 import os
+import gc
+import weakref
 
 # Add parent directory to path so we can import core
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -22,6 +24,17 @@ def test_large_prefill_does_not_leave_an_exact_sized_staging_mirror():
     assert cache.active_pool_k is None
     assert cache.active_pool_v is None
     assert cache.pools_by_tier == {}
+
+
+def test_close_breaks_native_callback_ownership_cycle():
+    cache = PagedDynamicKVCache(page_size=8, sink_tokens=0)
+    reference = weakref.ref(cache)
+
+    cache.close()
+    del cache
+    gc.collect()
+
+    assert reference() is None
 
 def test_cache_transitions():
     print("Testing 7-Tier PagedDynamicKVCache transitions...")

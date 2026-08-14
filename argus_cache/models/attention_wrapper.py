@@ -201,4 +201,6 @@ class PagedDynamicQuantizedCache(Cache):
         """
         Clears the cache contents.
         """
+        for cache in self.layer_caches.values():
+            cache.close()
         self.layer_caches.clear()

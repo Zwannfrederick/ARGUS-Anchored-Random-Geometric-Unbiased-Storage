@@ -564,6 +564,23 @@ class PagedDynamicKVCache:
         self._decompressed_tiers_v = None
         self._cache_version += 1
 
+    def close(self):
+        """Release Python callbacks held by the native manager.
+
+        ``ArgusCppManager`` owns callback objects that close over this Python
+        cache (eviction, access accounting, and lazy JL operators).  Without
+        explicitly clearing them, dropping a HuggingFace cache wrapper leaves
+        a C++ -> Python -> C++ ownership cycle that Python's GC cannot see;
+        successive benchmark arms then inherit every earlier cache allocation.
+        """
+        cpp = getattr(self, "_cpp_manager", None)
+        if cpp is None:
+            return
+        cpp.set_active_pool_victim_selector(None)
+        cpp.set_on_page_access_callback(None)
+        cpp.set_jl_projection_provider(None)
+        cpp.set_jl_recon_provider(None)
+
     @property
     def fp8_pages(self):
         return self.pages_by_tier.get("fp8", [])
