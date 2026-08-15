@@ -1,0 +1,49 @@
+{
+  "captured_at": "2026-08-15T11:08:00+03:00",
+  "status": "passed",
+  "purpose": "stock llama.cpp 32K allocation and placement gate",
+  "model": {
+    "file": "Qwen3.8-27B-Q4_K_M.gguf",
+    "bytes": 18973870432,
+    "sha256": "31629f53165ab6a7dad8c9847dcfd1fdf55829dac1e6e748f4a68581b0033d34",
+    "architecture": "qwen35"
+  },
+  "runtime": {
+    "llama_cpp_revision": "6b4344ecc7e6a493daba9681991852eb06bb3b33",
+    "binary": "llama-server",
+    "context_tokens": 32768,
+    "parallel_slots": 1,
+    "kv_type_k": "q8_0",
+    "kv_type_v": "q8_0",
+    "flash_attention": true,
+    "gpu_layers": "auto",
+    "fit": true,
+    "fit_target_mib": 768,
+    "warmup": false,
+    "text_only": true,
+    "server_ready": true,
+    "n_ctx_slot": 32768,
+    "kv_unified": false
+  },
+  "target": {
+    "gpu": "NVIDIA GeForce RTX 3050 Ti Laptop GPU",
+    "physical_vram_mib": 4096,
+    "compute_capability": "8.6",
+    "ram_total_gib": 31,
+    "swap_total_gib": 4.5
+  },
+  "steady_state": {
+    "process_rss_kib": 18003320,
+    "process_vram_mib": 2524,
+    "gpu_total_used_mib": 2560,
+    "gpu_reported_free_mib": 1211,
+    "gpu_utilization_percent": 0
+  },
+  "scope": {
+    "allocation_and_placement": true,
+    "full_32k_prefill": false,
+    "generation": false,
+    "argus_enabled": false
+  },
+  "conclusion": "Stock q8_0 KV allocates successfully at 32K with one slot, but leaves about 1.2 GiB reported VRAM headroom; ARGUS weight/KV budget cooperation remains required."
+}

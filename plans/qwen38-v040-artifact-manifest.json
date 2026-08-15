@@ -88,7 +88,19 @@
       "prompt_tokens_per_second": 5.1,
       "generation_tokens_per_second": 1.6,
       "performance_is_preliminary": true,
-      "note": "Model loaded and generated coherent reasoning tokens; 32K placement telemetry remains a separate gate."
+      "note": "Model loaded and generated coherent reasoning tokens; performance remains preliminary."
+    },
+    "stock_32k_placement": {
+      "status": "passed",
+      "measurement": "docs/measurements/v040-qwen38-stock-32k-2026-08-15.json",
+      "context_tokens": 32768,
+      "parallel_slots": 1,
+      "kv_type_k": "q8_0",
+      "kv_type_v": "q8_0",
+      "process_rss_kib": 18003320,
+      "process_vram_mib": 2524,
+      "gpu_reported_free_mib": 1211,
+      "full_context_prefill": false
     }
   },
   "target_host_preflight": {
