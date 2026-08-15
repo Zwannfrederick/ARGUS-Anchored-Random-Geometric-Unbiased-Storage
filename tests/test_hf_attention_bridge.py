@@ -5,7 +5,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import torch
-from transformers import Qwen2Config, Qwen2ForCausalLM
+from transformers import LlamaConfig, LlamaForCausalLM, Qwen2Config, Qwen2ForCausalLM
 
 from argus_cache import AdaptiveCachePolicy, patch_model_with_argus
 from argus_cache.models.attention_wrapper import PagedDynamicQuantizedCache
@@ -30,10 +30,13 @@ class _Manager:
     def inplace_paged_attention(self, query, scale=None):
         self.native_calls += 1
         self.last_query = query
+        groups = query.shape[1] // self.keys.shape[1]
+        keys = self.keys.repeat_interleave(groups, dim=1)
+        values = self.values.repeat_interleave(groups, dim=1)
         return torch.nn.functional.scaled_dot_product_attention(
             query,
-            self.keys,
-            self.values,
+            keys,
+            values,
             scale=scale,
             is_causal=False,
         )
@@ -47,11 +50,13 @@ def _tag(tensor: torch.Tensor, manager: _Manager) -> torch.Tensor:
     return tensor
 
 
-def _module(model_type="qwen2", *, training=False, sliding_window=None):
+def _module(
+    model_type="qwen2", *, training=False, sliding_window=None, num_key_value_groups=1
+):
     return SimpleNamespace(
         config=SimpleNamespace(model_type=model_type),
         training=training,
-        num_key_value_groups=1,
+        num_key_value_groups=num_key_value_groups,
         sliding_window=sliding_window,
     )
 
@@ -76,6 +81,34 @@ def test_qwen2_decode_uses_native_manager_and_formats_output():
     assert weights is None
     assert output.shape == (1, 1, 2, 8)
     assert torch.allclose(output, expected.transpose(1, 2), atol=1e-5)
+
+
+def test_llama_decode_uses_the_same_registry_contract():
+    """A second GQA family must not require core model-name branching."""
+    keys = torch.randn(1, 1, 5, 8)
+    values = torch.randn_like(keys)
+    query = torch.randn(1, 4, 1, 8)
+    manager = _Manager(keys, values)
+
+    output, weights = argus_attention_forward(
+        _module("llama", num_key_value_groups=4),
+        query,
+        _tag(keys[:, :, -1:], manager),
+        values[:, :, -1:],
+        attention_mask=None,
+        scaling=8**-0.5,
+    )
+
+    assert manager.native_calls == 1
+    assert weights is None
+    expected = torch.nn.functional.scaled_dot_product_attention(
+        query,
+        keys,
+        values,
+        scale=8**-0.5,
+        enable_gqa=True,
+    ).transpose(1, 2)
+    assert torch.allclose(output, expected, atol=1e-5)
 
 
 def test_qwen2_prefill_reconstructs_and_falls_back_to_sdpa():
@@ -197,6 +230,33 @@ def test_transformers_generation_injects_argus_before_dynamic_cache():
     result = model.generate(
         torch.tensor([[1, 2, 3]]),
         max_new_tokens=2,
+        return_dict_in_generate=True,
+    )
+
+    assert isinstance(result.past_key_values, PagedDynamicQuantizedCache)
+    assert result.past_key_values.get_seq_length() == 4
+
+
+def test_llama_generation_uses_the_registered_adapter_without_core_changes():
+    config = LlamaConfig(
+        vocab_size=32,
+        hidden_size=32,
+        intermediate_size=64,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+    )
+    model = patch_model_with_argus(
+        LlamaForCausalLM(config).eval(),
+        page_size=8,
+        activation_policy=AdaptiveCachePolicy(mode="latency"),
+    )
+    assert model.config._attn_implementation == "argus"
+
+    result = model.generate(
+        torch.tensor([[1, 2, 3]]),
+        max_new_tokens=2,
+        min_new_tokens=2,
         return_dict_in_generate=True,
     )
 

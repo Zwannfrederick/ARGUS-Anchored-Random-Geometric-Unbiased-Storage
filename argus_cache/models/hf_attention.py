@@ -36,8 +36,8 @@ class AttentionAdapter:
         return output.transpose(1, 2).contiguous()
 
 
-class Qwen2AttentionAdapter(AttentionAdapter):
-    """Validated full-attention decode contract for Qwen2."""
+class FullAttentionGQADecodeAdapter(AttentionAdapter):
+    """Narrow native contract shared by validated standard GQA families."""
 
     def can_use_native(
         self,
@@ -58,8 +58,17 @@ class Qwen2AttentionAdapter(AttentionAdapter):
         )
 
 
+class Qwen2AttentionAdapter(FullAttentionGQADecodeAdapter):
+    """Validated full-attention decode contract for Qwen2."""
+
+
+class LlamaAttentionAdapter(FullAttentionGQADecodeAdapter):
+    """Validated full-attention decode contract for the Llama family."""
+
+
 _ATTENTION_ADAPTERS: dict[str, AttentionAdapter] = {
     "qwen2": Qwen2AttentionAdapter(),
+    "llama": LlamaAttentionAdapter(),
 }
 
 
