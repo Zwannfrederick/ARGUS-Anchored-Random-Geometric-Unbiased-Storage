@@ -1,0 +1,103 @@
+{
+  "captured_at": "2026-08-15T11:01:38+03:00",
+  "target_profile": "text-only-single-slot",
+  "model": {
+    "repository": "Qwen/Qwen3.8-27B",
+    "revision": "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+    "model_type": "qwen3_5",
+    "architecture": "Qwen3_5ForConditionalGeneration",
+    "license": "apache-2.0",
+    "text_config": {
+      "num_hidden_layers": 64,
+      "full_attention_interval": 4,
+      "linear_attention_layers": 48,
+      "full_attention_layers": 16,
+      "hidden_size": 5120,
+      "num_attention_heads": 24,
+      "num_key_value_heads": 4,
+      "head_dim": 256,
+      "max_position_embeddings": 262144,
+      "mamba_ssm_dtype": "float32",
+      "mtp_num_hidden_layers": 1
+    },
+    "source": "https://huggingface.co/Qwen/Qwen3.8-27B"
+  },
+  "gguf": {
+    "repository": "ggml-org/Qwen3.8-27B-GGUF",
+    "revision": "0669b98607d47046c7c2b3f801011d54a08cfccf",
+    "primary": {
+      "file": "Qwen3.8-27B-Q4_K_M.gguf",
+      "bytes": 18973870432,
+      "sha256": "31629f53165ab6a7dad8c9847dcfd1fdf55829dac1e6e748f4a68581b0033d34",
+      "local_verification": {
+        "size_match": true,
+        "sha256_match": true,
+        "verified_at": "2026-08-15T10:39:00+03:00"
+      },
+      "header_metadata": {
+        "gguf_version": 3,
+        "tensor_count": 851,
+        "kv_count": 39,
+        "architecture": "qwen35",
+        "block_count": 64,
+        "context_length": 262144,
+        "embedding_length": 5120,
+        "attention_head_count": 24,
+        "attention_head_count_kv": 4,
+        "attention_key_length": 256,
+        "attention_value_length": 256,
+        "full_attention_interval": 4,
+        "ssm_state_size": 128,
+        "ssm_inner_size": 6144,
+        "quantization_version": 2,
+        "file_type": 15
+      }
+    },
+    "comparison": {
+      "file": "Qwen3.8-27B-Q8_0.gguf",
+      "bytes": 28595763552,
+      "sha256": "f5c702d8820d36fb55985bb238fc83ee3a313e920f4b752a437c3a6a9e14e4c8"
+    },
+    "excluded_v040": {
+      "mmproj_q8_bytes": 629247008,
+      "mtp_q4_bytes": 1680271648
+    },
+    "source": "https://huggingface.co/ggml-org/Qwen3.8-27B-GGUF"
+  },
+  "llama_cpp": {
+    "repository": "https://github.com/ggml-org/llama.cpp.git",
+    "revision": "6b4344ecc7e6a493daba9681991852eb06bb3b33",
+    "architecture_id": "LLM_ARCH_QWEN35",
+    "build": {
+      "cmake": "4.4.2",
+      "cuda_toolkit": "13.3.73",
+      "cuda_architectures": "86",
+      "build_type": "Release",
+      "curl": false,
+      "embedded_ui": false
+    },
+    "stock_smoke": {
+      "status": "passed",
+      "mode": "text-only",
+      "context_tokens": 512,
+      "generated_tokens": 8,
+      "gpu_layers": "auto",
+      "fit": true,
+      "fit_target_mib": 768,
+      "warmup": false,
+      "prompt_tokens_per_second": 5.1,
+      "generation_tokens_per_second": 1.6,
+      "performance_is_preliminary": true,
+      "note": "Model loaded and generated coherent reasoning tokens; 32K placement telemetry remains a separate gate."
+    }
+  },
+  "target_host_preflight": {
+    "filesystem_available_bytes_approx": 540092334080,
+    "ram_total_bytes_approx": 33285996544,
+    "ram_available_bytes_approx": 19327352832,
+    "swap_total_bytes_approx": 4831838208,
+    "gpu": "NVIDIA GeForce RTX 3050 Ti Laptop GPU",
+    "gpu_vram_bytes": 4294967296,
+    "compute_capability": "8.6"
+  }
+}

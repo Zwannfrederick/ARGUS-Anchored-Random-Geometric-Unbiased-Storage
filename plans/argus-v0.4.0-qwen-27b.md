@@ -214,8 +214,9 @@ must be decided before designing the production page ABI.
 - Produce or select GGUF Q4_K_M plus one higher-fidelity comparison artifact;
   record source hashes, converter revision, quantizer revision, sizes, and
   reference prompt logits/text.
-- Pin a llama.cpp revision that explicitly recognizes the model architecture;
-  do not map Qwen3.8 to QWEN35 merely because its high-level layout resembles it.
+- Pin a llama.cpp revision that explicitly recognizes the checkpoint's official
+  `model_type = qwen3_5` architecture as `LLM_ARCH_QWEN35`; do not invent a
+  `QWEN38` runtime ID from the checkpoint's release name.
 - Run stock `llama-cli`, `llama-bench`, and `llama-server` at 32K and 64K with
   explicit threads, GPU layers, Flash Attention, K/V type, mmap, and context.
 - Use `q8_0` and `q4_0` as the production KV codec IDs and byte layouts. Keep
