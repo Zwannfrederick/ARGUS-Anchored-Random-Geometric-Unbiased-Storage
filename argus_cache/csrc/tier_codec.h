@@ -34,6 +34,12 @@ enum class CodecKind {
   // tiers registered without a format, so an unknown tier degrades to a
   // correct (if not space-saving) spill rather than corrupting data.
   Passthrough = 4,
+  // llama.cpp/GGML block formats. Each 32-element block stores an fp16 scale
+  // followed by either 32 signed bytes (q8_0) or 16 packed nibbles (q4_0).
+  // These are intentionally distinct from ARGUS's legacy per-page int8/int4
+  // layouts: treating either as the other silently corrupts cache pages.
+  GgmlQ8_0 = 5,
+  GgmlQ4_0 = 6,
 };
 
 struct TierCodec {
@@ -52,7 +58,25 @@ struct TierCodec {
   // Elements packed into each stored byte. Derived from `bits`: sub-byte
   // codecs pack 8/bits elements along the last axis; byte-or-wider codecs
   // store one element per slot.
-  int pack_factor() const { return bits < 8 ? 8 / bits : 1; }
+  int pack_factor() const {
+    return is_block_quantized() ? 1 : (bits < 8 ? 8 / bits : 1);
+  }
+
+  bool is_block_quantized() const {
+    return kind == CodecKind::GgmlQ8_0 || kind == CodecKind::GgmlQ4_0;
+  }
+
+  int block_size() const { return is_block_quantized() ? 32 : 1; }
+
+  int block_bytes() const {
+    if (kind == CodecKind::GgmlQ8_0) {
+      return 34;
+    }
+    if (kind == CodecKind::GgmlQ4_0) {
+      return 18;
+    }
+    return bits < 8 ? 1 : bits / 8;
+  }
 
   // Largest representable quantization level. SignedLinear reserves a sign
   // bit; UnsignedAffine uses the full unsigned range; SignPacked is ±scale so
@@ -77,7 +101,8 @@ struct TierCodec {
   // Projection and Passthrough tiers take their own route.
   bool is_quantized() const {
     return kind == CodecKind::SignedLinear ||
-           kind == CodecKind::UnsignedAffine || kind == CodecKind::SignPacked;
+           kind == CodecKind::UnsignedAffine || kind == CodecKind::SignPacked ||
+           is_block_quantized();
   }
 
   // Storage cost relative to an fp16 baseline, e.g. 0.0625 for one_bit.
@@ -88,7 +113,7 @@ struct TierCodec {
   float effective_bits() const { return 16.0f * compression_ratio; }
 };
 
-// Name -> codec mapping. Ships with ARGUS's six built-in tiers registered;
+// Name -> codec mapping. Ships with ARGUS's built-in tiers registered;
 // Python may add, replace, or remove entries at runtime (see
 // argus_cache.plugins).
 class CodecRegistry {

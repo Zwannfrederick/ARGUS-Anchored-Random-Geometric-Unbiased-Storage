@@ -1012,6 +1012,8 @@ class PagedDynamicKVCache:
             "sign_packed": argus_cpp_backend.CodecKind.SIGN_PACKED,
             "projection": argus_cpp_backend.CodecKind.PROJECTION,
             "passthrough": argus_cpp_backend.CodecKind.PASSTHROUGH,
+            "ggml_q8_0": argus_cpp_backend.CodecKind.GGML_Q8_0,
+            "ggml_q4_0": argus_cpp_backend.CodecKind.GGML_Q4_0,
         }[native.kind]
         codec.bits = native.bits
         codec.lossy = caps.lossy

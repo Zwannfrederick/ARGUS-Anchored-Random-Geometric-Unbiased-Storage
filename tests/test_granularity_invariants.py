@@ -96,3 +96,19 @@ def test_micro_page_size_stays_packing_compatible(micro):
     not a multiple of 8 crashes the first time one cascades into one_bit."""
     cache = _cache(micro=micro)
     assert cache.micro_page_size % 8 == 0
+
+
+def test_ggml_block_tier_merge_fails_closed_before_python_reencoding():
+    cache = PagedDynamicKVCache(
+        pipeline=PipelineConfig(
+            tiers=[TierSpec(name="q4_0", backend="q4_0", max_pages=8)],
+            page_size=PAGE,
+            sink_tokens=0,
+            max_active_pages=4,
+            micro_page_size=16,
+        )
+    )
+    parts = cache.split_page(_one_page(cache))
+
+    with pytest.raises(ValueError, match="native-owned"):
+        cache.merge_pages(parts, tier_name="q4_0")

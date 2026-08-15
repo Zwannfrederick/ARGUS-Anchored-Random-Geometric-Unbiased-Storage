@@ -23,7 +23,15 @@ import torch
 # still works, but its pages spill uncompressed on the native side and are
 # compressed/decompressed in Python.
 NATIVE_KINDS = frozenset(
-    {"signed_linear", "unsigned_affine", "sign_packed", "projection", "passthrough"}
+    {
+        "signed_linear",
+        "unsigned_affine",
+        "sign_packed",
+        "projection",
+        "passthrough",
+        "ggml_q8_0",
+        "ggml_q4_0",
+    }
 )
 
 # Bit widths the generic native kernel can pack. Sub-byte widths must divide 8
@@ -34,6 +42,13 @@ _VALID_NATIVE_BITS = {
     "sign_packed": (1,),
     "projection": (16,),
     "passthrough": (16,),
+    "ggml_q8_0": (8,),
+    "ggml_q4_0": (4,),
+}
+
+_GGML_BLOCK_COMPRESSION_RATIOS = {
+    "ggml_q8_0": 34.0 / 64.0,
+    "ggml_q4_0": 18.0 / 64.0,
 }
 
 
@@ -65,7 +80,10 @@ class NativeCodecSpec:
                 f"{valid_bits}, got {self.bits}"
             )
         if self.compression_ratio is None:
-            object.__setattr__(self, "compression_ratio", self.bits / 16.0)
+            ratio = _GGML_BLOCK_COMPRESSION_RATIOS.get(
+                self.kind, self.bits / 16.0
+            )
+            object.__setattr__(self, "compression_ratio", ratio)
         if not 0.0 < self.compression_ratio <= 1.0:
             raise ValueError(
                 f"compression_ratio must be in (0, 1], got {self.compression_ratio}"

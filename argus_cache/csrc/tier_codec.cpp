@@ -9,7 +9,7 @@ CodecRegistry::CodecRegistry() {
   fallback_.lossy = false;
   fallback_.compression_ratio = 1.0f;
 
-  // ARGUS's six built-in tiers. These are defaults, not assumptions: the
+  // ARGUS's built-in codecs. These are defaults, not assumptions: the
   // manager reads every format decision from whatever is registered here, so
   // Python can replace or drop any of them (including one_bit) without the
   // manager needing to know.
@@ -29,6 +29,14 @@ CodecRegistry::CodecRegistry() {
   int8.compression_ratio = 0.5f;
   register_codec(int8);
 
+  TierCodec q8_0;
+  q8_0.name = "q8_0";
+  q8_0.kind = CodecKind::GgmlQ8_0;
+  q8_0.bits = 8;
+  q8_0.lossy = true;
+  q8_0.compression_ratio = 34.0f / 64.0f;
+  register_codec(q8_0);
+
   TierCodec int4;
   int4.name = "int4";
   int4.kind = CodecKind::UnsignedAffine;
@@ -36,6 +44,14 @@ CodecRegistry::CodecRegistry() {
   int4.lossy = true;
   int4.compression_ratio = 0.25f;
   register_codec(int4);
+
+  TierCodec q4_0;
+  q4_0.name = "q4_0";
+  q4_0.kind = CodecKind::GgmlQ4_0;
+  q4_0.bits = 4;
+  q4_0.lossy = true;
+  q4_0.compression_ratio = 18.0f / 64.0f;
+  register_codec(q4_0);
 
   TierCodec int2;
   int2.name = "int2";

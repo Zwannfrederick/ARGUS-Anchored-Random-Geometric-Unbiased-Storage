@@ -20,7 +20,7 @@ struct Page {
     float importance_score;
     float attention_sum;
     int last_step_accessed;
-    std::string tier_name; // "active", "fp8", "int8", "int4", "int2", "one_bit", "jl"
+    std::string tier_name; // Registry name, e.g. "active", "q8_0", "q4_0", "jl".
     // Original dtype of key/value as pushed by the caller (fp16/fp32/bf16...).
     // Dequantized/resurrected tensors are cast back to this so mixed-dtype
     // callers stay internally consistent through the demote/resurrect cascade.

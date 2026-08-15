@@ -1,7 +1,7 @@
 """ARGUS plugin system.
 
 ARGUS is a KV-cache *management* runtime, not a single quantization algorithm.
-The six tiers it ships with (fp8, int8, int4, int2, one_bit, jl) are ordinary
+The built-in tiers (fp8, int8, q8_0, int4, q4_0, int2, one_bit, jl) are ordinary
 plugins registered here at import time; the cache manager reaches them only
 through :mod:`argus_cache.plugins.registry` and reasons about them only through
 :class:`~argus_cache.plugins.capabilities.BackendCapabilities`.
@@ -65,7 +65,7 @@ __all__ = [
 
 
 def register_builtin_quantizers(*, replace: bool = True) -> None:
-    """Register ARGUS's six built-in tiers.
+    """Register ARGUS's built-in tiers.
 
     Called once on import. Exposed so tests (and applications that cleared the
     registry) can restore the defaults.
@@ -101,12 +101,30 @@ def register_builtin_quantizers(*, replace: bool = True) -> None:
             ),
         ),
         (
+            INT8Backend,
+            BackendCapabilities(
+                name="q8_0",
+                effective_bits=8.5,
+                native_codec=NativeCodecSpec(kind="ggml_q8_0", bits=8),
+                description="GGML q8_0: fp16 scale plus 32 int8 values per block.",
+            ),
+        ),
+        (
             INT4Backend,
             BackendCapabilities(
                 name="int4",
                 effective_bits=4.0,
                 native_codec=NativeCodecSpec(kind="unsigned_affine", bits=4),
                 description="Asymmetric INT4, two elements packed per byte.",
+            ),
+        ),
+        (
+            INT4Backend,
+            BackendCapabilities(
+                name="q4_0",
+                effective_bits=4.5,
+                native_codec=NativeCodecSpec(kind="ggml_q4_0", bits=4),
+                description="GGML q4_0: fp16 scale plus 32 signed nibbles per block.",
             ),
         ),
         (

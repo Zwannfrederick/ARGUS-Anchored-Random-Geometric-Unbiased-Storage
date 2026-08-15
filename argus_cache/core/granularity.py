@@ -69,6 +69,13 @@ class GranularityManager:
         page[f'{prefix}_scale'] = float(scales.float().mean().item()) if scales is not None else 1.0
         page[f'{prefix}_min'] = float(min_vals.float().mean().item()) if min_vals is not None else 0.0
 
+    def _is_native_ggml_block_tier(self, tier_name: str | None) -> bool:
+        spec = self.cache.tier_name_to_spec.get(tier_name)
+        if spec is None or spec.capabilities is None:
+            return False
+        native = spec.capabilities.native_codec
+        return native is not None and native.kind in {"ggml_q8_0", "ggml_q4_0"}
+
     def split(self, page, tier_name=None):
         """
         Splits a Mega-page (size page_size) into multiple Micro-pages (size micro_page_size).
@@ -82,6 +89,11 @@ class GranularityManager:
         split_pages = []
 
         if 'key_compressed' in page or 'value_compressed' in page:
+            if self._is_native_ggml_block_tier(tier_name):
+                raise ValueError(
+                    f"compressed {tier_name} pages are native-owned and cannot "
+                    "be split through the byte-incompatible Python backend"
+                )
             spec = self.cache.tier_name_to_spec.get(tier_name)
             if spec is None:
                 return []
@@ -172,6 +184,11 @@ class GranularityManager:
         """
         if not pages:
             return None
+        if self._is_native_ggml_block_tier(tier_name):
+            raise ValueError(
+                f"{tier_name} pages are native-owned and cannot be merged "
+                "through the byte-incompatible Python backend"
+            )
 
         total_size = sum(p.get('page_size', self.cache.page_size) for p in pages)
         k_list = []

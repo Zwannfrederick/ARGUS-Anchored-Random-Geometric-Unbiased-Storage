@@ -33,7 +33,7 @@ from argus_cache.backends.eviction import ImportanceSortPolicy
 
 @pytest.fixture(autouse=True)
 def restore_registry():
-    """Every test starts and ends with exactly the six built-ins registered."""
+    """Every test starts and ends with the built-ins registered."""
     yield
     from argus_cache.plugins import REGISTRY
 
@@ -168,6 +168,19 @@ def test_invalid_capabilities_rejected(kwargs, message):
 def test_invalid_native_codec_rejected(kind, bits):
     with pytest.raises(ValueError):
         NativeCodecSpec(kind=kind, bits=bits)
+
+
+@pytest.mark.parametrize(
+    "kind,bits,effective_bits",
+    [
+        ("ggml_q8_0", 8, 8.5),
+        ("ggml_q4_0", 4, 4.5),
+    ],
+)
+def test_ggml_block_codecs_include_scale_overhead(kind, bits, effective_bits):
+    codec = NativeCodecSpec(kind=kind, bits=bits)
+
+    assert codec.effective_bits == effective_bits
 
 
 def test_lossless_backend_cannot_claim_lossy_codec():
@@ -322,6 +335,27 @@ def test_builtin_tiers_publish_native_codecs_to_cpp():
     assert cpp.get_codec("one_bit").bits == 1
 
 
+def test_ggml_block_tiers_publish_exact_layout_to_cpp():
+    cache = _build_cache(
+        [
+            TierSpec(name="q8_0", backend="q8_0", max_pages=1),
+            TierSpec(name="q4_0", backend="q4_0", max_pages=2),
+        ]
+    )
+    cpp = cache._cpp_manager
+
+    q8 = cpp.get_codec("q8_0")
+    q4 = cpp.get_codec("q4_0")
+    assert q8.kind == argus_cpp_backend.CodecKind.GGML_Q8_0
+    assert q8.block_size == 32
+    assert q8.block_bytes == 34
+    assert q8.effective_bits == 8.5
+    assert q4.kind == argus_cpp_backend.CodecKind.GGML_Q4_0
+    assert q4.block_size == 32
+    assert q4.block_bytes == 18
+    assert q4.effective_bits == 4.5
+
+
 def test_custom_tier_native_codec_reaches_cpp():
     register_quantizer("ternary", TernaryBackend, TERNARY_CAPS)
     cache = _build_cache(
@@ -402,6 +436,132 @@ def test_native_codec_roundtrip_fidelity(tier, tolerance):
 
     rel_err = ((k_out.float() - k.float()).norm() / k.float().norm()).item()
     assert rel_err < tolerance, f"{tier} round-trip error {rel_err:.4f} > {tolerance}"
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@pytest.mark.parametrize(
+    "tier,block_bytes,tolerance",
+    [("q8_0", 34, 0.02), ("q4_0", 18, 0.16)],
+)
+def test_ggml_block_codec_roundtrip_and_storage(tier, block_bytes, tolerance):
+    page_size = 32
+    head_dim = 32
+    cache = _build_cache(
+        [TierSpec(name=tier, backend=tier, max_pages=8)], page_size=page_size
+    )
+
+    torch.manual_seed(0)
+    k = torch.randn(1, 1, page_size, head_dim, dtype=torch.float16, device="cuda")
+    v = torch.randn_like(k)
+    cache.push_new_tokens(k.clone(), v.clone())
+    cache.push_new_tokens(torch.randn_like(k), torch.randn_like(v))
+
+    page = cache.pages_by_tier[tier][0]
+    assert page.key_compressed.dtype == torch.uint8
+    assert page.key_compressed.numel() == k.numel() // 32 * block_bytes
+
+    k_out, _ = cache._cpp_manager.peek_decompress_page(page, tier)
+    rel_err = ((k_out.float() - k.float()).norm() / k.float().norm()).item()
+    assert rel_err < tolerance, f"{tier} round-trip error {rel_err:.4f} > {tolerance}"
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_ggml_q4_0_uses_llama_nibble_order():
+    cache = _build_cache(
+        [TierSpec(name="q4_0", backend="q4_0", max_pages=8)], page_size=32
+    )
+    row = torch.arange(-16, 16, dtype=torch.float16, device="cuda")
+    k = row.view(1, 1, 1, 32).expand(1, 1, 32, 32).contiguous()
+    cache.push_new_tokens(k, k)
+    cache.push_new_tokens(torch.zeros_like(k), torch.zeros_like(k))
+
+    block = cache.pages_by_tier["q4_0"][0].key_compressed.flatten()[:18]
+    scale = block[:2].view(torch.float16).item()
+    packed = block[2:]
+    expected_scale = 16.0 / 8.0
+    expected_low = torch.trunc(row[:16].cpu() / expected_scale + 8.5).clamp(0, 15)
+    expected_high = torch.trunc(row[16:].cpu() / expected_scale + 8.5).clamp(0, 15)
+    expected = (expected_low.to(torch.uint8) | (expected_high.to(torch.uint8) << 4))
+
+    assert scale == expected_scale
+    assert torch.equal(packed, expected)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_ggml_q8_0_uses_llama_block_layout():
+    cache = _build_cache(
+        [TierSpec(name="q8_0", backend="q8_0", max_pages=8)], page_size=32
+    )
+    row = torch.arange(-16, 16, dtype=torch.float16, device="cuda")
+    k = row.view(1, 1, 1, 32).expand(1, 1, 32, 32).contiguous()
+    cache.push_new_tokens(k, k)
+    cache.push_new_tokens(torch.zeros_like(k), torch.zeros_like(k))
+
+    block = cache.pages_by_tier["q8_0"][0].key_compressed.flatten()[:34]
+    stored_scale = block[:2].view(torch.float16).item()
+    stored_quants = block[2:].view(torch.int8)
+    quant_scale = 16.0 / 127.0
+    expected_scale = torch.tensor(quant_scale, dtype=torch.float16).item()
+    expected_quants = torch.round(row.cpu() / quant_scale).to(torch.int8)
+
+    assert stored_scale == expected_scale
+    assert torch.equal(stored_quants, expected_quants)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_ggml_q8_0_rounds_halfway_away_from_zero_like_llama():
+    cache = _build_cache(
+        [TierSpec(name="q8_0", backend="q8_0", max_pages=8)], page_size=32
+    )
+    row = torch.zeros(32, dtype=torch.float32, device="cuda")
+    row[:5] = torch.tensor([127.0, 0.5, -0.5, 1.5, -1.5], device="cuda")
+    k = row.view(1, 1, 1, 32).expand(1, 1, 32, 32).contiguous()
+    cache.push_new_tokens(k, k)
+    cache.push_new_tokens(torch.zeros_like(k), torch.zeros_like(k))
+
+    block = cache.pages_by_tier["q8_0"][0].key_compressed.flatten()[:34]
+
+    assert block[:2].view(torch.float16).item() == 1.0
+    assert torch.equal(
+        block[2:7].view(torch.int8),
+        torch.tensor([127, 1, -1, 2, -2], dtype=torch.int8),
+    )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@pytest.mark.parametrize(
+    "tier,magnitude", [("q8_0", 1.0e6), ("q4_0", 5.0e5)]
+)
+def test_ggml_block_codecs_preserve_finite_fp32_range(tier, magnitude):
+    cache = _build_cache(
+        [TierSpec(name=tier, backend=tier, max_pages=8)], page_size=32
+    )
+    row = torch.linspace(-magnitude, magnitude, 32, dtype=torch.float32, device="cuda")
+    k = row.view(1, 1, 1, 32).expand(1, 1, 32, 32).contiguous()
+    cache.push_new_tokens(k, k)
+    cache.push_new_tokens(torch.zeros_like(k), torch.zeros_like(k))
+
+    page = cache.pages_by_tier[tier][0]
+    restored, _ = cache._cpp_manager.peek_decompress_page(page, tier)
+
+    assert restored.dtype == torch.float32
+    assert torch.isfinite(restored).all()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@pytest.mark.parametrize(
+    "tier,magnitude", [("q8_0", 9.0e6), ("q4_0", 1.0e6)]
+)
+def test_ggml_block_codecs_reject_unrepresentable_fp16_scale(tier, magnitude):
+    cache = _build_cache(
+        [TierSpec(name=tier, backend=tier, max_pages=8)], page_size=32
+    )
+    row = torch.linspace(-magnitude, magnitude, 32, dtype=torch.float32, device="cuda")
+    k = row.view(1, 1, 1, 32).expand(1, 1, 32, 32).contiguous()
+    cache.push_new_tokens(k, k)
+
+    with pytest.raises(RuntimeError, match="cannot represent this block range"):
+        cache.push_new_tokens(torch.zeros_like(k), torch.zeros_like(k))
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")

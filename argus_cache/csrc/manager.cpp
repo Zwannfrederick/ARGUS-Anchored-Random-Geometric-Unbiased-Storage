@@ -2,6 +2,8 @@
 #include <ATen/cuda/CUDAContext.h>
 #include <algorithm>
 #include <c10/cuda/CUDAStream.h>
+#include <c10/cuda/CUDAGuard.h>
+#include <cmath>
 #include <cstdlib>
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
@@ -18,9 +20,29 @@ void launch_dequantize_generic(const void *input, const float scale,
                                const float min_val, half *output,
                                int num_bytes, int kind, int bits,
                                int pack_factor, cudaStream_t stream);
+cudaError_t launch_quantize_ggml_block(const float *input, uint8_t *output,
+                                       int num_blocks, int kind,
+                                       cudaStream_t stream);
+cudaError_t launch_dequantize_ggml_block(const void *input, float *output,
+                                         int num_blocks, int kind,
+                                         cudaStream_t stream);
 }
 
 namespace {
+
+constexpr float ggml_fp16_max = 65504.0f;
+constexpr float ggml_q8_0_max_input = ggml_fp16_max * 127.0f;
+constexpr float ggml_q4_0_max_input = ggml_fp16_max * 8.0f;
+
+int checked_block_count(const int64_t element_count,
+                        const TierCodec &codec) {
+  const int64_t block_count = element_count / codec.block_size();
+  TORCH_CHECK(block_count <= std::numeric_limits<int>::max(),
+              "[ARGUS C++] tier '", codec.name,
+              "' page contains too many blocks for the CUDA launch ABI: ",
+              block_count, ".");
+  return static_cast<int>(block_count);
+}
 
 // Logging is opt-in: the previous unconditional per-call std::cout showed up
 // as a measurable fraction of decode time at long context.
@@ -105,12 +127,65 @@ ArgusCppManager::~ArgusCppManager() {
 
 void ArgusCppManager::compress_page(const std::shared_ptr<Page> &page,
                                     const TierCodec &codec) {
+  const c10::cuda::CUDAGuard device_guard{
+      static_cast<c10::DeviceIndex>(device_id_)};
   TORCH_CHECK(page->key_tensor.defined() && page->value_tensor.defined(),
               "[ARGUS C++] compress_page called on a page with no resident "
               "key/value tensors (tier=",
               page->tier_name, ", page_id=", page->page_id, ").");
 
-  if (codec.kind == CodecKind::Projection) {
+  if (codec.is_block_quantized()) {
+    const cudaStream_t stream =
+        c10::cuda::getCurrentCUDAStream(device_id_).stream();
+    for (int which = 0; which < 2; ++which) {
+      const at::Tensor &src =
+          which == 0 ? page->key_tensor : page->value_tensor;
+      at::Tensor &dst =
+          which == 0 ? page->compressed_key : page->compressed_value;
+      TORCH_CHECK(src.size(-1) % codec.block_size() == 0,
+                  "[ARGUS C++] tier '", codec.name, "' requires the last ",
+                  "dimension to be a multiple of ", codec.block_size(),
+                  ", got ", src.size(-1), ".");
+
+      // GGML's reference quantizers consume fp32. Preserve that decision
+      // surface for fp16, bf16, and fp32 callers instead of narrowing values
+      // to half before choosing scales and integer codes.
+      const at::Tensor float_src = src.to(torch::kFloat32).contiguous();
+      const float input_amax =
+          torch::max(torch::abs(float_src)).item<float>();
+      const float max_input = codec.kind == CodecKind::GgmlQ8_0
+                                  ? ggml_q8_0_max_input
+                                  : ggml_q4_0_max_input;
+      TORCH_CHECK(std::isfinite(input_amax) && input_amax <= max_input,
+                  "[ARGUS C++] tier '", codec.name,
+                  "' cannot represent this block range with an fp16 scale: ",
+                  "amax=", input_amax, ", maximum=", max_input, ".");
+      std::vector<int64_t> compressed_shape = src.sizes().vec();
+      compressed_shape.back() =
+          src.size(-1) / codec.block_size() * codec.block_bytes();
+      at::Tensor packed = torch::empty(
+          compressed_shape,
+          torch::TensorOptions().device(src.device()).dtype(torch::kUInt8));
+      const int num_blocks = checked_block_count(src.numel(), codec);
+      const cudaError_t launch_error = launch_quantize_ggml_block(
+          float_src.data_ptr<float>(),
+          packed.data_ptr<uint8_t>(), num_blocks,
+          static_cast<int>(codec.kind), stream);
+      TORCH_CHECK(launch_error == cudaSuccess,
+                  "[ARGUS C++] ", codec.name,
+                  " quantization launch failed: ",
+                  cudaGetErrorString(launch_error));
+      const cudaError_t sync_error = cudaStreamSynchronize(stream);
+      TORCH_CHECK(sync_error == cudaSuccess,
+                  "[ARGUS C++] ", codec.name,
+                  " quantization failed: ", cudaGetErrorString(sync_error));
+      dst = host_pool_->tensor_to_pinned(packed);
+    }
+    page->key_scale = 0.0f;
+    page->value_scale = 0.0f;
+    page->key_min = 0.0f;
+    page->value_min = 0.0f;
+  } else if (codec.kind == CodecKind::Projection) {
     at::Tensor w_proj = get_jl_w_proj(page->page_size, page->key_tensor);
     auto comp_k = torch::matmul(w_proj, page->key_tensor.to(w_proj.scalar_type()));
     auto comp_v = torch::matmul(w_proj, page->value_tensor.to(w_proj.scalar_type()));
@@ -199,6 +274,8 @@ ArgusCppManager::decompress_page(const std::shared_ptr<Page> &page,
                                  const TierCodec &codec, cudaStream_t stream,
                                  bool allow_python_callbacks,
                                  bool synchronize) {
+  const c10::cuda::CUDAGuard device_guard{
+      static_cast<c10::DeviceIndex>(device_id_)};
   at::Tensor k_out, v_out;
 
   if (codec.kind == CodecKind::Projection) {
@@ -224,6 +301,84 @@ ArgusCppManager::decompress_page(const std::shared_ptr<Page> &page,
   } else if (codec.kind == CodecKind::Passthrough) {
     k_out = page->compressed_key.to(torch::kCUDA);
     v_out = page->compressed_value.to(torch::kCUDA);
+  } else if (codec.is_block_quantized()) {
+    const int block_bytes = codec.block_bytes();
+    TORCH_CHECK(page->compressed_key.size(-1) % block_bytes == 0 &&
+                    page->compressed_value.size(-1) % block_bytes == 0,
+                "[ARGUS C++] malformed ", codec.name,
+                " page: compressed row does not contain whole blocks.");
+
+    std::vector<int64_t> key_shape = page->compressed_key.sizes().vec();
+    std::vector<int64_t> val_shape = page->compressed_value.sizes().vec();
+    key_shape.back() = key_shape.back() / block_bytes * codec.block_size();
+    val_shape.back() = val_shape.back() / block_bytes * codec.block_size();
+
+    const auto options = torch::TensorOptions()
+                             .device(torch::kCUDA, device_id_)
+                             .dtype(torch::kFloat32);
+    k_out = torch::empty(key_shape, options);
+    v_out = torch::empty(val_shape, options);
+
+    const void *k_ptr =
+        host_pool_->get_device_pointer(page->compressed_key.data_ptr());
+    const void *v_ptr =
+        host_pool_->get_device_pointer(page->compressed_value.data_ptr());
+    at::Tensor staged_k;
+    at::Tensor staged_v;
+    if (k_ptr == nullptr) {
+      staged_k = torch::empty(
+          page->compressed_key.sizes(),
+          torch::TensorOptions()
+              .device(torch::kCUDA, device_id_)
+              .dtype(page->compressed_key.scalar_type()));
+      const cudaError_t copy_error = cudaMemcpyAsync(
+          staged_k.data_ptr(), page->compressed_key.data_ptr(),
+          page->compressed_key.nbytes(), cudaMemcpyHostToDevice, stream);
+      TORCH_CHECK(copy_error == cudaSuccess,
+                  "[ARGUS C++] ", codec.name,
+                  " K staging failed: ", cudaGetErrorString(copy_error));
+      k_ptr = staged_k.data_ptr();
+    }
+    if (v_ptr == nullptr) {
+      staged_v = torch::empty(
+          page->compressed_value.sizes(),
+          torch::TensorOptions()
+              .device(torch::kCUDA, device_id_)
+              .dtype(page->compressed_value.scalar_type()));
+      const cudaError_t copy_error = cudaMemcpyAsync(
+          staged_v.data_ptr(), page->compressed_value.data_ptr(),
+          page->compressed_value.nbytes(), cudaMemcpyHostToDevice, stream);
+      TORCH_CHECK(copy_error == cudaSuccess,
+                  "[ARGUS C++] ", codec.name,
+                  " V staging failed: ", cudaGetErrorString(copy_error));
+      v_ptr = staged_v.data_ptr();
+    }
+
+    const int key_blocks = checked_block_count(k_out.numel(), codec);
+    const int value_blocks = checked_block_count(v_out.numel(), codec);
+    const cudaError_t key_launch_error = launch_dequantize_ggml_block(
+        k_ptr, k_out.data_ptr<float>(),
+        key_blocks,
+        static_cast<int>(codec.kind), stream);
+    TORCH_CHECK(key_launch_error == cudaSuccess,
+                "[ARGUS C++] ", codec.name,
+                " K dequantization launch failed: ",
+                cudaGetErrorString(key_launch_error));
+    const cudaError_t value_launch_error = launch_dequantize_ggml_block(
+        v_ptr, v_out.data_ptr<float>(),
+        value_blocks,
+        static_cast<int>(codec.kind), stream);
+    TORCH_CHECK(value_launch_error == cudaSuccess,
+                "[ARGUS C++] ", codec.name,
+                " V dequantization launch failed: ",
+                cudaGetErrorString(value_launch_error));
+
+    if (synchronize || staged_k.defined() || staged_v.defined()) {
+      const cudaError_t sync_error = cudaStreamSynchronize(stream);
+      TORCH_CHECK(sync_error == cudaSuccess,
+                  "[ARGUS C++] ", codec.name,
+                  " dequantization failed: ", cudaGetErrorString(sync_error));
+    }
   } else {
     const int pack_factor = codec.pack_factor();
 
@@ -747,7 +902,7 @@ void ArgusCppManager::resurrect_page(std::shared_ptr<Page> page,
   const TierCodec &codec = codec_for(current_tier);
 
   auto kv = decompress_page(page, codec, stream, /*allow_python_callbacks=*/true,
-                            /*synchronize=*/false);
+                            /*synchronize=*/true);
   TORCH_CHECK(kv.first.defined(), "[ARGUS C++] failed to resurrect page ",
               page->page_id, " from tier '", current_tier, "'.");
 

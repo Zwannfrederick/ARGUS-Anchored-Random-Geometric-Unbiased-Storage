@@ -16,7 +16,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .value("UNSIGNED_AFFINE", argus::CodecKind::UnsignedAffine)
         .value("SIGN_PACKED", argus::CodecKind::SignPacked)
         .value("PROJECTION", argus::CodecKind::Projection)
-        .value("PASSTHROUGH", argus::CodecKind::Passthrough);
+        .value("PASSTHROUGH", argus::CodecKind::Passthrough)
+        .value("GGML_Q8_0", argus::CodecKind::GgmlQ8_0)
+        .value("GGML_Q4_0", argus::CodecKind::GgmlQ4_0);
 
     py::class_<argus::TierCodec>(m, "TierCodec")
         .def(py::init<>())
@@ -26,6 +28,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def_readwrite("lossy", &argus::TierCodec::lossy)
         .def_readwrite("compression_ratio", &argus::TierCodec::compression_ratio)
         .def_property_readonly("pack_factor", &argus::TierCodec::pack_factor)
+        .def_property_readonly("block_size", &argus::TierCodec::block_size)
+        .def_property_readonly("block_bytes", &argus::TierCodec::block_bytes)
         .def_property_readonly("levels", &argus::TierCodec::levels)
         .def_property_readonly("needs_min", &argus::TierCodec::needs_min)
         .def_property_readonly("is_quantized", &argus::TierCodec::is_quantized)
