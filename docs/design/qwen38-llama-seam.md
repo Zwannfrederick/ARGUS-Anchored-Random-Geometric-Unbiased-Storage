@@ -88,6 +88,18 @@ The first proof replaces one full-attention layer's storage/read path and
 demonstrates changed allocated bytes, unchanged recurrent-state digest during
 cache-only lifecycle operations, and stock output parity in ACTIVE/exact mode.
 
+## Implemented probe
+
+The pinned fork's `9ae31e1` commit adds an opt-in ownership probe to
+`llama_memory_hybrid`. Setting `LLAMA_ARGUS_HYBRID_PROBE=1` logs separate
+backend-buffer byte totals for attention KV and recurrent state at hybrid-cache
+construction. The default path remains stock llama.cpp: the probe does not
+select an ARGUS cache, alter cache types, or change graph execution.
+
+This provides the byte-accounting baseline for the first one-layer replacement
+test. That test must establish stock-logit parity and an unchanged recurrent
+state digest before the probe can be replaced by a paged-attention backend.
+
 ## Sources
 
 - https://huggingface.co/Qwen/Qwen3.8-27B
