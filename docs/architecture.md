@@ -359,6 +359,36 @@ Still not measured: NIAH/RULER retrieval, vLLM throughput, CPU-spill overhead
 under real pressure, concurrent serving, multi-GPU, or a baseline-OOM run that
 ARGUS survives. No claim is made for those outcomes.
 
+#### Current-tree activation and streaming prototype
+
+The post-v0.3 tree adds a request router ahead of the HuggingFace cache. It
+estimates exact-cache bytes from model and tensor geometry, checks a minimum
+savings gate, and compares projected allocation with hysteretic VRAM watermarks.
+Balanced mode stays on an exact-cache bypass while the allocation fits; once a
+request escalates it remains on ARGUS until reset. The default serving pipeline
+is ACTIVE → FP8, while `pipeline_profile="research"` preserves the historical
+deep cascade.
+
+The native `inplace_paged_attention` path also has an opt-in exact streaming
+mode. It applies the online-softmax recurrence in FP32, materializes one
+compressed page at a time, supports grouped-query attention, and derives
+per-page normalized mass without reconstructing a full score vector. This
+bounds its transient reconstruction storage by page size. The implementation
+is currently a correctness-first sequence of ATen operations, not one fused
+CUDA/Triton kernel.
+
+The HuggingFace path now registers `argus` through Transformers'
+`AttentionInterface` and carries the owning page manager from `Cache.update`
+to that functional attention call. A model-aware `AttentionAdapter` registry
+controls query preparation, eligibility, and output layout. Qwen2
+full-attention, eval-mode, unmasked single-token decode is the first validated
+native contract. Prefill, masked or sliding-window attention, training, and
+unregistered model types reconstruct K/V. The first group uses the Qwen2 SDPA
+fallback; unregistered models retain their original attention implementation.
+This fail-closed split is deliberate: GQA, MLA, local attention, and
+model-specific mask semantics must each receive an explicit adapter before
+native activation.
+
 ### 5.4 The JL tier on real activations — verdict
 
 `docs/measurements/jl-2026-08-14.json`, regenerate with:

@@ -6,9 +6,10 @@ kalır; eski sayfalar yapılandırılabilir politikayla FP8, INT8, INT4, INT2,
 1-bit, projeksiyon ve CPU katmanlarına indirilebilir.
 
 ARGUS bir hızlandırma motoru değil, **kapasite odaklı bir araştırma
-çalışma zamanıdır**. Mevcut HuggingFace entegrasyonu uzun bağlamlarda tepe VRAM
-kullanımını düşürüyor; ancak decode gecikmesi henüz düşük gecikmeli servis için
-uygun değil.
+çalışma zamanıdır**. Güncel ağaç exact cache güvenli VRAM bütçesine sığıyorsa
+ARGUS'u bypass eder. Zorunlu kapasite modu uzun bağlamlarda tepe VRAM'i
+düşürebilir; HuggingFace decode gecikmesi ise düşük gecikmeli servise hazır
+değildir.
 
 İngilizce belge: [README.md](README.md)
 
@@ -44,16 +45,41 @@ Düşük context bypass, dengeli aktivasyon politikası ve daha hafif decode
 seçenekleri:
 [`docs/optimization-notes-2026-08-14-tr.md`](docs/optimization-notes-2026-08-14-tr.md).
 
+## Adaptif aktivasyon
+
+`AdaptiveCachePolicy`, gözlenen batch/KV head/head dimension/dtype değerleri,
+model katman sayısı ve beklenen token sayısından exact KV maliyetini hesaplar.
+`balanced` modu yalnız hem minimum bellek kazancı hem yüksek VRAM su seviyesi
+kapısı geçildiğinde ARGUS'u açar. Açılan bir istek decode ortasında geri
+kapanmaz; istekler arasında ayrı açma/kapatma eşikleri histerezis sağlar.
+
+| mod | davranış |
+|---|---|
+| `latency` | her zaman exact-cache bypass |
+| `balanced` | kapasite ve baskı kapıları geçilene kadar exact bypass |
+| `capacity` | kontrollü kapasite deneyi için ARGUS'u zorla |
+
+Varsayılan dengeli servis hattı `ACTIVE → FP8`'dir. Eski derin zincir
+`pipeline_profile="research"` ile kullanılabilir.
+
 ## Gecikme neden yüksek?
 
-ARGUS depolamayı sıkıştırır; attention hesabını düşük bitte çalıştırmaz.
-Mevcut HuggingFace yolu, her üretilen token için sıkıştırılmış sayfaları tekrar
-FP16'a açar ve modelin beklediği bitişik K/V tensörünü oluşturur. Tekrarlanan
-açma ve birleştirme maliyeti sayfa sayısıyla büyür.
+ARGUS depolamayı sıkıştırır; attention hesabını düşük bitte çalıştırmaz. Güncel
+ağaç, doğrulanmış model sözleşmelerinde tam K/V reconstruction'ını atlamak için
+Transformers'ın fonksiyonel `AttentionInterface` noktasını kullanır. İlk native
+sözleşme Qwen2 full-attention, maskesiz, tek-token decode yoludur. Prefill,
+padding/local maskeler ve training reconstruct+SDPA'ya fail-closed düşer.
+Kayıtsız mimariler kendi model attention yolunu korur ve reconstruct edilmiş K/V alır.
 
-Kalıcı çözüm, sayfalı önbelleği doğrudan tüketen ve yalnızca gereken blokları
-attention çekirdeğinin içinde açan bir backend'dir. Sayfa boyutu ayarı maliyeti
-azaltır, fakat bitişik tensör oluşturma maliyetini ortadan kaldıramaz.
+Native cache artık sıkıştırılmış sayfaları tek tek tüketen exact online-softmax
+prototipine sahiptir; FP16 çalışma alanı bir sayfayla sınırlıdır ve SDPA/GQA
+eşitlik testleri vardır. Yol henüz tek CUDA/Triton kernelinde füze edilmedi;
+bu yüzden uçtan uca hızlanma iddiası değildir.
+
+Model farkları açık bir registry ile yönetilir: `AttentionAdapter`, her
+`config.model_type` için native uygunluğu, query hazırlığını ve çıktı düzenini
+tanımlar. Uygulamalar `register_attention_adapter()` ile yeni sözleşme
+ekleyebilir; kayıtlı olmayan model native sayfalı attention'a yanlışlıkla girmez.
 
 ## Mimari
 
@@ -108,7 +134,7 @@ gerekir.
 ```python
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
-from argus_cache import patch_model_with_argus
+from argus_cache import AdaptiveCachePolicy, patch_model_with_argus
 
 model_id = "Qwen/Qwen2.5-0.5B-Instruct"
 tokenizer = AutoTokenizer.from_pretrained(model_id)
@@ -123,6 +149,11 @@ model = patch_model_with_argus(
     max_active_pages=2,
     max_fp8_pages=2,
     sink_tokens=4,
+    activation_policy=AdaptiveCachePolicy(
+        mode="balanced",
+        expected_tokens=16_448,
+    ),
+    pipeline_profile="balanced",
 )
 
 inputs = tokenizer("KV önbellek için sanal bellek", return_tensors="pt").to("cuda")

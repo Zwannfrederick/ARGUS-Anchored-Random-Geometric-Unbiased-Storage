@@ -6,9 +6,9 @@ pages can be demoted through FP8, INT8, INT4, INT2, 1-bit, projection, and CPU
 storage according to a configurable policy.
 
 ARGUS is a **capacity-oriented research runtime**, not an inference speedup
-engine. The current HuggingFace integration reduces peak VRAM at sufficiently
-long contexts, but its decode latency is not yet suitable for low-latency
-serving.
+engine. The current tree bypasses ARGUS when an exact cache fits the configured
+VRAM budget; forced capacity mode can reduce peak VRAM at long contexts, but
+its HuggingFace decode latency is not yet suitable for low-latency serving.
 
 Türkçe belge: [README_TR.md](README_TR.md)
 
@@ -42,18 +42,45 @@ Full provenance and min/max timings are in
 The analysis and discarded-harness explanation are in
 [`docs/findings-2026-08-14.md`](docs/findings-2026-08-14.md).
 
+## Adaptive activation in the current tree
+
+`AdaptiveCachePolicy` estimates exact K/V cost from the observed batch, KV
+heads, head dimension, dtype, model depth, and expected token count. Balanced
+mode activates ARGUS only when both gates pass: the expected saving exceeds
+`min_savings_bytes`, and projected device utilization crosses the high-water
+mark. Separate activation/deactivation ratios provide hysteresis between
+requests; a request that escalates to ARGUS never switches back mid-decode.
+
+| mode | behavior |
+|---|---|
+| `latency` | always use the exact-cache bypass |
+| `balanced` | exact bypass until capacity and pressure gates pass |
+| `capacity` | force ARGUS for controlled capacity experiments |
+
+The default balanced serving profile is `ACTIVE → FP8`. The former six-tier
+cascade remains available as `pipeline_profile="research"`; explicit custom
+pipelines are unchanged.
+
 ## Why decode is slow
 
-ARGUS compresses **storage**, not attention arithmetic. Its current
-HuggingFace adapter reconstructs compressed pages to FP16 and assembles a
-contiguous K/V tensor for the model on every decode step. That keeps the model
-compatible, but repeated decompression and concatenation scale with the number
-of resident pages.
+ARGUS compresses **storage**, not attention arithmetic. The current tree uses
+Transformers' functional `AttentionInterface` to bypass full K/V reconstruction
+for validated model contracts. Qwen2 full-attention, unmasked, single-token
+decode is the first supported native contract. Prefill, padding/local masks,
+and training fail closed to reconstructed SDPA. Unregistered architectures
+keep their original model attention implementation and receive reconstructed K/V.
 
-The durable serving design is an attention backend that consumes the paged
-cache directly and reconstructs only the blocks needed by the attention
-kernel. Page-size tuning can reduce overhead, but cannot remove the contiguous
-materialization cost.
+The native cache now contains an exact online-softmax prototype that consumes
+one compressed page at a time and bounds FP16 reconstruction to one page. It
+is covered against SDPA, including grouped-query attention, and benchmarked as
+the `streaming` arm of `bench_native_runtime.py`. It is not yet fused into one
+CUDA/Triton kernel, so this prototype is not presented as an end-to-end serving
+speedup.
+
+Model differences are explicit: `AttentionAdapter` owns native eligibility,
+query preparation, and output layout for each `config.model_type`. Applications
+can add a contract with `register_attention_adapter()`; an unregistered model
+never enters native page attention accidentally.
 
 ## Architecture
 
@@ -112,7 +139,7 @@ required for the native extension.
 ```python
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
-from argus_cache import patch_model_with_argus
+from argus_cache import AdaptiveCachePolicy, patch_model_with_argus
 
 model_id = "Qwen/Qwen2.5-0.5B-Instruct"
 tokenizer = AutoTokenizer.from_pretrained(model_id)
@@ -127,6 +154,11 @@ model = patch_model_with_argus(
     max_active_pages=2,
     max_fp8_pages=2,
     sink_tokens=4,
+    activation_policy=AdaptiveCachePolicy(
+        mode="balanced",
+        expected_tokens=16_448,  # prompt + maximum requested output
+    ),
+    pipeline_profile="balanced",
 )
 
 inputs = tokenizer("Virtual memory for KV caches", return_tensors="pt").to("cuda")
@@ -180,8 +212,11 @@ Benchmark classes are kept separate:
 
 ## Known limits and next milestone
 
-- Decode currently reconstructs all compressed pages for every generated
-  token. This is the primary production blocker.
+- Native HuggingFace decode currently covers only the validated Qwen2
+  full-attention contract. Other models and masked/local-attention cases still
+  reconstruct K/V; unregistered models retain their own attention semantics.
+- Streaming attention is an ATen operation sequence, not one fused kernel, and
+  therefore still carries per-page launch overhead.
 - Lossy archival tiers need downstream perplexity and retrieval evaluation.
 - CPU-spill latency under real memory pressure and multi-user throughput have
   not been measured.
