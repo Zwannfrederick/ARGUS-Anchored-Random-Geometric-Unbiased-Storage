@@ -251,6 +251,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def("set_jl_projection_provider", &ArgusCppManager::set_jl_projection_provider, py::arg("fn"))
         .def("set_jl_recon_provider", &ArgusCppManager::set_jl_recon_provider, py::arg("fn"))
         .def("set_force_qos", &ArgusCppManager::set_force_qos, py::arg("v"))
+        .def("set_streaming_attention", &ArgusCppManager::set_streaming_attention,
+             py::arg("v"))
         .def("set_verbose", &ArgusCppManager::set_verbose, py::arg("v"))
         .def("register_codec",
              [](ArgusCppManager &self, const argus::TierCodec &codec) {

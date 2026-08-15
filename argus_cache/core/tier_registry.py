@@ -112,3 +112,4 @@ class PipelineConfig:
     resurrection_threshold: float = 0.01
     micro_page_size: Optional[int] = None
     balloon_driver: Optional[Any] = None
+    streaming_attention: bool = False

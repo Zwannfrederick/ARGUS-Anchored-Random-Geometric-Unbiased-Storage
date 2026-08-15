@@ -6,6 +6,7 @@
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
 #include <iostream>
+#include <limits>
 
 using argus::CodecKind;
 using argus::TierCodec;
@@ -367,6 +368,15 @@ torch::Tensor ArgusCppManager::inplace_paged_attention(
   for (const auto &tier : tier_pipeline_) {
     const TierCodec &codec = codec_for(tier);
     for (auto &page : pages_by_tier_[tier]) {
+      if (streaming_attention_) {
+        // Keep only metadata in the block list. The online-softmax loop below
+        // materializes and releases one compressed page at a time, bounding
+        // the FP16 reconstruction workspace to a single page.
+        keys_list.push_back(at::Tensor());
+        values_list.push_back(at::Tensor());
+        pages_in_order.push_back(page);
+        continue;
+      }
       at::Tensor k_temp;
       at::Tensor v_temp;
 
@@ -400,16 +410,116 @@ torch::Tensor ArgusCppManager::inplace_paged_attention(
     return torch::zeros_like(q);
   }
 
-  at::Tensor k_full = at::cat(keys_list, -2);
-  at::Tensor v_full = at::cat(values_list, -2);
+  at::Tensor k_full;
+  at::Tensor v_full;
+  at::Tensor attn_output;
+  std::vector<float> streaming_block_weights;
 
-  // Fused FlashAttention / SDPA execution
-  at::Tensor attn_output =
-      at::scaled_dot_product_attention(q, k_full, v_full,
-                                       /*attn_mask=*/c10::nullopt,
-                                       /*dropout_p=*/0.0,
-                                       /*is_causal=*/false,
-                                       /*scale=*/scale);
+  if (streaming_attention_) {
+    // FlashAttention's online-softmax recurrence, expressed in ATen as a
+    // correctness-first prototype.  Each K/V page is consumed independently;
+    // no context-sized contiguous K/V tensor is materialized.  The temporary
+    // score tensor is bounded by one page (and q_len), while accumulation is
+    // performed in fp32 for numerical stability.
+    at::NoGradGuard no_grad;
+    at::Tensor q_float = q.to(torch::kFloat32);
+    std::vector<int64_t> stat_shape(q.sizes().begin(), q.sizes().end());
+    stat_shape.back() = 1;
+    std::vector<int64_t> out_shape(q.sizes().begin(), q.sizes().end());
+    out_shape.back() = q.size(-1);
+    auto float_options = q.options().dtype(torch::kFloat32);
+    at::Tensor running_max = at::full(
+        stat_shape, -std::numeric_limits<float>::infinity(), float_options);
+    at::Tensor running_sum = at::zeros(stat_shape, float_options);
+    at::Tensor running_out = at::zeros(out_shape, float_options);
+    std::vector<at::Tensor> block_logsumexp;
+    block_logsumexp.reserve(keys_list.size());
+
+    for (size_t i = 0; i < keys_list.size(); ++i) {
+      at::Tensor materialized_k = keys_list[i];
+      at::Tensor materialized_v = values_list[i];
+      if (!materialized_k.defined()) {
+        auto page = pages_in_order[i];
+        TORCH_CHECK(page, "Compressed attention block is missing page metadata.");
+        {
+          std::lock_guard<std::mutex> lock(prefetch_mutex_);
+          auto cache_it = prefetch_cache_.find(page->page_id);
+          if (cache_it != prefetch_cache_.end()) {
+            materialized_k = cache_it->second.first;
+            materialized_v = cache_it->second.second;
+            prefetch_hit_count_++;
+          }
+        }
+        if (!materialized_k.defined()) {
+          std::tie(materialized_k, materialized_v) = decompress_page(
+              page, codec_for(page->tier_name), stream,
+              /*allow_python_callbacks=*/true,
+              /*synchronize=*/false);
+        }
+      }
+      at::Tensor block_k = materialized_k.to(torch::kFloat32);
+      at::Tensor block_v = materialized_v.to(torch::kFloat32);
+      TORCH_CHECK(block_k.dim() == 4 && block_v.dim() == 4,
+                  "Streaming attention expects rank-4 K/V tensors.");
+      TORCH_CHECK(block_k.size(0) == q_float.size(0) &&
+                      block_v.size(0) == q_float.size(0),
+                  "Streaming attention batch size mismatch.");
+      TORCH_CHECK(block_k.size(-2) == block_v.size(-2),
+                  "Streaming attention K/V token count mismatch.");
+      TORCH_CHECK(block_k.size(-3) == block_v.size(-3),
+                  "Streaming attention K/V head count mismatch.");
+      TORCH_CHECK(block_k.size(-1) == q_float.size(-1),
+                  "Streaming attention query/key head dimension mismatch.");
+      TORCH_CHECK(block_v.size(-1) == q_float.size(-1),
+                  "Streaming attention currently requires value and query head dimensions to match.");
+      const int64_t q_heads = q_float.size(-3);
+      const int64_t kv_heads = block_k.size(-3);
+      if (q_heads != kv_heads) {
+        TORCH_CHECK(q_heads % kv_heads == 0,
+                    "Query heads must be divisible by KV heads for GQA.");
+        const int64_t groups = q_heads / kv_heads;
+        block_k = at::repeat_interleave(block_k, groups, -3);
+        block_v = at::repeat_interleave(block_v, groups, -3);
+      }
+
+      at::Tensor scores =
+          at::matmul(q_float, block_k.transpose(-1, -2)) * scale;
+      at::Tensor block_max = std::get<0>(scores.max(-1, true));
+      at::Tensor next_max = at::maximum(running_max, block_max);
+      at::Tensor prior_scale = at::exp(running_max - next_max);
+      at::Tensor block_exp = at::exp(scores - next_max);
+      running_out = running_out * prior_scale + at::matmul(block_exp, block_v);
+      running_sum = running_sum * prior_scale + block_exp.sum(-1, true);
+      running_max = next_max;
+      block_logsumexp.push_back(at::logsumexp(scores, {-1}, true));
+    }
+
+    attn_output = (running_out / running_sum).to(q.scalar_type());
+
+    // Per-page attention mass for the existing QoS/resurrection policy.  A
+    // block's logsumexp minus the global logsumexp is exactly the sum of its
+    // normalized softmax probabilities, so this avoids rebuilding scores for
+    // a concatenated cache.
+    at::Tensor global_logsumexp = running_max + at::log(running_sum);
+    streaming_block_weights.reserve(block_logsumexp.size());
+    for (const auto &block_lse : block_logsumexp) {
+      at::Tensor mass = at::exp(block_lse - global_logsumexp);
+      mass = mass.mean(0).mean(0);
+      mass = mass.select(0, mass.size(0) - 1);
+      streaming_block_weights.push_back(mass.item<float>());
+    }
+  } else {
+    k_full = at::cat(keys_list, -2);
+    v_full = at::cat(values_list, -2);
+
+    // Fused FlashAttention / SDPA execution
+    attn_output = at::scaled_dot_product_attention(
+        q, k_full, v_full,
+        /*attn_mask=*/c10::nullopt,
+        /*dropout_p=*/0.0,
+        /*is_causal=*/false,
+        /*scale=*/scale);
+  }
 
   // Eager Bypass: with no memory pressure and nothing compressed yet, skip
   // the QoS/importance/resurrection bookkeeping entirely — full native
@@ -431,7 +541,7 @@ torch::Tensor ArgusCppManager::inplace_paged_attention(
 
   // Compute QoS attention weights and trigger resurrection
   at::Tensor weights;
-  {
+  if (!streaming_attention_) {
     at::NoGradGuard no_grad;
     at::Tensor q_scaled = q * scale;
     at::Tensor scores = at::matmul(q_scaled, k_full.transpose(-1, -2));
@@ -443,16 +553,22 @@ torch::Tensor ArgusCppManager::inplace_paged_attention(
   int idx_start = 0;
   std::vector<std::shared_ptr<Page>> resurrect_list;
   for (size_t i = 0; i < pages_in_order.size(); ++i) {
-    int block_len = keys_list[i].size(-2);
     auto page = pages_in_order[i];
+    int block_len = keys_list[i].defined()
+                        ? keys_list[i].size(-2)
+                        : (page ? page->page_size : 0);
 
     if (!page) {
       idx_start += block_len;
       continue;
     }
 
-    float block_w =
-        weights.slice(0, idx_start, idx_start + block_len).sum().to(torch::kFloat32).item<float>();
+    float block_w = streaming_attention_
+                        ? streaming_block_weights[i]
+                        : weights.slice(0, idx_start, idx_start + block_len)
+                              .sum()
+                              .to(torch::kFloat32)
+                              .item<float>();
     page->attention_sum += block_w;
     if (block_w > 0.0f) {
       page->last_step_accessed = generation_step_;

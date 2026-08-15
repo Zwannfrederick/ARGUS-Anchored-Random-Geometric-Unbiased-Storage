@@ -1,6 +1,7 @@
 import torch
 import argus_cpp_backend
 import weakref
+import threading
 from .quantization import (
     quantize_to_int8,
     dequantize_from_int8,
@@ -423,16 +424,31 @@ class PagedDynamicKVCache:
         # Restore the pluggable eviction-policy hooks into the C++ hot path:
         # which page leaves the active pool, and per-page access bookkeeping
         # (reference bits / heat registers / importance recalculation).
-        if self.eviction_policy is not None:
-            def _select_active_victim(pages):
-                cache = cache_ref()
-                if cache is None:
-                    return 0
-                victim = cache.eviction_policy.select_victim(
-                    list(pages), context={}
-                )
-                return list(pages).index(victim)
-            self._cpp_manager.set_active_pool_victim_selector(_select_active_victim)
+        self._protected_page_id = None
+        # A cache's page lifecycle is mutable and must be linearizable. CUDA
+        # kernels may run asynchronously, but two Python threads cannot safely
+        # select victims / resurrect / split the same page lists concurrently.
+        self._attention_lock = threading.RLock()
+
+        def _select_active_victim(pages):
+            cache = cache_ref()
+            all_pages = list(pages)
+            if cache is None:
+                return 0
+            candidates = [
+                page
+                for page in all_pages
+                if page.page_id != cache._protected_page_id
+            ]
+            if not candidates:
+                candidates = all_pages
+            if cache.eviction_policy is not None:
+                victim = cache.eviction_policy.select_victim(candidates, context={})
+            else:
+                victim = min(candidates, key=lambda page: page.importance_score)
+            return all_pages.index(victim)
+
+        self._cpp_manager.set_active_pool_victim_selector(_select_active_victim)
 
         def _on_page_access(page, block_w, step):
             cache = cache_ref()
@@ -443,6 +459,9 @@ class PagedDynamicKVCache:
             cache._calculate_importance(page)
         self._cpp_manager.set_on_page_access_callback(_on_page_access)
         self._cpp_manager.set_force_qos(getattr(self.config, 'force_qos', False))
+        self._cpp_manager.set_streaming_attention(
+            getattr(self.config, "streaming_attention", False)
+        )
 
 
         for spec in self.tier_specs:
@@ -1052,6 +1071,11 @@ class PagedDynamicKVCache:
         self._invalidate_decompressed_cache()
 
     def push_new_tokens(self, keys: torch.Tensor, values: torch.Tensor, is_anchor: torch.Tensor = None):
+        """Append tokens as one linearizable cache-lifecycle transition."""
+        with self._attention_lock:
+            return self._push_new_tokens_unlocked(keys, values, is_anchor=is_anchor)
+
+    def _push_new_tokens_unlocked(self, keys: torch.Tensor, values: torch.Tensor, is_anchor: torch.Tensor = None):
         """
         Pushes new key and value tensors into the cache. Segments pages automatically,
         while isolating the initial Attention Sinks and VIP anchors.
@@ -1359,7 +1383,11 @@ class PagedDynamicKVCache:
             argus_log("INFO", f"Attention spike detected on archived memory", line_no=702)
 
         # 2. Let C++ manager handle memory lifecycle / eviction for the active pool
-        self._cpp_manager.manage_memory_lifecycle()
+        self._protected_page_id = page.get('page_id')
+        try:
+            self._cpp_manager.manage_memory_lifecycle()
+        finally:
+            self._protected_page_id = None
         self.log_event("resurrect", page.get('page_id'), tier=tier)
 
         # Detect demoted pages from manage_memory_lifecycle
@@ -1719,20 +1747,23 @@ class PagedDynamicKVCache:
 
         resurrection_threshold = getattr(self.config, 'resurrection_threshold', 0.15)
 
-        # Delegate entirely to C++ manager
-        attn_output = self._cpp_manager.inplace_paged_attention(
-            q,
-            scale,
-            sink_k,
-            sink_v,
-            anchor_k,
-            anchor_v,
-            k_buffer,
-            v_buffer,
-            resurrection_threshold
-        )
+        # Delegate entirely to C++ manager. Page/QoS bookkeeping and the
+        # following granularity pass form one state transition, so serialize
+        # them for callers sharing a cache across threads.
+        with self._attention_lock:
+            attn_output = self._cpp_manager.inplace_paged_attention(
+                q,
+                scale,
+                sink_k,
+                sink_v,
+                anchor_k,
+                anchor_v,
+                k_buffer,
+                v_buffer,
+                resurrection_threshold
+            )
 
-        self.manage_variable_granularity()
+            self.manage_variable_granularity()
 
         if orig_device.type == "cpu":
             attn_output = attn_output.cpu()

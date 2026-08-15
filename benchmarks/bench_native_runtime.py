@@ -68,7 +68,13 @@ def environment() -> Dict[str, Any]:
     return env
 
 
-def _cache_for(tier: str, page_size: int, max_pages: int = 64) -> PagedDynamicKVCache:
+def _cache_for(
+    tier: str,
+    page_size: int,
+    max_pages: int = 64,
+    *,
+    streaming_attention: bool = False,
+) -> PagedDynamicKVCache:
     return PagedDynamicKVCache(
         pipeline=PipelineConfig(
             tiers=[TierSpec(name=tier, backend=tier, max_pages=max_pages)],
@@ -76,6 +82,7 @@ def _cache_for(tier: str, page_size: int, max_pages: int = 64) -> PagedDynamicKV
             page_size=page_size,
             sink_tokens=0,
             max_active_pages=1,
+            streaming_attention=streaming_attention,
         )
     )
 
@@ -192,42 +199,51 @@ def bench_attention_scaling(head_dim: int, heads: int, steps: int) -> List[Dict[
         return []
 
     rows = []
-    for page_size in (128, 256, 512):
-        for n_pages in (2, 8, 16):
-            torch.manual_seed(SEED)
-            torch.cuda.empty_cache()
-            torch.cuda.reset_peak_memory_stats()
+    for attention_path, streaming in (
+        ("contiguous_sdpa", False),
+        ("streaming", True),
+    ):
+        for page_size in (128, 256, 512):
+            for n_pages in (2, 8, 16):
+                torch.manual_seed(SEED)
+                torch.cuda.empty_cache()
+                torch.cuda.reset_peak_memory_stats()
 
-            cache = _cache_for("int4", page_size)
-            k = torch.randn(
-                1, heads, page_size, head_dim, dtype=torch.float16, device="cuda"
-            )
-            for _ in range(n_pages):
-                cache.push_new_tokens(torch.randn_like(k), torch.randn_like(k))
+                cache = _cache_for(
+                    "int4", page_size, streaming_attention=streaming
+                )
+                k = torch.randn(
+                    1, heads, page_size, head_dim, dtype=torch.float16, device="cuda"
+                )
+                for _ in range(n_pages):
+                    cache.push_new_tokens(torch.randn_like(k), torch.randn_like(k))
 
-            q = torch.randn(1, heads, 1, head_dim, dtype=torch.float16, device="cuda")
-            cache.inplace_paged_attention(q)
-            _sync()
-
-            t0 = time.perf_counter()
-            for _ in range(steps):
+                q = torch.randn(
+                    1, heads, 1, head_dim, dtype=torch.float16, device="cuda"
+                )
                 cache.inplace_paged_attention(q)
-            _sync()
-            per_step_ms = (time.perf_counter() - t0) / steps * 1000
+                _sync()
 
-            rows.append(
-                {
-                    "metric_class": "runtime",
-                    "context_tokens": page_size * n_pages,
-                    "page_size": page_size,
-                    "pages": n_pages,
-                    "decode_step_ms": round(per_step_ms, 4),
-                    "peak_vram_mib": round(
-                        torch.cuda.max_memory_allocated() / (1024 * 1024), 2
-                    ),
-                }
-            )
-            del cache
+                t0 = time.perf_counter()
+                for _ in range(steps):
+                    cache.inplace_paged_attention(q)
+                _sync()
+                per_step_ms = (time.perf_counter() - t0) / steps * 1000
+
+                rows.append(
+                    {
+                        "metric_class": "runtime",
+                        "attention_path": attention_path,
+                        "context_tokens": page_size * n_pages,
+                        "page_size": page_size,
+                        "pages": n_pages,
+                        "decode_step_ms": round(per_step_ms, 4),
+                        "peak_vram_mib": round(
+                            torch.cuda.max_memory_allocated() / (1024 * 1024), 2
+                        ),
+                    }
+                )
+                del cache
     return rows
 
 
@@ -280,10 +296,14 @@ def main() -> int:
     print("\n-- Decode latency and peak VRAM vs context (runtime) " + "-" * 24)
     scaling = bench_attention_scaling(args.head_dim, args.heads, args.steps)
     results["scaling"] = scaling
-    print(f"  {'ctx tokens':>11s} {'page':>6s} {'pages':>6s} {'ms/step':>9s} {'peak MiB':>9s}")
+    print(
+        f"  {'path':>15s} {'ctx tokens':>11s} {'page':>6s} {'pages':>6s} "
+        f"{'ms/step':>9s} {'peak MiB':>9s}"
+    )
     for row in scaling:
         print(
-            f"  {row['context_tokens']:11d} {row['page_size']:6d} {row['pages']:6d} "
+            f"  {row['attention_path']:>15s} {row['context_tokens']:11d} "
+            f"{row['page_size']:6d} {row['pages']:6d} "
             f"{row['decode_step_ms']:9.4f} {row['peak_vram_mib']:9.2f}"
         )
 

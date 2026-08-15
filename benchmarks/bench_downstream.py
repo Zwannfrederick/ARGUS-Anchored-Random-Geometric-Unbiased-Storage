@@ -36,7 +36,7 @@ import time
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from argus_cache import PagedDynamicQuantizedCache
+from argus_cache import AdaptiveCachePolicy, PagedDynamicQuantizedCache
 
 MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
 
@@ -66,7 +66,14 @@ def _reset_memory():
         torch.cuda.reset_peak_memory_stats()
 
 
-def _make_cache(page_size: int):
+def _make_cache(
+    page_size: int,
+    *,
+    model_config,
+    mode: str,
+    expected_tokens: int,
+    pipeline_profile: str,
+):
     return PagedDynamicQuantizedCache(
         page_size=page_size,
         max_active_pages=2,
@@ -76,6 +83,12 @@ def _make_cache(page_size: int):
         max_int2_pages=2,
         max_one_bit_pages=2,
         sink_tokens=4,
+        model_config=model_config,
+        activation_policy=AdaptiveCachePolicy(
+            mode=mode,
+            expected_tokens=expected_tokens,
+        ),
+        pipeline_profile=pipeline_profile,
     )
 
 
@@ -119,10 +132,27 @@ def measure_latency(model, input_ids, new_tokens: int, cache_factory):
         if torch.cuda.is_available()
         else 0.0
     )
+    cache_state = None
+    if past is not None and hasattr(past, "activation_state"):
+        decision = past.activation_decision
+        cache_state = {
+            "state": past.activation_state,
+            "reason": decision.reason if decision is not None else None,
+            "estimated_exact_mib": (
+                round(decision.exact_bytes / (1024 * 1024), 2)
+                if decision is not None
+                else None
+            ),
+            "estimated_savings_mib": (
+                round(decision.estimated_savings_bytes / (1024 * 1024), 2)
+                if decision is not None
+                else None
+            ),
+        }
     if past is not None and hasattr(past, "reset"):
         past.reset()
     del out, past
-    return ttft, statistics.median(step_times), peak
+    return ttft, statistics.median(step_times), peak, cache_state
 
 
 def tier_occupancy(cache) -> dict:
@@ -179,6 +209,13 @@ def main() -> int:
     parser.add_argument("--warmups", type=int, default=1)
     parser.add_argument("--page-size", type=int, default=256)
     parser.add_argument(
+        "--arms",
+        nargs="+",
+        choices=("baseline", "adaptive", "capacity_fp8", "legacy_argus"),
+        default=("baseline", "adaptive", "capacity_fp8", "legacy_argus"),
+        help="Cache strategies to compare at each context length.",
+    )
+    parser.add_argument(
         "--contexts", type=int, nargs="+", default=[512, 1024, 2048, 4096]
     )
     parser.add_argument("--ppl-tokens", type=int, default=96)
@@ -203,11 +240,6 @@ def main() -> int:
         .eval()
     )
 
-    arms = {
-        "baseline": None,
-        "argus": lambda: _make_cache(args.page_size),
-    }
-
     rows = []
     for ctx in args.contexts:
         base_ids = tokenizer("The history of virtual memory. ", return_tensors="pt")
@@ -215,7 +247,33 @@ def main() -> int:
         reps = (ctx // unit.shape[1]) + 1
         input_ids = unit.repeat(1, reps)[:, :ctx].to(device)
 
-        for arm, factory in arms.items():
+        expected_tokens = ctx + args.new_tokens
+        available_arms = {
+            "baseline": None,
+            "adaptive": lambda: _make_cache(
+                args.page_size,
+                model_config=model.config,
+                mode="balanced",
+                expected_tokens=expected_tokens,
+                pipeline_profile="balanced",
+            ),
+            "capacity_fp8": lambda: _make_cache(
+                args.page_size,
+                model_config=model.config,
+                mode="capacity",
+                expected_tokens=expected_tokens,
+                pipeline_profile="balanced",
+            ),
+            "legacy_argus": lambda: _make_cache(
+                args.page_size,
+                model_config=model.config,
+                mode="capacity",
+                expected_tokens=expected_tokens,
+                pipeline_profile="research",
+            ),
+        }
+        for arm in args.arms:
+            factory = available_arms[arm]
             for _ in range(args.warmups):
                 measure_latency(model, input_ids, args.new_tokens, factory)
             runs = [
@@ -225,6 +283,7 @@ def main() -> int:
             ttfts = [r[0] for r in runs]
             tpots = [r[1] for r in runs]
             peaks = [r[2] for r in runs]
+            cache_states = [r[3] for r in runs if r[3] is not None]
             rows.append({
                 "metric_class": "downstream",
                 "arm": arm,
@@ -238,6 +297,7 @@ def main() -> int:
                 "tpot_s_min": round(min(tpots), 5),
                 "tpot_s_max": round(max(tpots), 5),
                 "peak_vram_mib": round(statistics.median(peaks), 2),
+                "activation": cache_states[-1] if cache_states else None,
             })
             print(
                 f"{arm:8s} ctx={ctx:5d}  ttft {rows[-1]['ttft_s_median']:.4f}s  "
@@ -263,6 +323,8 @@ def main() -> int:
             max_int2_pages=1,
             max_one_bit_pages=1,
             sink_tokens=4,
+            activation_policy=AdaptiveCachePolicy(mode="capacity"),
+            pipeline_profile="research",
         )
         return cache
 

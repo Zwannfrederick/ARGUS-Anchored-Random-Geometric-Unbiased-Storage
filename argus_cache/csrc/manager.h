@@ -284,8 +284,12 @@ public:
     bool force_qos_ = false;
     void set_force_qos(bool v) { force_qos_ = v; }
 
+    // Exact decode prototype: consume one K/V page at a time with an online
+    // softmax recurrence instead of materializing a contiguous full cache.
+    bool streaming_attention_ = false;
+    void set_streaming_attention(bool v) { streaming_attention_ = v; }
+
     // Picks the active-pool victim: defers to the pluggable eviction policy
     // when registered, otherwise falls back to the lowest-importance scan.
     std::shared_ptr<Page> select_active_victim();
 };
-
