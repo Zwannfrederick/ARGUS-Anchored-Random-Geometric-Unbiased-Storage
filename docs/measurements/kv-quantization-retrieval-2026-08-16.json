@@ -1,0 +1,65 @@
+{
+  "captured_at": "2026-08-16T18:44:46+03:00",
+  "status": "passed",
+  "metric_class": "downstream",
+  "purpose": "does llama.cpp KV cache quantization cost long-context retrieval accuracy",
+  "git_commit": "2dd82a6e578a510cfbad53b130195495a99fd587",
+  "git_dirty": true,
+  "model": {
+    "file": "Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
+    "bytes": 22134528992,
+    "architecture": "qwen35moe",
+    "expert_count": 256,
+    "expert_used_count": 8
+  },
+  "hardware": {
+    "gpu": "NVIDIA GeForce RTX 3050 Ti Laptop GPU",
+    "vram_total_mib": 4096,
+    "ram_total_mib": 31869
+  },
+  "runtime": {
+    "binary": "llama-server",
+    "ollama_version": "ollama version is 0.32.11",
+    "context_tokens": 49152,
+    "gpu_layers": 99,
+    "cpu_moe": true,
+    "kv_offload": false,
+    "flash_attention": true,
+    "parallel_slots": 1
+  },
+  "probe": {
+    "kind": "multi-key needle-in-a-haystack",
+    "prompt_tokens": 31062,
+    "needles_planted": 8,
+    "needles_queried": 4,
+    "depths": [
+      0.08,
+      0.35,
+      0.62,
+      0.91
+    ],
+    "scoring": "project name must be followed by its own code within 12 chars",
+    "temperature": 0
+  },
+  "results": [
+    {
+      "kv_type": "f16",
+      "score": 4,
+      "out_of": 4
+    },
+    {
+      "kv_type": "q8_0",
+      "score": 4,
+      "out_of": 4
+    },
+    {
+      "kv_type": "q4_0",
+      "score": 4,
+      "out_of": 4
+    }
+  ],
+  "interpretation": {
+    "establishes": "q4_0 KV quantization cost no measurable retrieval accuracy at 31k prompt tokens against 8 confusable distractors; all three widths produced byte-identical answers.",
+    "does_not_establish": "General output quality. Retrieving a literal string already in context is comparatively forgiving of quantization; this says nothing about reasoning, code generation, or long-range coherence. The probe also ran at 31k, well under the 131072 window shipped, and identical outputs across all three widths suggest the task still does not reach the model's margin."
+  }
+}

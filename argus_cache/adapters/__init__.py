@@ -33,6 +33,9 @@ __all__ = [
     "RuntimeKind",
     "OllamaAdapter",
     "VLLMAdapter",
+    "ClaudeGatewayHandler",
+    "create_gateway_server",
+    "MessageFormatAdapter",
     "get_adapter",
     "list_adapters",
 ]
@@ -41,6 +44,12 @@ __all__ = [
 _ADAPTERS: Dict[str, str] = {
     "ollama": "argus_cache.adapters.ollama:OllamaAdapter",
     "vllm": "argus_cache.adapters.vllm:VLLMAdapter",
+}
+
+_GATEWAY_EXPORTS: Dict[str, str] = {
+    "ClaudeGatewayHandler": "argus_cache.adapters.claude_gateway:ClaudeGatewayHandler",
+    "create_gateway_server": "argus_cache.adapters.claude_gateway:create_gateway_server",
+    "MessageFormatAdapter": "argus_cache.adapters.claude_gateway:MessageFormatAdapter",
 }
 
 
@@ -70,4 +79,9 @@ def __getattr__(name: str) -> Any:
         return get_adapter("ollama")
     if name == "VLLMAdapter":
         return get_adapter("vllm")
+    if name in _GATEWAY_EXPORTS:
+        target = _GATEWAY_EXPORTS[name]
+        module_path, _, class_name = target.partition(":")
+        module = __import__(module_path, fromlist=[class_name])
+        return getattr(module, class_name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

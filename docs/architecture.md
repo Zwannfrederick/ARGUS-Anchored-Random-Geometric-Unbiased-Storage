@@ -45,6 +45,17 @@ was moved only after characterization tests pinned its existing behavior.
 | `pool_allocator.py` | per-tier compressed page pools, shaped from capabilities | 131 |
 | `outliers.py` | outlier isolation and restoration | 85 |
 
+Three modules added in 0.4.0 form a second, still-unwired data path:
+
+| module | responsibility | lines |
+|---|---|---:|
+| `page_table.py` | SoA descriptor table; precision separated from placement | 207 |
+| `backend_pool.py` | contiguous fixed-size block pool for quantized pages | 103 |
+| `direct_attention.py` | exact online-softmax straight over the table and pools | 158 |
+
+They are measured in isolation (§5.6) and are **not** on the HuggingFace decode
+path yet, so no end-to-end number in this document comes from them.
+
 The split target was five separated responsibilities, not a line count;
 `memory_manager.py` landed at 1785 rather than the 1400–1600 originally
 estimated, because attention assembly and the cascade policy genuinely belong
@@ -447,6 +458,48 @@ off by default, and this is why:
 
 Stream insertion on the demotion path is not free; leaving it always-on cost
 over a tenth of decode time.
+
+### 5.6 Direct paged attention, in isolation
+
+`DirectPagedAttentionEngine` benchmarked alone on the RTX 3050 Ti Laptop, with
+Qwen-like geometry (24 query heads, 4 KV heads, head_dim 256, page 128). Latency
+is the median single-token step; VRAM is live cache residency.
+
+| context | ACTIVE_FP16 | GGML_Q8_0 | GGML_Q4_0 |
+|---:|---|---|---|
+| 1,024 | 1.98 ms / 12.15 MiB | 3.15 ms / 10.28 MiB | 4.24 ms / 9.28 MiB |
+| 4,096 | 7.51 ms / 24.15 MiB | 11.43 ms / 16.65 MiB | 15.86 ms / 12.65 MiB |
+| 8,192 | 14.71 ms / 40.15 MiB | 22.55 ms / 25.15 MiB | 31.61 ms / 17.15 MiB |
+| 16,384 | 29.26 ms / 72.15 MiB | 44.97 ms / 44.15 MiB | 62.77 ms / 26.15 MiB |
+| 32,768 | 58.48 ms / 136.16 MiB | 90.15 ms / 76.16 MiB | 125.25 ms / 44.16 MiB |
+
+At 32K, q4_0 costs 2.14x the latency of FP16 and holds the context in 3.1x less
+memory. The ratios are stable across the sweep, so the engine's overhead is
+proportional to page count rather than growing with it.
+
+Metric class: **runtime**. This is not an end-to-end serving result and must not
+be quoted as one.
+Artifact: `docs/measurements/v040-fused-attention-benchmark.json`.
+
+### 5.7 llama.cpp A/B — a negative result
+
+An A/B sweep at 4K/16K/32K/64K against a local llama-server (Qwen3.6-35B-A3B,
+q4_0 KV) was intended to compare an ARGUS-backed cache with a vanilla one. The
+audit block recorded in the artifact shows ARGUS was never loaded into the
+process: `argus_in_llama_server_maps: false`, `argus_maps_count: 0`. Peak VRAM
+is byte-identical between the arms at every context (3594 / 3596 / 3598 MiB),
+confirming both arms were the same server.
+
+The decode-rate gap observed (17.66 vs 11.88 tok/s at 16K) is explained by the
+gateway's prompt-prefix cache — TTFT 99.88 ms against a full prompt reprocess —
+and is **not** an ARGUS effect. No claim is drawn from this run.
+
+ARGUS has no llama.cpp integration. The neighbouring sweeps
+(`load-mode-comparison`, `pmin-sweep`, `speculative-sweep-n2-n3-n4`) measure
+llama.cpp runtime tuning, not ARGUS.
+Artifact: `docs/measurements/argus-ab-cache-comparison-2026-09-04.json`.
+
+---
 
 ## 6. Correctness fixes found during the refactor
 

@@ -1,0 +1,195 @@
+{
+  "timestamp": "2026-08-15 21:32:29",
+  "hardware": {
+    "device": "NVIDIA GeForce RTX 3050 Ti Laptop GPU",
+    "cuda_available": true
+  },
+  "model_geometry": {
+    "q_heads": 24,
+    "kv_heads": 4,
+    "head_dim": 256,
+    "page_size": 128
+  },
+  "benchmarks": [
+    {
+      "codec": "ACTIVE_FP16",
+      "context_tokens": 1024,
+      "num_pages": 8,
+      "latency_median_ms": 1.9815,
+      "latency_p95_ms": 2.2145,
+      "latency_min_ms": 1.9192,
+      "latency_max_ms": 2.2948,
+      "throughput_tps": 504.66,
+      "live_vram_mib": 12.15,
+      "peak_vram_mib": 18.71
+    },
+    {
+      "codec": "GGML_Q8_0",
+      "context_tokens": 1024,
+      "num_pages": 8,
+      "latency_median_ms": 3.1505,
+      "latency_p95_ms": 3.4093,
+      "latency_min_ms": 2.9044,
+      "latency_max_ms": 3.4239,
+      "throughput_tps": 317.41,
+      "live_vram_mib": 10.28,
+      "peak_vram_mib": 18.1
+    },
+    {
+      "codec": "GGML_Q4_0",
+      "context_tokens": 1024,
+      "num_pages": 8,
+      "latency_median_ms": 4.2362,
+      "latency_p95_ms": 4.8602,
+      "latency_min_ms": 4.0512,
+      "latency_max_ms": 5.6991,
+      "throughput_tps": 236.06,
+      "live_vram_mib": 9.28,
+      "peak_vram_mib": 16.92
+    },
+    {
+      "codec": "ACTIVE_FP16",
+      "context_tokens": 4096,
+      "num_pages": 32,
+      "latency_median_ms": 7.5054,
+      "latency_p95_ms": 8.5329,
+      "latency_min_ms": 7.3111,
+      "latency_max_ms": 9.4194,
+      "throughput_tps": 133.24,
+      "live_vram_mib": 24.15,
+      "peak_vram_mib": 30.71
+    },
+    {
+      "codec": "GGML_Q8_0",
+      "context_tokens": 4096,
+      "num_pages": 32,
+      "latency_median_ms": 11.4345,
+      "latency_p95_ms": 12.2082,
+      "latency_min_ms": 11.1355,
+      "latency_max_ms": 12.6572,
+      "throughput_tps": 87.45,
+      "live_vram_mib": 16.65,
+      "peak_vram_mib": 23.73
+    },
+    {
+      "codec": "GGML_Q4_0",
+      "context_tokens": 4096,
+      "num_pages": 32,
+      "latency_median_ms": 15.8583,
+      "latency_p95_ms": 16.7424,
+      "latency_min_ms": 15.3761,
+      "latency_max_ms": 16.785,
+      "throughput_tps": 63.06,
+      "live_vram_mib": 12.65,
+      "peak_vram_mib": 20.29
+    },
+    {
+      "codec": "ACTIVE_FP16",
+      "context_tokens": 8192,
+      "num_pages": 64,
+      "latency_median_ms": 14.7068,
+      "latency_p95_ms": 15.7509,
+      "latency_min_ms": 14.291,
+      "latency_max_ms": 18.1528,
+      "throughput_tps": 68.0,
+      "live_vram_mib": 40.15,
+      "peak_vram_mib": 46.71
+    },
+    {
+      "codec": "GGML_Q8_0",
+      "context_tokens": 8192,
+      "num_pages": 64,
+      "latency_median_ms": 22.5538,
+      "latency_p95_ms": 23.6565,
+      "latency_min_ms": 22.0605,
+      "latency_max_ms": 24.5704,
+      "throughput_tps": 44.34,
+      "live_vram_mib": 25.15,
+      "peak_vram_mib": 32.23
+    },
+    {
+      "codec": "GGML_Q4_0",
+      "context_tokens": 8192,
+      "num_pages": 64,
+      "latency_median_ms": 31.614,
+      "latency_p95_ms": 32.7808,
+      "latency_min_ms": 31.1746,
+      "latency_max_ms": 33.3082,
+      "throughput_tps": 31.63,
+      "live_vram_mib": 17.15,
+      "peak_vram_mib": 24.79
+    },
+    {
+      "codec": "ACTIVE_FP16",
+      "context_tokens": 16384,
+      "num_pages": 128,
+      "latency_median_ms": 29.2569,
+      "latency_p95_ms": 30.6263,
+      "latency_min_ms": 28.3706,
+      "latency_max_ms": 30.864,
+      "throughput_tps": 34.18,
+      "live_vram_mib": 72.15,
+      "peak_vram_mib": 78.72
+    },
+    {
+      "codec": "GGML_Q8_0",
+      "context_tokens": 16384,
+      "num_pages": 128,
+      "latency_median_ms": 44.9746,
+      "latency_p95_ms": 46.8496,
+      "latency_min_ms": 44.6443,
+      "latency_max_ms": 46.9389,
+      "throughput_tps": 22.23,
+      "live_vram_mib": 44.15,
+      "peak_vram_mib": 51.23
+    },
+    {
+      "codec": "GGML_Q4_0",
+      "context_tokens": 16384,
+      "num_pages": 128,
+      "latency_median_ms": 62.7736,
+      "latency_p95_ms": 64.3505,
+      "latency_min_ms": 61.1506,
+      "latency_max_ms": 67.101,
+      "throughput_tps": 15.93,
+      "live_vram_mib": 26.15,
+      "peak_vram_mib": 33.79
+    },
+    {
+      "codec": "ACTIVE_FP16",
+      "context_tokens": 32768,
+      "num_pages": 256,
+      "latency_median_ms": 58.4814,
+      "latency_p95_ms": 60.2026,
+      "latency_min_ms": 56.9116,
+      "latency_max_ms": 61.1919,
+      "throughput_tps": 17.1,
+      "live_vram_mib": 136.16,
+      "peak_vram_mib": 142.72
+    },
+    {
+      "codec": "GGML_Q8_0",
+      "context_tokens": 32768,
+      "num_pages": 256,
+      "latency_median_ms": 90.1529,
+      "latency_p95_ms": 124.6933,
+      "latency_min_ms": 89.2289,
+      "latency_max_ms": 125.3913,
+      "throughput_tps": 11.09,
+      "live_vram_mib": 76.16,
+      "peak_vram_mib": 83.24
+    },
+    {
+      "codec": "GGML_Q4_0",
+      "context_tokens": 32768,
+      "num_pages": 256,
+      "latency_median_ms": 125.2468,
+      "latency_p95_ms": 140.7923,
+      "latency_min_ms": 121.863,
+      "latency_max_ms": 173.7755,
+      "throughput_tps": 7.98,
+      "live_vram_mib": 44.16,
+      "peak_vram_mib": 51.8
+    }
+  ]
+}

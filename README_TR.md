@@ -99,6 +99,67 @@ Sıkıştırma katmanları eklentidir. Önbellek yöneticisi katman adlarına g�
 hardcode edilmiş dallar yerine yetenek ve sayısal codec metadatası kullanır.
 Ayrıntılar: [`docs/architecture.md`](docs/architecture.md).
 
+## Doğrudan sayfalı attention
+
+0.4.0 ile geldi. Structure-of-Arrays sayfa tablosu (`core/page_table.py`)
+*hassasiyeti* (`ACTIVE_FP16`, `GGML_Q8_0`, `GGML_Q4_0`) *yerleşimden*
+(`GPU_DEVICE`, `HOST_PINNED`, `HOST_PAGEABLE`) ayırıp tek bir bitişik
+tanımlayıcı tablosunda tutuyor; böylece decode sıcak yolu Python nesneleri
+yerine bir dizi üzerinde yürüyor. Aynı codec'e ait sayfalar sayfa başına değil,
+bitişik bir blok havuzundan tahsis ediliyor. `DirectPagedAttentionEngine` ise
+bu yapıların üzerinde doğrudan, karo karo online-softmax özyinelemesi
+çalıştırıyor: bağlam boyutunda bir FP16 KV tensörü hiç oluşturulmuyor, yeniden
+kurulum tek bir sayfa karosuyla sınırlı kalıyor.
+
+RTX 3050 Ti Laptop üzerinde, Qwen benzeri geometriyle (24 sorgu başlığı,
+4 KV başlığı, head_dim 256, sayfa 128) yalıtılmış ölçüm:
+
+| bağlam | ACTIVE_FP16 | GGML_Q8_0 | GGML_Q4_0 |
+|---:|---|---|---|
+| 1.024 | 1,98 ms / 12,15 MiB | 3,15 ms / 10,28 MiB | 4,24 ms / 9,28 MiB |
+| 4.096 | 7,51 ms / 24,15 MiB | 11,43 ms / 16,65 MiB | 15,86 ms / 12,65 MiB |
+| 8.192 | 14,71 ms / 40,15 MiB | 22,55 ms / 25,15 MiB | 31,61 ms / 17,15 MiB |
+| 16.384 | 29,26 ms / 72,15 MiB | 44,97 ms / 44,15 MiB | 62,77 ms / 26,15 MiB |
+| 32.768 | 58,48 ms / 136,16 MiB | 90,15 ms / 76,16 MiB | 125,25 ms / 44,16 MiB |
+
+Takas monoton ve dik. 32K'da q4_0 bağlamı 44,16 MiB'de tutuyor, FP16 ise
+136,16 MiB'de — 3,1 kat az bellek, 2,14 kat gecikme. Bu **runtime** sınıfı bir
+ölçüm; uçtan uca servis sonucu değil. Gecikme sütunu, ARGUS'un neden hâlâ bir
+servis hızlandırıcısı olmadığının cevabıdır.
+
+Kanıt: [`docs/measurements/v040-fused-attention-benchmark.json`](docs/measurements/v040-fused-attention-benchmark.json).
+
+## Hibrit mimariler
+
+`models/hybrid_cache.py`, tam ve doğrusal attention'ı karıştıran modellerde
+(örneğin Qwen3.8 Gated DeltaNet) sahipliği açıkça beyan eder. Tam attention
+katmanlarının büyüyen KV önbelleği ARGUS'undur; doğrusal attention
+katmanlarının sabit boyutlu recurrent ve conv state'i ARGUS'un dokunacağı şey
+değildir. Bu sınırın korunduğu, her önbellek işleminin etrafında deterministik
+state özetleriyle kanıtlanır; desteklenmeyen bir katman rolü sayfalanmak yerine
+güvenli biçimde reddedilir.
+
+## Denenip olmayan şey
+
+Yerel bir llama-server'a karşı (Qwen3.6-35B-A3B, q4_0 KV) 4K/16K/32K/64K'da bir
+A/B taraması yapıldı; amaç ARGUS destekli önbelleği vanilla olanla
+karşılaştırmaktı. **Kanıt dosyasındaki denetim, ARGUS'un sürece hiç
+yüklenmediğini gösteriyor:** `argus_in_llama_server_maps: false`,
+`argus_maps_count: 0`. Her bağlamda iki kolun tepe VRAM'i bayt bayt aynı
+(3594 / 3596 / 3598 MiB) — yani iki kol da aynı llama-server'dı.
+
+Ortaya çıkan decode farkı (16K'da 17,66'ya karşı 11,88 tok/s) ARGUS'tan değil,
+gateway'in prompt önek önbelleğinden geliyor: vanilla kol tüm prompt'u yeniden
+işlerken TTFT 99,88 ms'ye düşüyor. Bu koşudan hiçbir ARGUS iddiası
+çıkarılmıyor. Depoda durmasının sebebi şu: yanlış atfedilmiş bir kazanç, tam da
+sorgulanmadan hayatta kalan sonuç türüdür.
+
+ARGUS'un **llama.cpp entegrasyonu yoktur**. Yanında yayımlanan taramalar
+(`load-mode-comparison`, `pmin-sweep`, `speculative-sweep-n2-n3-n4`) llama.cpp
+runtime ayarıdır ve öyle etiketlenmiştir.
+
+Kanıt: [`docs/measurements/argus-ab-cache-comparison-2026-09-04.json`](docs/measurements/argus-ab-cache-comparison-2026-09-04.json).
+
 ## Çalışma zamanı durumu
 
 | çalışma zamanı | durum | ARGUS neyi yönetiyor? |
@@ -106,6 +167,7 @@ Ayrıntılar: [`docs/architecture.md`](docs/architecture.md).
 | HuggingFace Transformers | Ölçülmüş araştırma yolu | Modelin KV önbelleğini |
 | Ollama | Canlı test edilmiş dış adaptör | Ollama içini değil; yalnızca ayar ve süreleri |
 | vLLM | Kullanılamıyor, güvenli biçimde reddediyor | Hiçbir şeyi |
+| llama.cpp | Entegre değil, denetimle doğrulandı | Hiçbir şeyi; "Denenip olmayan şey" bölümüne bakın |
 | SGLang | Uygulanmadı | Hiçbir şeyi |
 
 Eski vLLM entegrasyonu vLLM'in KV bloklarına sahip değildi ve onları
@@ -115,8 +177,26 @@ entegrasyon KV connector ve/veya özel attention backend üzerinden kurulmalıd�
 
 ## Kurulum
 
-Bu çalışma ağacındaki stabilizasyon değişiklikleri yayımlanmadı. Kaynak koddan
-kurun:
+```bash
+pip install torch                                        # önce kurulu olmalı
+pip install --no-build-isolation argus-cache             # çekirdek çalışma zamanı
+pip install --no-build-isolation "argus-cache[gateway]"  # + Anthropic gateway
+```
+
+ARGUS kaynak dağıtımı olarak yayımlanır: native CUDA eklentisi kurulum anında
+sizin makinenizde derlenir. Bu yüzden CUDA uyumlu bir PyTorch kurulumu, CUDA
+araç zinciri ve C++17 destekli bir derleyici önceden hazır olmalıdır. Hazır
+wheel yoktur — tek bir PyTorch ABI ve CUDA sürümüne göre derlenmiş bir ikili,
+kurulumların çoğunda yanlış olurdu.
+
+`--no-build-isolation` isteğe bağlı değil, zorunludur. Derleme, CUDA eklentisini
+yapılandırmak için kurulu `torch`'unuzu okur; pip'in varsayılan izole derlemesi
+onu gizler ve `ModuleNotFoundError: No module named 'torch'` ile başarısız olur.
+pip'in geçici bir ortama indirdiği bir torch'a karşı derlemek ise başarısız
+olmaktan daha kötü olurdu: eklenti, çalışma zamanınızda bulunmayan bir ABI için
+derlenmiş olurdu.
+
+ARGUS'un kendisi üzerinde çalışmak için depodan kurun:
 
 ```bash
 python -m venv .venv
@@ -125,9 +205,6 @@ pip install -U pip
 pip install -e .
 python setup.py build_ext --inplace
 ```
-
-Native eklenti için CUDA uyumlu PyTorch ve çalışan bir derleyici zinciri
-gerekir.
 
 ## HuggingFace örneği
 
@@ -193,6 +270,13 @@ python benchmarks/bench_downstream.py \
 - OOM üstünlüğü, baseline'ın gerçekten cihaz belleğini aştığı daha büyük model
   veya daha uzun bağlam deneyi gerektiriyor.
 - Predictive paging deneysel ve varsayılan olarak kapalıdır.
+- `DirectPagedAttentionEngine` yalnızca yalıtılmış olarak ölçüldü. HuggingFace
+  decode yoluna bağlanmadı; dolayısıyla sayıları henüz hiçbir uçtan uca
+  sonuçta görünmüyor.
+- llama.cpp entegrasyonu yoktur; tek deneme yukarıda negatif sonuç olarak
+  yayımlanmıştır.
+- q4_0 retrieval probu 31k token'da tek ve bağışlayıcı bir görevdir. Kuantize
+  KV altında akıl yürütme, kod üretimi ve uzun menzilli tutarlılık ölçülmedi.
 
 Bir sonraki anlamlı hedef yeni bir teorik sıkıştırma oranı değil; kanıtlanan
 VRAM eğrisini koruyup TPOT'u baseline'a yeterince yaklaştıran sayfalı attention

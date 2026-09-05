@@ -3,9 +3,9 @@ from torch.utils.cpp_extension import BuildExtension, CUDAExtension
 
 setup(
     name="argus_cache",
-    version="0.3.0",
+    version="0.4.0",
     author="Muhammed Emin Çelik",
-    description="ARGUS: Anchored Random Geometric Unbiased Storage - Advanced Dynamic Quantized KV Cache",
+    description="Heterogeneous KV-cache memory management: paged transformer KV storage across FP16/FP8/INT8/INT4/INT2/1-bit tiers and CPU spill",
     long_description=open("README.md").read() if open("README.md") else "",
     long_description_content_type="text/markdown",
     license="Apache-2.0",
@@ -45,8 +45,10 @@ setup(
         "torch>=2.0.0",
         "triton>=2.0.0",
         "transformers>=4.38.0",
-        "matplotlib",
-        "pytest"
     ],
+    extras_require={
+        "gateway": ["httpx"],
+        "dev": ["pytest", "matplotlib", "httpx"],
+    },
     python_requires=">=3.8",
 )

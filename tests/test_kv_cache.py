@@ -232,9 +232,40 @@ def test_cache_transitions():
     # Verify close values (within floating point tolerances)
     diff = torch.mean(torch.abs(standard_attn_out - inplace_attn_out)).item()
     print(f"Difference between standard and inplace attention: {diff:.6f}")
-    assert diff < 1e-3, "Attention output mismatch!"
-    print("inplace_paged_attention check passed!")
+    # 13. Test compute_fused_paged_attention
+    all_k, all_v = cache.get_all_keys_values()
+    attn_weights = torch.matmul(q, all_k.transpose(-1, -2)) / 4.0
+    attn_probs = torch.softmax(attn_weights, dim=-1)
+    standard_attn_out = torch.matmul(attn_probs, all_v)
+    fused_attn_out = cache.compute_fused_paged_attention(q)
+    assert fused_attn_out.shape == standard_attn_out.shape
+    fused_diff = torch.mean(torch.abs(standard_attn_out - fused_attn_out.to(standard_attn_out.device))).item()
+    assert fused_diff < 1e-3, f"Fused attention mismatch: {fused_diff}"
+    print("compute_fused_paged_attention check passed!")
+
+
+def test_cache_snapshot_and_restore():
+    """Verify that PagedDynamicKVCache snapshot and restore rewinds sequence length accurately."""
+    cache = PagedDynamicKVCache(page_size=32)
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    k1 = torch.randn(1, 2, 10, 64, device=device, dtype=torch.float16)
+    v1 = torch.randn(1, 2, 10, 64, device=device, dtype=torch.float16)
+    cache.push_new_tokens(k1, v1)
+    assert cache.get_seq_length() == 10
+
+    snap = cache.snapshot()
+
+    k2 = torch.randn(1, 2, 15, 64, device=device, dtype=torch.float16)
+    v2 = torch.randn(1, 2, 15, 64, device=device, dtype=torch.float16)
+    cache.push_new_tokens(k2, v2)
+    assert cache.get_seq_length() == 25
+
+    cache.restore(snap)
+    assert cache.get_seq_length() == 10
+
 
 if __name__ == "__main__":
     test_cache_transitions()
+    test_cache_snapshot_and_restore()
     print("All 7-Tier KV Cache tests successfully passed!")
+

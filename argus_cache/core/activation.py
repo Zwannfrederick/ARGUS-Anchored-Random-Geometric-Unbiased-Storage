@@ -108,6 +108,8 @@ class AdaptiveCachePolicy:
     min_savings_bytes: int = 64 * 1024 * 1024
     activate_ratio: float = 0.90
     deactivate_ratio: float = 0.75
+    non_kv_reserve_bytes: int = 0
+    workspace_reserve_bytes: int = 0
 
     def __post_init__(self):
         if self.mode not in ("latency", "balanced", "capacity"):
@@ -116,6 +118,8 @@ class AdaptiveCachePolicy:
             raise ValueError("expected_tokens must be positive when provided")
         if self.min_savings_bytes < 0:
             raise ValueError("min_savings_bytes must be non-negative")
+        if self.non_kv_reserve_bytes < 0 or self.workspace_reserve_bytes < 0:
+            raise ValueError("reserve bytes must be non-negative")
         if not 0.0 <= self.deactivate_ratio < self.activate_ratio <= 1.0:
             raise ValueError(
                 "deactivate_ratio must be lower than activate_ratio and both must be in [0, 1]"
@@ -151,7 +155,7 @@ class AdaptiveCachePolicy:
         if memory is None:
             return ActivationDecision(False, "memory-unavailable", exact_bytes, savings, None)
 
-        allocated = memory.total_bytes - memory.free_bytes
+        allocated = (memory.total_bytes - memory.free_bytes) + self.non_kv_reserve_bytes + self.workspace_reserve_bytes
         projected = min(1.0, (allocated + exact_bytes) / memory.total_bytes)
         if was_active:
             activate = projected > self.deactivate_ratio

@@ -1,0 +1,297 @@
+{
+  "timestamp": "2026-09-04 20:21:25",
+  "hardware": "NVIDIA GeForce RTX 3050 Ti Laptop GPU (4 GB VRAM) + Intel Core i5-11300H + 32 GB RAM",
+  "model": "Qwen3.6-35B-A3B-UD-Q4_K_M-MTP.gguf",
+  "commit": "d222767c7",
+  "fixed_config": {
+    "spec_draft_n_max": 2,
+    "spec_type": "draft-mtp,ngram-mod",
+    "load_mode": "none",
+    "flash_attn": "on",
+    "kv_cache_type": "q4_0",
+    "num_ctx": 65536,
+    "seed": 42,
+    "temperature": 0.2
+  },
+  "prompt": "Python ile LRU Cache (En Son Kullan\u0131lan \u00d6nbellek) veri yap\u0131s\u0131n\u0131 O(1) get ve put karma\u015f\u0131kl\u0131\u011f\u0131yla OrderedDict kullanmadan, \u00e7ift y\u00f6nl\u00fc ba\u011fl\u0131 liste (doubly linked list) ve hash table ile s\u0131f\u0131rdan implement et. Kod temiz ve type-hintli olsun.",
+  "max_tokens": 512,
+  "runs_per_val": 3,
+  "sweep": {
+    "p_0.00": {
+      "spec_draft_p_min": 0.0,
+      "boot_duration_seconds": 89.7,
+      "median_tokens_per_second": 19.8,
+      "min_tokens_per_second": 17.31,
+      "max_tokens_per_second": 22.96,
+      "median_acceptance_pct": 76.68,
+      "mean_accepted_tokens": 368.3,
+      "median_prompt_ms": 257.0,
+      "raw_runs": [
+        {
+          "run": 1,
+          "tokens_per_second": 22.96,
+          "predicted_tokens": 512,
+          "predicted_ms": 22253.1,
+          "prompt_ms": 181.0,
+          "prompt_tps": 22.09,
+          "draft_n": 410,
+          "draft_accepted": 363,
+          "acceptance_rate_pct": 88.54,
+          "gpu_temp_c": 58.0,
+          "gpu_power_w": 22.51,
+          "cpu_avg_mhz": 3071.3
+        },
+        {
+          "run": 2,
+          "tokens_per_second": 19.8,
+          "predicted_tokens": 512,
+          "predicted_ms": 25810.0,
+          "prompt_ms": 267.1,
+          "prompt_tps": 14.98,
+          "draft_n": 476,
+          "draft_accepted": 365,
+          "acceptance_rate_pct": 76.68,
+          "gpu_temp_c": 60.0,
+          "gpu_power_w": 22.19,
+          "cpu_avg_mhz": 3100.0
+        },
+        {
+          "run": 3,
+          "tokens_per_second": 17.31,
+          "predicted_tokens": 512,
+          "predicted_ms": 29522.3,
+          "prompt_ms": 257.0,
+          "prompt_tps": 15.56,
+          "draft_n": 510,
+          "draft_accepted": 377,
+          "acceptance_rate_pct": 73.92,
+          "gpu_temp_c": 61.0,
+          "gpu_power_w": 22.98,
+          "cpu_avg_mhz": 3100.0
+        }
+      ]
+    },
+    "p_0.50": {
+      "spec_draft_p_min": 0.5,
+      "boot_duration_seconds": 73.9,
+      "median_tokens_per_second": 17.63,
+      "min_tokens_per_second": 12.44,
+      "max_tokens_per_second": 22.37,
+      "median_acceptance_pct": 85.95,
+      "mean_accepted_tokens": 426,
+      "median_prompt_ms": 226.9,
+      "raw_runs": [
+        {
+          "run": 1,
+          "tokens_per_second": 22.37,
+          "predicted_tokens": 512,
+          "predicted_ms": 22844.1,
+          "prompt_ms": 218.4,
+          "prompt_tps": 18.32,
+          "draft_n": 384,
+          "draft_accepted": 357,
+          "acceptance_rate_pct": 92.97,
+          "gpu_temp_c": 60.0,
+          "gpu_power_w": 22.57,
+          "cpu_avg_mhz": 2761.0
+        },
+        {
+          "run": 2,
+          "tokens_per_second": 12.44,
+          "predicted_tokens": 512,
+          "predicted_ms": 41061.1,
+          "prompt_ms": 265.4,
+          "prompt_tps": 15.07,
+          "draft_n": 675,
+          "draft_accepted": 444,
+          "acceptance_rate_pct": 65.78,
+          "gpu_temp_c": 62.0,
+          "gpu_power_w": 21.75,
+          "cpu_avg_mhz": 3100.0
+        },
+        {
+          "run": 3,
+          "tokens_per_second": 17.63,
+          "predicted_tokens": 512,
+          "predicted_ms": 28985.5,
+          "prompt_ms": 226.9,
+          "prompt_tps": 17.63,
+          "draft_n": 555,
+          "draft_accepted": 477,
+          "acceptance_rate_pct": 85.95,
+          "gpu_temp_c": 65.0,
+          "gpu_power_w": 30.35,
+          "cpu_avg_mhz": 3100.0
+        }
+      ]
+    },
+    "p_0.65": {
+      "spec_draft_p_min": 0.65,
+      "boot_duration_seconds": 75.6,
+      "median_tokens_per_second": 13.45,
+      "min_tokens_per_second": 13.09,
+      "max_tokens_per_second": 16.59,
+      "median_acceptance_pct": 63.58,
+      "mean_accepted_tokens": 363.3,
+      "median_prompt_ms": 212.1,
+      "raw_runs": [
+        {
+          "run": 1,
+          "tokens_per_second": 16.59,
+          "predicted_tokens": 512,
+          "predicted_ms": 30804.0,
+          "prompt_ms": 514.4,
+          "prompt_tps": 7.78,
+          "draft_n": 384,
+          "draft_accepted": 338,
+          "acceptance_rate_pct": 88.02,
+          "gpu_temp_c": 62.0,
+          "gpu_power_w": 22.32,
+          "cpu_avg_mhz": 3098.6
+        },
+        {
+          "run": 2,
+          "tokens_per_second": 13.45,
+          "predicted_tokens": 512,
+          "predicted_ms": 37995.7,
+          "prompt_ms": 190.6,
+          "prompt_tps": 20.98,
+          "draft_n": 604,
+          "draft_accepted": 384,
+          "acceptance_rate_pct": 63.58,
+          "gpu_temp_c": 63.0,
+          "gpu_power_w": 23.26,
+          "cpu_avg_mhz": 3098.8
+        },
+        {
+          "run": 3,
+          "tokens_per_second": 13.09,
+          "predicted_tokens": 512,
+          "predicted_ms": 39033.2,
+          "prompt_ms": 212.1,
+          "prompt_tps": 18.86,
+          "draft_n": 630,
+          "draft_accepted": 368,
+          "acceptance_rate_pct": 58.41,
+          "gpu_temp_c": 64.0,
+          "gpu_power_w": 23.37,
+          "cpu_avg_mhz": 3100.7
+        }
+      ]
+    },
+    "p_0.75": {
+      "spec_draft_p_min": 0.75,
+      "boot_duration_seconds": 68.5,
+      "median_tokens_per_second": 18.66,
+      "min_tokens_per_second": 18.16,
+      "max_tokens_per_second": 21.48,
+      "median_acceptance_pct": 92.39,
+      "mean_accepted_tokens": 349.3,
+      "median_prompt_ms": 222.7,
+      "raw_runs": [
+        {
+          "run": 1,
+          "tokens_per_second": 21.48,
+          "predicted_tokens": 512,
+          "predicted_ms": 23794.9,
+          "prompt_ms": 608.2,
+          "prompt_tps": 6.58,
+          "draft_n": 349,
+          "draft_accepted": 332,
+          "acceptance_rate_pct": 95.13,
+          "gpu_temp_c": 61.0,
+          "gpu_power_w": 23.51,
+          "cpu_avg_mhz": 3050.4
+        },
+        {
+          "run": 2,
+          "tokens_per_second": 18.66,
+          "predicted_tokens": 512,
+          "predicted_ms": 27390.7,
+          "prompt_ms": 222.7,
+          "prompt_tps": 17.96,
+          "draft_n": 368,
+          "draft_accepted": 340,
+          "acceptance_rate_pct": 92.39,
+          "gpu_temp_c": 63.0,
+          "gpu_power_w": 23.94,
+          "cpu_avg_mhz": 3100.0
+        },
+        {
+          "run": 3,
+          "tokens_per_second": 18.16,
+          "predicted_tokens": 512,
+          "predicted_ms": 28138.4,
+          "prompt_ms": 213.0,
+          "prompt_tps": 18.78,
+          "draft_n": 432,
+          "draft_accepted": 376,
+          "acceptance_rate_pct": 87.04,
+          "gpu_temp_c": 64.0,
+          "gpu_power_w": 23.55,
+          "cpu_avg_mhz": 3100.9
+        }
+      ]
+    },
+    "p_0.85": {
+      "spec_draft_p_min": 0.85,
+      "boot_duration_seconds": 67.3,
+      "median_tokens_per_second": 14.15,
+      "min_tokens_per_second": 14.13,
+      "max_tokens_per_second": 18.76,
+      "median_acceptance_pct": 70.97,
+      "mean_accepted_tokens": 347,
+      "median_prompt_ms": 187.4,
+      "raw_runs": [
+        {
+          "run": 1,
+          "tokens_per_second": 18.76,
+          "predicted_tokens": 512,
+          "predicted_ms": 27239.4,
+          "prompt_ms": 176.9,
+          "prompt_tps": 22.62,
+          "draft_n": 340,
+          "draft_accepted": 308,
+          "acceptance_rate_pct": 90.59,
+          "gpu_temp_c": 62.0,
+          "gpu_power_w": 24.59,
+          "cpu_avg_mhz": 3099.9
+        },
+        {
+          "run": 2,
+          "tokens_per_second": 14.13,
+          "predicted_tokens": 512,
+          "predicted_ms": 36172.2,
+          "prompt_ms": 187.4,
+          "prompt_tps": 21.35,
+          "draft_n": 496,
+          "draft_accepted": 352,
+          "acceptance_rate_pct": 70.97,
+          "gpu_temp_c": 63.0,
+          "gpu_power_w": 22.33,
+          "cpu_avg_mhz": 2971.2
+        },
+        {
+          "run": 3,
+          "tokens_per_second": 14.15,
+          "predicted_tokens": 512,
+          "predicted_ms": 36117.1,
+          "prompt_ms": 188.9,
+          "prompt_tps": 21.17,
+          "draft_n": 566,
+          "draft_accepted": 381,
+          "acceptance_rate_pct": 67.31,
+          "gpu_temp_c": 64.0,
+          "gpu_power_w": 25.3,
+          "cpu_avg_mhz": 3100.0
+        }
+      ]
+    }
+  },
+  "winner": {
+    "best_spec_draft_p_min": 0.0,
+    "best_median_tokens_per_second": 19.8,
+    "baseline_tokens_per_second": 19.8,
+    "delta_pct": 0.0
+  }
+}

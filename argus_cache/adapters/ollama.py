@@ -37,6 +37,169 @@ from .base import AdapterCapabilities, AdapterError, RuntimeAdapter, RuntimeKind
 DEFAULT_HOST = "http://localhost:11434"
 DEFAULT_TIMEOUT = 60.0
 
+#: KV cache types Ollama accepts. Anything else is rejected rather than passed
+#: through, because llama.cpp fails late and obscurely on an unknown type.
+KV_CACHE_TYPES = ("f16", "q8_0", "q4_0")
+
+#: Quantized KV is the default because it was measured to matter, not because
+#: it sounds thrifty. See ``recommended_server_environment``.
+DEFAULT_SERVER_KV_CACHE_TYPE = "q8_0"
+
+#: llama-server accepts a wider set than Ollama's env var does, so validating
+#: llama-server flags against Ollama's shorter list would reject usable types.
+#: Note iq4_nl is the same width as q4_0 -- a non-linear codebook, not a smaller
+#: one -- so it cannot buy context, only fidelity at equal size. None of the
+#: types beyond f16/q8_0/q4_0 have been measured here.
+LLAMA_KV_CACHE_TYPES = (
+    "f32", "f16", "bf16", "q8_0", "q4_0", "q4_1", "iq4_nl", "q5_0", "q5_1",
+)
+
+
+#: Default llama-server binary shipped alongside Ollama.
+DEFAULT_LLAMA_SERVER = "/usr/lib/ollama/llama-server"
+
+#: KV width llama-server is started with. q4_0 rather than iq4_nl because q4_0
+#: is the rung every number in this module was measured on.
+DEFAULT_SERVER_LLAMA_KV_TYPE = "q4_0"
+
+#: Largest context measured to load *reliably* on a 4 GB card with the experts
+#: on CPU and a q4_0 KV cache: 3420 of 3770 MiB, 2/2 loads. 163840 fits on paper
+#: too -- 3696 MiB -- but at 98% occupancy it aborted inside CUDA on a repeat
+#: run, so the ceiling arithmetic allows is not the ceiling that ships. At
+#: 131072 the measured decode was 15.8-17.6 tok/s. See
+#: ``test_default_context_leaves_vram_headroom``.
+DEFAULT_LLAMA_SERVER_CTX = 131072
+
+
+def llama_server_command(
+    *,
+    model_path: str,
+    port: int,
+    num_ctx: int = DEFAULT_LLAMA_SERVER_CTX,
+    kv_cache_type: str = "q4_0",
+    binary: str = DEFAULT_LLAMA_SERVER,
+    host: str = "127.0.0.1",
+    spec_type: Optional[str] = None,
+    spec_draft_n_max: int = 2,
+    draft_model: Optional[str] = None,
+    flash_attn: str = "on",
+    load_mode: Optional[str] = None,
+    spec_draft_p_min: Optional[float] = None,
+) -> List[str]:
+    """Argument vector for a llama-server tuned for a small-VRAM machine.
+
+    Ollama cannot serve this configuration: it does not expose ``--cpu-moe``,
+    which on a mixture-of-experts model is the difference between 12.09 and
+    19.14 tok/s (measured, RTX 3050 Ti 4 GB, qwen3.6-35b-a3b at 32k). Running
+    llama-server directly is the only way to reach it.
+
+    The three settings that matter, and why:
+
+    * ``--cpu-moe`` pins the experts to host memory. Only 8 of 256 are active
+      per token, so they are poor tenants of scarce VRAM; the attention weights
+      and KV cache are what benefit from being resident.
+    * ``-ctk``/``-ctv`` quantize the KV cache. Whether that cache fits in VRAM
+      is the only thing that moves throughput -- about 18 tok/s while it does,
+      8.8 tok/s once it spills -- and q4_0 raised the ceiling from 96k to 160k
+      at no measured cost in speed.
+    * ``-fa`` is a precondition: llama.cpp needs flash attention for a
+      quantized KV cache, and silently ignores the request without it.
+    * Speculative decoding (MTP + N-Gram) dramatically boosts token generation
+      rate on CPU-MoE setups by verifying multiple tokens per RAM read.
+
+    The default is ``q4_0`` because that is the rung the numbers above were
+    measured on. ``iq4_nl`` is the same width with a non-linear codebook and
+    should dominate it, but it has not been measured here -- defaulting to it
+    would mean shipping an unmeasured setting justified by another setting's
+    data.
+
+    On quality: a multi-key retrieval probe -- four codes recalled from 31k
+    tokens against eight confusable distractors, each answer required to bind
+    the right code to the right project name -- scored 4/4 at f16, q8_0 and
+    q4_0 alike, with byte-identical answers
+    (``docs/measurements/kv-quantization-retrieval-2026-08-16.json``).
+
+    Read that narrowly. It rules out retrieval damage at this width and
+    length, which was the specific worry. It does not measure reasoning, code
+    generation, or long-range coherence, it ran at 31k rather than at the
+    131072 window shipped, and three identical answers suggest the probe still
+    sits inside the model's comfortable range rather than at its margin.
+    """
+    if kv_cache_type not in LLAMA_KV_CACHE_TYPES:
+        raise ValueError(
+            f"kv_cache_type must be one of {', '.join(LLAMA_KV_CACHE_TYPES)}; "
+            f"got {kv_cache_type!r}"
+        )
+    cmd = [
+        binary,
+        "--model", model_path,
+        "--port", str(port),
+        "--host", host,
+        "--no-webui",
+        "-c", str(num_ctx),
+        "-ngl", "99",
+        "--cpu-moe",
+        "-ctk", kv_cache_type,
+        "-ctv", kv_cache_type,
+        "-fa", flash_attn,
+        "-np", "1",
+    ]
+    if spec_type:
+        cmd.extend(["--spec-type", spec_type])
+        if spec_draft_n_max > 0:
+            cmd.extend(["--spec-draft-n-max", str(spec_draft_n_max)])
+        if spec_draft_p_min is not None:
+            cmd.extend(["--spec-draft-p-min", str(spec_draft_p_min)])
+        if draft_model:
+            cmd.extend(["--spec-draft-model", draft_model])
+    if load_mode:
+        cmd.extend(["--load-mode", load_mode])
+    return cmd
+
+
+def recommended_server_environment(
+    base: Optional[Dict[str, str]] = None,
+    *,
+    kv_cache_type: str = DEFAULT_SERVER_KV_CACHE_TYPE,
+    flash_attention: bool = True,
+) -> Dict[str, str]:
+    """Environment for ``ollama serve`` that shrinks the KV cache.
+
+    These are server-process knobs: Ollama reads them at startup, so they
+    cannot be set per request, and a server started without them cannot be
+    retuned by a client. That is why they belong here rather than in
+    :class:`OllamaAdapter`, which only configures individual requests.
+
+    Measured on an RTX 3050 Ti Laptop (4 GB) with ``qwen3.6-35b-a3b`` at
+    262144 context: ``f16`` KV gave 2.77 tok/s at a 28 GB footprint, while
+    ``q8_0`` plus flash attention gave 8.63 tok/s at 26 GB. The speedup is not
+    arithmetic getting cheaper -- it is the 2 GB the smaller cache gives back,
+    which is the difference between the weights staying resident and being
+    paged off disk on every token. At short contexts, where the cache is small
+    either way, the same setting changes nothing measurable.
+
+    Flash attention is included because llama.cpp requires it for a quantized
+    KV cache; without it the quantization request is silently ineffective.
+
+    Args:
+        base: Environment to extend. Not mutated.
+        kv_cache_type: One of :data:`KV_CACHE_TYPES`.
+        flash_attention: Whether to request flash attention.
+
+    Returns:
+        A new environment dict. Values already present in ``base`` win, so an
+        operator's explicit choice is never overridden.
+    """
+    if kv_cache_type not in KV_CACHE_TYPES:
+        raise ValueError(
+            f"kv_cache_type must be one of {', '.join(KV_CACHE_TYPES)}; "
+            f"got {kv_cache_type!r}"
+        )
+    env = dict(base or {})
+    env.setdefault("OLLAMA_KV_CACHE_TYPE", kv_cache_type)
+    env.setdefault("OLLAMA_FLASH_ATTENTION", "1" if flash_attention else "0")
+    return env
+
 
 class HttpTransport:
     """Minimal JSON-over-HTTP transport backed by the standard library.
@@ -162,9 +325,10 @@ class OllamaAdapter(RuntimeAdapter):
         super().__init__(**options)
         if not model:
             raise ValueError("OllamaAdapter requires a model tag")
-        if kv_cache_type is not None and kv_cache_type not in {"f16", "q8_0", "q4_0"}:
+        if kv_cache_type is not None and kv_cache_type not in KV_CACHE_TYPES:
             raise ValueError(
-                f"kv_cache_type must be one of f16, q8_0, q4_0; got {kv_cache_type!r}"
+                f"kv_cache_type must be one of {', '.join(KV_CACHE_TYPES)}; "
+                f"got {kv_cache_type!r}"
             )
         self.model = model
         self.num_ctx = num_ctx

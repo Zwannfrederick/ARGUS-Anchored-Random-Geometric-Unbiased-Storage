@@ -47,6 +47,14 @@ _LAZY_EXPORTS = {
     "list_quantizers": ("argus_cache.plugins", "list_quantizers"),
     "available_quantizers": ("argus_cache.plugins", "available_quantizers"),
     "get_capabilities": ("argus_cache.plugins", "get_capabilities"),
+    "LayerRole": ("argus_cache.models.hybrid_cache", "LayerRole"),
+    "HybridTopology": ("argus_cache.models.hybrid_cache", "HybridTopology"),
+    "HybridQwenCache": ("argus_cache.models.hybrid_cache", "HybridQwenCache"),
+    "CodecKind": ("argus_cache.core.page_table", "CodecKind"),
+    "PlacementLocation": ("argus_cache.core.page_table", "PlacementLocation"),
+    "StructureOfArraysPageTable": ("argus_cache.core.page_table", "StructureOfArraysPageTable"),
+    "ContiguousBlockPool": ("argus_cache.core.backend_pool", "ContiguousBlockPool"),
+    "DirectPagedAttentionEngine": ("argus_cache.core.direct_attention", "DirectPagedAttentionEngine"),
 }
 
 
@@ -189,4 +197,14 @@ __all__ = [
     "list_quantizers",
     "available_quantizers",
     "get_capabilities",
+    # Hybrid cache contract
+    "LayerRole",
+    "HybridTopology",
+    "HybridQwenCache",
+    # Page table & backend pool ABI
+    "CodecKind",
+    "PlacementLocation",
+    "StructureOfArraysPageTable",
+    "ContiguousBlockPool",
+    "DirectPagedAttentionEngine",
 ]

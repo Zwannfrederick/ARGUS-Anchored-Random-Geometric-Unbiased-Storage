@@ -504,8 +504,10 @@ def triton_fused_paged_attention(
     q_f32 = q.float()
     
     for k_page, v_page in zip(k_pages_list, v_pages_list):
+        k_p = k_page.to(device=device, dtype=torch.float32)
+        v_p = v_page.to(device=device, dtype=torch.float32)
         # S_i = Q @ K_i^T * scale  — [batch, heads, q_len, page_kv_len]
-        S_i = torch.matmul(q_f32, k_page.float().transpose(-1, -2)) * scale
+        S_i = torch.matmul(q_f32, k_p.transpose(-1, -2)) * scale
         
         # Online softmax: update running max
         m_i = S_i.amax(dim=-1, keepdim=True)          # [batch, heads, q_len, 1]
@@ -518,7 +520,7 @@ def triton_fused_paged_attention(
         P_i = torch.exp(S_i - m_new)                    # [batch, heads, q_len, page_kv_len]
         
         # Accumulate: rescale old output + add new contribution
-        O = correction * O + torch.matmul(P_i, v_page.float())
+        O = correction * O + torch.matmul(P_i, v_p)
         l = correction * l + P_i.sum(dim=-1, keepdim=True)
         m = m_new
     

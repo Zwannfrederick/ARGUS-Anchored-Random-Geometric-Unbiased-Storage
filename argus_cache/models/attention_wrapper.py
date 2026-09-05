@@ -60,8 +60,10 @@ class PagedDynamicQuantizedCache(Cache):
             "balanced" if model_config is not None else "research"
         )
         self.direct_attention = direct_attention
-        if self.pipeline_profile not in ("balanced", "research"):
-            raise ValueError("pipeline_profile must be 'balanced' or 'research'")
+        if self.pipeline_profile not in ("balanced", "research", "ggml"):
+            raise ValueError(
+                "pipeline_profile must be 'balanced', 'research' or 'ggml'"
+            )
         
         if pipeline is not None:
             self.page_size = getattr(pipeline, 'page_size', page_size)
@@ -114,6 +116,40 @@ class PagedDynamicQuantizedCache(Cache):
             streaming_attention=True,
         )
 
+    def _ggml_pipeline(self) -> PipelineConfig:
+        """Heterogeneous cascade stored in llama.cpp's own block formats.
+
+        Every rung is a GGML block codec, so a demoted page is byte-identical
+        to what llama.cpp would have written for the same tensor -- the round
+        trip is verified in ``tests/test_plugin_system.py`` against llama's
+        nibble order, block layout and rounding.
+
+        The point is the *heterogeneity*, not the compression. llama.cpp
+        applies a single KV type to the whole cache (``-ctk``/``-ctv``), so a
+        uniform cascade would only reproduce what it already does. Holding
+        recent pages at q8_0 while old pages fall to q4_0 is the thing it
+        cannot express, and is where the capacity comes from.
+
+        Measured context for the choice of rungs (RTX 3050 Ti, 4 GB, qwen3.6-
+        35b-a3b): whether the KV cache fits in VRAM is the only thing that
+        moves throughput -- roughly 18 tok/s resident against 8.8 tok/s once it
+        spills. Uniform q4_0 bought 160k of context before the cliff.
+        """
+        from argus_cache.backends.eviction import ImportanceSortPolicy
+
+        return PipelineConfig(
+            tiers=[
+                TierSpec("q8_0", "q8_0", max_pages=self.max_fp8_pages, priority=1),
+                TierSpec("q4_0", "q4_0", max_pages=-1, priority=2),
+            ],
+            eviction_policy=ImportanceSortPolicy(),
+            page_size=self.page_size,
+            sink_tokens=self.sink_tokens,
+            threshold_sigma=self.threshold_sigma,
+            max_active_pages=self.max_active_pages,
+            balloon_driver=self.balloon_driver,
+        )
+
     def _research_pipeline(self) -> PipelineConfig:
         """Compatibility profile retaining the configurable deep cascade."""
         from argus_cache.backends.eviction import ImportanceSortPolicy
@@ -141,6 +177,8 @@ class PagedDynamicQuantizedCache(Cache):
         if self.pipeline is None:
             if self.pipeline_profile == "balanced":
                 return self._simple_pipeline()
+            if self.pipeline_profile == "ggml":
+                return self._ggml_pipeline()
             return self._research_pipeline()
         if key_states.dtype in (torch.float32, torch.float16, torch.bfloat16):
             return self.pipeline

@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "argus_cache"
-version = "0.3.0"
-description = "ARGUS: Anchored Random Geometric Unbiased Storage - Advanced Dynamic Quantized KV Cache"
+version = "0.4.0"
+description = "Heterogeneous KV-cache memory management: paged transformer KV storage across FP16/FP8/INT8/INT4/INT2/1-bit tiers and CPU spill"
 readme = "README.md"
 authors = [
     { name = "Muhammed Emin Çelik" }
@@ -21,16 +21,38 @@ classifiers = [
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: C++",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: System :: Hardware :: Symmetric Multi-processing",
+    "Operating System :: POSIX :: Linux",
+    "Environment :: GPU :: NVIDIA CUDA",
 ]
+keywords = [
+    "kv-cache", "quantization", "transformers", "llm-inference",
+    "paged-attention", "memory-management", "cuda", "vram",
+]
+
 requires-python = ">=3.8"
 dependencies = [
     "torch>=2.0.0",
     "triton>=2.0.0",
     "transformers>=4.38.0",
-    "matplotlib",
-    "pytest"
 ]
+
+# matplotlib and pytest were runtime dependencies through 0.3.0, but nothing
+# under argus_cache/ imports either one; they only serve the benchmarks and the
+# test suite. httpx is genuinely imported, but only by the optional Anthropic
+# gateway adapter, so it stays out of the base install too.
+[project.optional-dependencies]
+gateway = ["httpx"]
+dev = ["pytest", "matplotlib", "httpx"]
+
+[project.urls]
+Homepage = "https://github.com/Zwannfrederick/ARGUS-Anchored-Random-Geometric-Unbiased-Storage"
+Repository = "https://github.com/Zwannfrederick/ARGUS-Anchored-Random-Geometric-Unbiased-Storage"
+Changelog = "https://github.com/Zwannfrederick/ARGUS-Anchored-Random-Geometric-Unbiased-Storage/blob/main/CHANGELOG.md"
+Issues = "https://github.com/Zwannfrederick/ARGUS-Anchored-Random-Geometric-Unbiased-Storage/issues"
 
 [tool.pytest.ini_options]
 # scratch/ holds throwaway experiment scripts, several named test_*.py. They
