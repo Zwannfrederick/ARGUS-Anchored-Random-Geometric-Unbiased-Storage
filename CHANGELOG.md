@@ -74,6 +74,14 @@
   throwaway environment and the extension would be compiled for an ABI the
   runtime does not have.
 
+### Fixed (tests)
+- `test_gateway_server_health_and_models_endpoints` asserted that `/v1/models`
+  contained `qwen3.8-27b`. That id comes from whatever a local Ollama reports,
+  not from the gateway, so the test failed on every machine without that exact
+  model in its library — including this one once the library moved on to
+  `qwen3.6-35b-a3b`. It now asserts only the static Anthropic ids the handler
+  actually guarantees.
+
 ### Negative result — ARGUS is not integrated with llama.cpp
 An A/B sweep was run at 4K/16K/32K/64K against a local llama-server
 (Qwen3.6-35B-A3B, q4_0 KV) intending to compare an ARGUS-backed cache with a

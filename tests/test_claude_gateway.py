@@ -155,11 +155,16 @@ def test_gateway_server_health_and_models_endpoints():
             assert resp.status_code == 200
             assert resp.json()["status"] == "ok"
 
-            # Models list
+            # Models list. Only the static Anthropic ids are asserted: the
+            # handler also appends whatever a local Ollama reports, and pinning
+            # a name there made this test depend on one machine's model
+            # library. It failed the moment that library changed
+            # (qwen3.8-27b -> qwen3.6-35b-a3b) while the gateway was correct.
             resp_models = client.get("/v1/models")
             assert resp_models.status_code == 200
-            models = resp_models.json()["data"]
-            assert any(m["id"] == "qwen3.8-27b" for m in models)
+            ids = {m["id"] for m in resp_models.json()["data"]}
+            assert "claude-3-7-sonnet-20250219" in ids
+            assert "claude-3-5-haiku-20241022" in ids
     finally:
         server.shutdown()
         server.server_close()
