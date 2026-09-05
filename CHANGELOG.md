@@ -1,6 +1,97 @@
 # Changelog
 
-## Unreleased — downstream revalidation and memory-path repair
+## v0.4.0 — Direct paged attention, hybrid ownership, and an honest llama.cpp negative
+
+### Added
+- **Structure-of-Arrays page table** (`core/page_table.py`): precision
+  (`ACTIVE_FP16`, `GGML_Q8_0`, `GGML_Q4_0`) is separated from placement
+  (`GPU_DEVICE`, `HOST_PINNED`, `HOST_PAGEABLE`) in one contiguous descriptor
+  table. Generation counters make a stale async eviction detectable instead of
+  silently reading a recycled slot. The decode hot path no longer walks Python
+  objects or raw pointers.
+- **Contiguous block pool** (`core/backend_pool.py`): quantized pages are
+  allocated from unified fixed-size chunks rather than per-page, which removes
+  allocator fragmentation and makes batched PCIe streaming possible.
+- **Direct paged attention engine** (`core/direct_attention.py`): exact
+  tile-by-tile online-softmax recurrence run straight over the descriptor table
+  and quantized block pools. No context-sized FP16 KV tensor is ever
+  materialized; FP16 reconstruction is bounded to one page tile.
+- **Hybrid cache ownership contract** (`models/hybrid_cache.py`): for
+  architectures mixing full and linear attention (e.g. Qwen3.8 Gated DeltaNet),
+  full-attention layers are owned by ARGUS while recurrent/conv state is
+  explicitly not. Deterministic state digests prove ARGUS operations never
+  mutate recurrent state; rollback and sequence operations fail closed on an
+  unsupported layer role.
+- **Anthropic Messages gateway** (`adapters/claude_gateway.py`): translates
+  `/v1/messages` to OpenAI `/v1/chat/completions`, including tool-use blocks and
+  bidirectional SSE streaming, so an Anthropic-protocol client can drive a local
+  llama-server. Stdlib `http.server` plus `httpx`; no server framework added.
+- **Service manager** (`scripts/argus_service.py`): OFF / STARTING / READY /
+  ERROR lifecycle with health probes, plus a telemetry UI and a Waybar module.
+
+### Measured
+- **Direct paged attention, precision vs latency.** Qwen-like geometry
+  (24 q-heads, 4 kv-heads, head_dim 256, page 128) on the RTX 3050 Ti Laptop.
+  The trade is monotone and steep: q4_0 holds a 32K context in 44.16 MiB
+  against FP16's 136.16 MiB (3.1x less) while costing 2.14x the latency.
+
+  | context | ACTIVE_FP16 | GGML_Q8_0 | GGML_Q4_0 |
+  |---:|---|---|---|
+  | 1,024 | 1.98 ms / 12.15 MiB | 3.15 ms / 10.28 MiB | 4.24 ms / 9.28 MiB |
+  | 4,096 | 7.51 ms / 24.15 MiB | 11.43 ms / 16.65 MiB | 15.86 ms / 12.65 MiB |
+  | 8,192 | 14.71 ms / 40.15 MiB | 22.55 ms / 25.15 MiB | 31.61 ms / 17.15 MiB |
+  | 16,384 | 29.26 ms / 72.15 MiB | 44.97 ms / 44.15 MiB | 62.77 ms / 26.15 MiB |
+  | 32,768 | 58.48 ms / 136.16 MiB | 90.15 ms / 76.16 MiB | 125.25 ms / 44.16 MiB |
+
+  Artifact: `docs/measurements/v040-fused-attention-benchmark.json`.
+  This is a **runtime** measurement of the engine in isolation, not an
+  end-to-end serving result.
+- **q4_0 KV quantization cost no measurable retrieval accuracy** at a 31k-token
+  prompt against 8 confusable distractors: f16, q8_0 and q4_0 each scored 4/4
+  and produced byte-identical answers. This does **not** establish general
+  output quality — retrieving a literal string already in context is a
+  forgiving task, and identical outputs across all three widths suggest the
+  probe never reached the model's margin.
+  Artifact: `docs/measurements/kv-quantization-retrieval-2026-08-16.json`.
+
+### Packaging
+- `matplotlib` and `pytest` were declared runtime dependencies through 0.3.0,
+  but nothing under `argus_cache/` imports either — they served the benchmarks
+  and the test suite. Both moved to a `dev` extra.
+- `httpx` is genuinely imported, by the optional Anthropic gateway adapter
+  only. It is declared as a `gateway` extra rather than pulled into every
+  install.
+- Added project URLs, keywords, and CUDA/Linux classifiers so the PyPI page
+  points at the repository and the changelog.
+- Published as an sdist only. A `linux_x86_64` wheel built against one local
+  PyTorch ABI and CUDA version would be wrong for nearly every installer, and
+  PyPI rejects that platform tag regardless.
+- Documented that `pip install` needs `--no-build-isolation`. `setup.py` reads
+  the installed `torch` to configure the CUDA extension, and pip's default
+  isolated build hides it, so the install fails with
+  `ModuleNotFoundError: No module named 'torch'`. Adding `torch` to
+  `build-system.requires` would be worse: pip would fetch some torch into a
+  throwaway environment and the extension would be compiled for an ABI the
+  runtime does not have.
+
+### Negative result — ARGUS is not integrated with llama.cpp
+An A/B sweep was run at 4K/16K/32K/64K against a local llama-server
+(Qwen3.6-35B-A3B, q4_0 KV) intending to compare an ARGUS-backed cache with a
+vanilla one. **The audit in the artifact shows ARGUS was never loaded:**
+`argus_in_llama_server_maps: false`, `argus_maps_count: 0`. Peak VRAM is
+byte-identical between the two arms at every context (3594 / 3596 / 3598 MiB),
+which confirms both arms were the same process.
+
+The decode-rate difference that was observed (e.g. 17.66 vs 11.88 tok/s at 16K)
+is therefore attributable to the gateway's prompt-prefix cache — TTFT drops to
+99.88 ms where the vanilla arm reprocesses the prompt — and **not** to ARGUS.
+No ARGUS claim is made from this run. It is published as-is because a
+misattributed win is exactly the kind of result that survives unchallenged.
+Artifact: `docs/measurements/argus-ab-cache-comparison-2026-09-04.json`.
+
+The llama.cpp sweeps shipped alongside it (`load-mode-comparison`,
+`pmin-sweep`, `speculative-sweep-n2-n3-n4`) are **llama.cpp runtime tuning**,
+not ARGUS measurements, and are labelled as such.
 
 ### Fixed
 - Removed persistent decompressed FP16 KV mirrors. Attention assembly now

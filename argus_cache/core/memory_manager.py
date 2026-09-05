@@ -1622,10 +1622,15 @@ class PagedDynamicKVCache:
         Reconstructs all cache levels back to single FP16 tensors, prepending VIP anchors & Attention Sinks.
         Automatically handles host-to-device swapping if the cache is swapped out.
         """
-        # Automatic Swap-In Safeguard
+        with self._attention_lock:
+            return self._get_all_keys_values_unlocked()
+
+    def _get_all_keys_values_unlocked(self):
+        # Automatic Swap-In Safeguard: If swapped out, decompress on CPU to prevent secondary CUDA OOM
         if self.is_swapped_out:
-            target_dev = self.active_pool_k.device if self.active_pool_k is not None else "cuda"
-            self.swap_in_to_device(device=target_dev)
+            target_dev = torch.device("cpu")
+        else:
+            target_dev = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
             
         # The HuggingFace Cache API requires one contiguous K/V pair.  Build
         # that pair directly and copy each decompressed page into its final
@@ -1650,7 +1655,6 @@ class PagedDynamicKVCache:
         if not tier_entries and not resident_pairs:
             return None, None
 
-        target_dev = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
         total_tokens = sum(int(k.shape[-2]) for k, _ in resident_pairs)
         total_tokens += sum(int(page.get("page_size", self.page_size)) for _, page in tier_entries)
 
@@ -1771,6 +1775,90 @@ class PagedDynamicKVCache:
             attn_output = attn_output.cpu()
 
         return attn_output
+
+    def get_seq_length(self) -> int:
+        """Returns the total sequence length currently stored in this cache."""
+        length = 0
+        if self.sink_k is not None and self.sink_k.numel() > 0:
+            length += self.sink_k.shape[-2]
+        if self.anchor_k is not None and self.anchor_k.numel() > 0:
+            length += self.anchor_k.shape[-2]
+        num_pages = len(self.active_pages) + sum(len(pages) for pages in self.pages_by_tier.values())
+        length += num_pages * self.page_size
+        if self.k_buffer is not None and self.k_buffer.numel() > 0:
+            length += self.k_buffer.shape[-2]
+        return length
+
+    def snapshot(self) -> Dict[str, Any]:
+        """Creates a snapshot of the cache state for speculative rollback or cancellation."""
+        with self._attention_lock:
+            active_pages_copy = list(self.active_pages)
+            pages_by_tier_copy = {k: list(v) for k, v in self.pages_by_tier.items()}
+            return {
+                "buffer_length": getattr(self, "buffer_length", 0),
+                "generation_step": self.generation_step,
+                "static_k_buffer": self.static_k_buffer.clone() if getattr(self, "static_k_buffer", None) is not None else None,
+                "static_v_buffer": self.static_v_buffer.clone() if getattr(self, "static_v_buffer", None) is not None else None,
+                "sink_k": self.sink_k.clone() if self.sink_k is not None else None,
+                "sink_v": self.sink_v.clone() if self.sink_v is not None else None,
+                "anchor_k": self.anchor_k.clone() if self.anchor_k is not None else None,
+                "anchor_v": self.anchor_v.clone() if self.anchor_v is not None else None,
+                "active_pages": active_pages_copy,
+                "pages_by_tier": pages_by_tier_copy,
+            }
+
+    def restore(self, snap: Dict[str, Any]) -> None:
+        """Restores cache state from a snapshot upon rollback."""
+        with self._attention_lock:
+            self.buffer_length = snap["buffer_length"]
+            self.generation_step = snap["generation_step"]
+            if snap["static_k_buffer"] is not None and getattr(self, "static_k_buffer", None) is not None:
+                self.static_k_buffer.copy_(snap["static_k_buffer"])
+            if snap["static_v_buffer"] is not None and getattr(self, "static_v_buffer", None) is not None:
+                self.static_v_buffer.copy_(snap["static_v_buffer"])
+            self.sink_k = snap["sink_k"].clone() if snap["sink_k"] is not None else None
+            self.sink_v = snap["sink_v"].clone() if snap["sink_v"] is not None else None
+            self.anchor_k = snap["anchor_k"].clone() if snap["anchor_k"] is not None else None
+            self.anchor_v = snap["anchor_v"].clone() if snap["anchor_v"] is not None else None
+            self.active_pages = snap["active_pages"]
+            self.pages_by_tier = snap["pages_by_tier"]
+            self._invalidate_decompressed_cache()
+
+    def compute_fused_paged_attention(self, q: torch.Tensor, scale: float = None) -> torch.Tensor:
+        """Computes multi-page scaled dot-product attention page-by-page using Triton fused paged attention.
+
+        This avoids materializing a single gigantic concatenated K/V tensor in DRAM,
+        cutting intermediate DRAM allocation to O(max_page_len * head_dim).
+        """
+        with self._attention_lock:
+            tier_entries = [
+                (spec, page)
+                for spec in reversed(self.tier_specs)
+                for page in self.pages_by_tier.get(spec.name, [])
+            ]
+            k_pages = []
+            v_pages = []
+            if self.sink_k is not None:
+                k_pages.append(self.sink_k)
+                v_pages.append(self.sink_v)
+            if self.anchor_k is not None:
+                k_pages.append(self.anchor_k)
+                v_pages.append(self.anchor_v)
+            for spec, page in tier_entries:
+                decomp = self._decompress_tier_pages_batched(spec, [page])[0]
+                k_pages.append(decomp[0])
+                v_pages.append(decomp[1])
+            for page in self.active_pages:
+                k_pages.append(page["key"])
+                v_pages.append(page["value"])
+            if self.k_buffer is not None and self.k_buffer.shape[-2] > 0:
+                k_pages.append(self.k_buffer)
+                v_pages.append(self.v_buffer)
+
+            if not k_pages:
+                return torch.zeros_like(q)
+
+            return triton_fused_paged_attention(q, k_pages, v_pages, scale=scale)
 
     def _write_compressed_field(self, page, prefix, comp):
         return self._granularity._write_compressed_field(page, prefix, comp)

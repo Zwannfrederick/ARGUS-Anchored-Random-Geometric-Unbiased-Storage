@@ -371,3 +371,53 @@ def test_model_patch_preserves_unknown_model_attention():
     prepared = model.prepare_inputs_for_generation(torch.ones((1, 2), dtype=torch.long))
 
     assert not prepared["past_key_values"].direct_attention
+
+
+# ── llama.cpp-compatible tier cascade ───────────────────────────────────────
+
+
+def _cache_with_profile(profile: str):
+    return attention_wrapper.PagedDynamicQuantizedCache(pipeline_profile=profile)
+
+
+def test_ggml_profile_cascade_is_entirely_llama_compatible():
+    """Every tier in the ggml profile must declare a GGML block codec.
+
+    llama.cpp stores its KV cache in GGML blocks. A cascade that demotes into
+    ARGUS's own signed_linear/unsigned_affine layouts produces pages llama.cpp
+    cannot read, which forecloses the integration this profile exists for. One
+    non-GGML rung anywhere in the cascade is enough to break it.
+    """
+    pipeline = _cache_with_profile("ggml")._ggml_pipeline()
+
+    kinds = [spec.capabilities.native_codec.kind for spec in pipeline.tiers]
+    assert kinds, "cascade must not be empty"
+    assert all(kind.startswith("ggml_") for kind in kinds), kinds
+
+
+def test_ggml_profile_is_heterogeneous_and_monotonically_cheaper():
+    """Precision must fall as pages age -- that is the whole premise.
+
+    llama.cpp can only apply one KV type to the entire cache, so a uniform
+    cascade would reproduce exactly what it already does and add nothing. The
+    value is holding recent pages at higher precision than old ones, which
+    requires distinct tiers ordered by decreasing cost.
+    """
+    pipeline = _cache_with_profile("ggml")._ggml_pipeline()
+
+    bits = [spec.capabilities.effective_bits for spec in pipeline.tiers]
+    assert len(set(bits)) == len(bits), f"tiers are not distinct: {bits}"
+    assert bits == sorted(bits, reverse=True), f"not monotonically cheaper: {bits}"
+
+
+def test_ggml_profile_is_accepted_by_the_wrapper():
+    """The profile is selectable, alongside the existing two."""
+    assert _cache_with_profile("ggml").pipeline_profile == "ggml"
+
+
+def test_unknown_pipeline_profile_still_rejected():
+    """Adding a profile must not turn the validation into a no-op."""
+    import pytest
+
+    with pytest.raises(ValueError, match="pipeline_profile"):
+        _cache_with_profile("nonsense")

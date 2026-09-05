@@ -585,3 +585,68 @@ def test_one_bit_roundtrip_preserves_sign():
 
     agreement = ((k_out >= 0) == (k >= 0)).float().mean().item()
     assert agreement > 0.99, f"sign agreement only {agreement:.3f}"
+
+
+# ── ggml cascade, end to end ────────────────────────────────────────────────
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_ggml_cascade_actually_demotes_through_both_tiers():
+    """Under real pressure the cascade must hold two precisions at once.
+
+    Configuring a cascade proves nothing on its own -- if every page ends up in
+    one tier, the result is what llama.cpp already does with a single
+    ``-ctk`` setting, and the reason for the profile disappears. The claim
+    being tested is that recent pages sit at q8_0 while older ones fall to
+    q4_0 *simultaneously*.
+    """
+    from argus_cache.models.attention_wrapper import PagedDynamicQuantizedCache
+
+    pipeline = PagedDynamicQuantizedCache(pipeline_profile="ggml")._ggml_pipeline()
+    pipeline.page_size = 16
+    pipeline.sink_tokens = 0
+    pipeline.max_active_pages = 1
+    pipeline.tiers[0].max_pages = 2
+    cache = PagedDynamicKVCache(pipeline=pipeline)
+
+    torch.manual_seed(0)
+    for _ in range(12):
+        k = torch.randn(1, 1, 16, 32, dtype=torch.float16, device="cuda")
+        cache.push_new_tokens(k, torch.randn_like(k))
+
+    occupied = {t: len(p) for t, p in cache.pages_by_tier.items() if p}
+
+    assert "q8_0" in occupied, f"nothing reached q8_0: {occupied}"
+    assert "q4_0" in occupied, f"nothing reached q4_0: {occupied}"
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_ggml_cascade_pages_survive_a_decompression_round_trip():
+    """A demoted page must still decode to something close to what went in.
+
+    Heterogeneous storage is only useful if the cheap tier remains usable;
+    a cascade that quietly corrupts old pages would trade quality for capacity
+    without saying so.
+    """
+    from argus_cache.models.attention_wrapper import PagedDynamicQuantizedCache
+
+    pipeline = PagedDynamicQuantizedCache(pipeline_profile="ggml")._ggml_pipeline()
+    pipeline.page_size = 32
+    pipeline.sink_tokens = 0
+    pipeline.max_active_pages = 1
+    cache = PagedDynamicKVCache(pipeline=pipeline)
+
+    torch.manual_seed(0)
+    first = torch.randn(1, 1, 32, 32, dtype=torch.float16, device="cuda")
+    cache.push_new_tokens(first.clone(), first.clone())
+    for _ in range(4):
+        k = torch.randn(1, 1, 32, 32, dtype=torch.float16, device="cuda")
+        cache.push_new_tokens(k, torch.randn_like(k))
+
+    tier = next(t for t, pages in cache.pages_by_tier.items() if pages)
+    page = cache.pages_by_tier[tier][0]
+    restored, _ = cache._cpp_manager.peek_decompress_page(page, tier)
+
+    assert torch.isfinite(restored).all(), "decompressed page contains non-finite values"
+    rel_err = (restored.float() - first.float()).norm() / first.float().norm()
+    assert rel_err < 0.25, f"{tier} round-trip error {rel_err:.4f}"

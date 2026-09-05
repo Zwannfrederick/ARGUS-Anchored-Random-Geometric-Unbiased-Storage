@@ -82,6 +82,65 @@ query preparation, and output layout for each `config.model_type`. Applications
 can add a contract with `register_attention_adapter()`; an unregistered model
 never enters native page attention accidentally.
 
+## Direct paged attention
+
+New in 0.4.0. A Structure-of-Arrays page table (`core/page_table.py`) separates
+*precision* (`ACTIVE_FP16`, `GGML_Q8_0`, `GGML_Q4_0`) from *placement*
+(`GPU_DEVICE`, `HOST_PINNED`, `HOST_PAGEABLE`) in one contiguous descriptor
+table, so the decode hot path walks an array instead of Python objects. Pages of
+a given codec are allocated from a contiguous block pool rather than per page.
+`DirectPagedAttentionEngine` then runs an exact tile-by-tile online-softmax
+recurrence straight over those structures: no context-sized FP16 KV tensor is
+ever materialized, and reconstruction is bounded to one page tile.
+
+Measured in isolation on the RTX 3050 Ti Laptop with Qwen-like geometry
+(24 query heads, 4 KV heads, head_dim 256, page 128):
+
+| context | ACTIVE_FP16 | GGML_Q8_0 | GGML_Q4_0 |
+|---:|---|---|---|
+| 1,024 | 1.98 ms / 12.15 MiB | 3.15 ms / 10.28 MiB | 4.24 ms / 9.28 MiB |
+| 4,096 | 7.51 ms / 24.15 MiB | 11.43 ms / 16.65 MiB | 15.86 ms / 12.65 MiB |
+| 8,192 | 14.71 ms / 40.15 MiB | 22.55 ms / 25.15 MiB | 31.61 ms / 17.15 MiB |
+| 16,384 | 29.26 ms / 72.15 MiB | 44.97 ms / 44.15 MiB | 62.77 ms / 26.15 MiB |
+| 32,768 | 58.48 ms / 136.16 MiB | 90.15 ms / 76.16 MiB | 125.25 ms / 44.16 MiB |
+
+The trade is monotone and steep. At 32K, q4_0 holds the context in 44.16 MiB
+against FP16's 136.16 MiB — 3.1x less memory for 2.14x the latency. This is a
+**runtime** number for the engine alone; it is not an end-to-end serving result,
+and the latency column is why ARGUS is still not a serving speedup.
+
+Artifact: [`docs/measurements/v040-fused-attention-benchmark.json`](docs/measurements/v040-fused-attention-benchmark.json).
+
+## Hybrid architectures
+
+`models/hybrid_cache.py` states ownership explicitly for models that mix full
+and linear attention (Qwen3.8 Gated DeltaNet, for example). ARGUS owns the
+growing KV cache of full-attention layers; the fixed-size recurrent and conv
+state of linear-attention layers is not ARGUS's to touch. Deterministic state
+digests are asserted around every cache operation to prove that boundary holds,
+and an unsupported layer role fails closed rather than being paged.
+
+## What was tried and did not work
+
+An A/B sweep at 4K/16K/32K/64K was run against a local llama-server
+(Qwen3.6-35B-A3B, q4_0 KV) to compare an ARGUS-backed cache against a vanilla
+one. **The audit recorded in the artifact shows ARGUS was never loaded into the
+process:** `argus_in_llama_server_maps: false`, `argus_maps_count: 0`. Peak VRAM
+is byte-identical across both arms at every context (3594 / 3596 / 3598 MiB),
+confirming the two arms were the same llama-server.
+
+The decode-rate gap that appeared (17.66 vs 11.88 tok/s at 16K) traces to the
+gateway's prompt-prefix cache — TTFT is 99.88 ms where the vanilla arm
+reprocesses the whole prompt — not to ARGUS. No ARGUS claim is drawn from this
+run. It ships in the repository because a misattributed win is precisely the
+result that would otherwise go unchallenged.
+
+ARGUS has **no llama.cpp integration**. The sweeps published beside it
+(`load-mode-comparison`, `pmin-sweep`, `speculative-sweep-n2-n3-n4`) are
+llama.cpp runtime tuning and are labelled as such.
+
+Artifact: [`docs/measurements/argus-ab-cache-comparison-2026-09-04.json`](docs/measurements/argus-ab-cache-comparison-2026-09-04.json).
+
 ## Architecture
 
 ```text
@@ -111,6 +170,7 @@ Detailed ownership and extension points are documented in
 | HuggingFace Transformers | Research path, measured | ARGUS owns the model's KV cache |
 | Ollama | External adapter, live-tested | Nothing inside Ollama; configuration and timing only |
 | vLLM | Unavailable, fails closed | Nothing; no false monkey patch is installed |
+| llama.cpp | Not integrated, audited negative | Nothing; see "What was tried and did not work" |
 | SGLang | Not implemented | Nothing |
 
 The former vLLM integration did not own vLLM KV blocks and could not compress
@@ -120,8 +180,25 @@ must use vLLM's KV connector and/or custom attention-backend interfaces; see
 
 ## Installation
 
-The stabilization changes in this tree have not been published. Build and
-install from the checkout:
+```bash
+pip install torch                                        # must already be importable
+pip install --no-build-isolation argus-cache             # core runtime
+pip install --no-build-isolation "argus-cache[gateway]"  # + Anthropic Messages gateway
+```
+
+ARGUS ships as a source distribution: the native CUDA extension is compiled on
+your machine at install time, so a CUDA-capable PyTorch installation, the CUDA
+toolkit, and a C++17 compiler must already be present. There is no prebuilt
+wheel — a binary compiled against one PyTorch ABI and CUDA version would be
+wrong for most installs.
+
+`--no-build-isolation` is required, not optional. The build reads your installed
+`torch` to configure the CUDA extension, and pip's default isolated build hides
+it, failing with `ModuleNotFoundError: No module named 'torch'`. Building against
+a torch that pip fetched into a throwaway environment would be worse than
+failing: the extension would be compiled for an ABI your runtime does not have.
+
+To work on ARGUS itself, build from the checkout instead:
 
 ```bash
 python -m venv .venv
@@ -130,9 +207,6 @@ pip install -U pip
 pip install -e .
 python setup.py build_ext --inplace
 ```
-
-A CUDA-capable PyTorch installation and a working compiler toolchain are
-required for the native extension.
 
 ## HuggingFace example
 
@@ -223,6 +297,13 @@ Benchmark classes are kept separate:
 - OOM survival requires a larger model or longer-context experiment where the
   baseline actually exceeds device memory.
 - Predictive paging is experimental and disabled by default.
+- `DirectPagedAttentionEngine` is measured in isolation only. It has not been
+  wired into the HuggingFace decode path, so its numbers do not yet appear in
+  any end-to-end result.
+- There is no llama.cpp integration, and the one attempt is published as a
+  negative result above.
+- The q4_0 retrieval probe is a single forgiving task at 31k tokens. Reasoning,
+  code generation, and long-range coherence under quantized KV are unmeasured.
 
 The next meaningful milestone is not another headline compression ratio. It is
 a paged attention integration that preserves the demonstrated VRAM curve while

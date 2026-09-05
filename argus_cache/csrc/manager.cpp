@@ -667,6 +667,16 @@ torch::Tensor ArgusCppManager::inplace_paged_attention(
     k_full = at::cat(keys_list, -2);
     v_full = at::cat(values_list, -2);
 
+    const int64_t q_heads = q.size(-3);
+    const int64_t kv_heads = k_full.size(-3);
+    if (q_heads != kv_heads) {
+      TORCH_CHECK(q_heads % kv_heads == 0,
+                  "Query heads must be divisible by KV heads for GQA.");
+      const int64_t groups = q_heads / kv_heads;
+      k_full = at::repeat_interleave(k_full, groups, -3);
+      v_full = at::repeat_interleave(v_full, groups, -3);
+    }
+
     // Fused FlashAttention / SDPA execution
     attn_output = at::scaled_dot_product_attention(
         q, k_full, v_full,

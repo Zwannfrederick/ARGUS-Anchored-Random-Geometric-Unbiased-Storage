@@ -17,6 +17,11 @@ import pytest
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from argus_cache.adapters.ollama import (
+    DEFAULT_LLAMA_SERVER_CTX,
+    llama_server_command,
+    recommended_server_environment,
+)
 from argus_cache.adapters import (
     AdapterError,
     AdapterState,
@@ -339,6 +344,13 @@ def _ollama_running() -> bool:
         return False
 
 
+#: Cold-loading a 20 GB model costs the better part of a minute before any
+#: token is produced, which exceeds the adapter's 60 s default. That is a
+#: property of the machine's model, not of the adapter, so the live tests state
+#: their own budget rather than the adapter lowering its guard for everyone.
+LIVE_TIMEOUT = 300.0
+
+
 def _live_model() -> str:
     """Pick a model that is actually on the server.
 
@@ -359,14 +371,16 @@ def _live_model() -> str:
 
 @pytest.mark.skipif(not _ollama_running(), reason="no Ollama server on localhost:11434")
 def test_ollama_live_version_probe():
-    adapter = OllamaAdapter(model=_live_model())
+    adapter = OllamaAdapter(model=_live_model(), timeout=LIVE_TIMEOUT)
     adapter.initialize()
     assert adapter.server_version
 
 
 @pytest.mark.skipif(not _ollama_running(), reason="no Ollama server on localhost:11434")
 def test_ollama_live_generate_reports_real_timings():
-    with OllamaAdapter(model=_live_model(), num_ctx=2048) as ollama:
+    with OllamaAdapter(
+        model=_live_model(), num_ctx=2048, timeout=LIVE_TIMEOUT
+    ) as ollama:
         result = ollama.generate("Count to three.", max_tokens=24)
 
     assert result.text.strip(), "server returned an empty completion"
@@ -388,7 +402,7 @@ def test_ollama_live_missing_model_is_rejected():
 
 @pytest.mark.skipif(not _ollama_running(), reason="no Ollama server on localhost:11434")
 def test_ollama_live_telemetry_reports_loaded_model():
-    with OllamaAdapter(model=_live_model()) as ollama:
+    with OllamaAdapter(model=_live_model(), timeout=LIVE_TIMEOUT) as ollama:
         ollama.generate("hi", max_tokens=4)
         telemetry = ollama.telemetry()
 
@@ -400,7 +414,7 @@ def test_ollama_live_telemetry_reports_loaded_model():
 
 @pytest.mark.skipif(not _ollama_running(), reason="no Ollama server on localhost:11434")
 def test_ollama_live_repeated_cycles_are_stable():
-    adapter = OllamaAdapter(model=_live_model())
+    adapter = OllamaAdapter(model=_live_model(), timeout=LIVE_TIMEOUT)
     for _ in range(3):
         adapter.activate()
         assert adapter.generate("ok", max_tokens=4).text is not None
@@ -419,3 +433,168 @@ def test_vllm_live_probe_fails_closed():
     assert adapter.vllm_version
     assert adapter.capabilities.manages_kv_cache is False
     assert adapter.is_fully_restored()
+
+
+# ── server tuning knobs ─────────────────────────────────────────────────────
+
+
+def test_recommended_server_environment_sets_measured_kv_defaults():
+    """The KV knobs that were measured to matter are set, not left to folklore.
+
+    Measured on a 4 GB RTX 3050 Ti with qwen3.6-35b-a3b at 262144 context:
+    f16 KV gave 2.77 tok/s, q8_0 KV plus flash attention gave 8.63 tok/s. The
+    2 GB the quantized cache gives back is what keeps the weights resident
+    instead of paging from disk.
+    """
+    env = recommended_server_environment({})
+
+    assert env["OLLAMA_KV_CACHE_TYPE"] == "q8_0"
+    assert env["OLLAMA_FLASH_ATTENTION"] == "1"
+
+
+def test_recommended_server_environment_preserves_the_caller_environment():
+    """Tuning is additive; unrelated variables survive untouched."""
+    env = recommended_server_environment({"PATH": "/usr/bin", "HOME": "/home/x"})
+
+    assert env["PATH"] == "/usr/bin"
+    assert env["HOME"] == "/home/x"
+
+
+def test_recommended_server_environment_does_not_override_an_explicit_choice():
+    """An operator who already set a KV type keeps it.
+
+    Flash attention is a precondition for a quantized KV cache in llama.cpp, so
+    silently replacing a deliberate f16 choice would change behaviour behind
+    the operator's back.
+    """
+    env = recommended_server_environment({"OLLAMA_KV_CACHE_TYPE": "f16"})
+
+    assert env["OLLAMA_KV_CACHE_TYPE"] == "f16"
+
+
+def test_recommended_server_environment_rejects_an_unsupported_kv_type():
+    with pytest.raises(ValueError, match="kv_cache_type"):
+        recommended_server_environment({}, kv_cache_type="q3_k")
+
+
+# ── llama-server launch configuration ───────────────────────────────────────
+
+
+def test_llama_server_command_keeps_experts_on_cpu():
+    """--cpu-moe is the single largest lever on a small GPU, so it is not optional.
+
+    Measured on an RTX 3050 Ti (4 GB) with qwen3.6-35b-a3b at 32k: 12.09 tok/s
+    without it, 19.14 tok/s with it. A mixture-of-experts model activates 8 of
+    256 experts per token, so pinning the experts to CPU frees VRAM for the
+    attention weights and the KV cache, which is what actually needs to be
+    resident.
+    """
+    cmd = llama_server_command(model_path="/m.gguf", port=8080)
+
+    assert "--cpu-moe" in cmd
+
+
+def test_llama_server_command_requests_a_quantized_kv_cache():
+    """A quantized KV cache is what keeps long context inside VRAM.
+
+    Throughput is governed by whether the cache fits on the device: roughly
+    18 tok/s while it does and 8.8 tok/s once it spills to host memory. q4_0
+    moved the ceiling from 96k to 160k without costing throughput.
+    """
+    cmd = llama_server_command(model_path="/m.gguf", port=8080)
+
+    assert "-ctk" in cmd and "-ctv" in cmd
+    assert cmd[cmd.index("-ctk") + 1] == "q4_0"
+    assert cmd[cmd.index("-ctv") + 1] == "q4_0"
+    # llama.cpp requires flash attention for a quantized KV cache; without it
+    # the request is silently ineffective.
+    assert "-fa" in cmd
+
+
+def test_llama_server_command_carries_model_and_port():
+    cmd = llama_server_command(model_path="/models/q.gguf", port=9099)
+
+    assert cmd[cmd.index("--model") + 1] == "/models/q.gguf"
+    assert cmd[cmd.index("--port") + 1] == "9099"
+
+
+def test_llama_server_context_is_configurable():
+    cmd = llama_server_command(model_path="/m.gguf", port=8080, num_ctx=32768)
+
+    assert cmd[cmd.index("-c") + 1] == "32768"
+
+
+def test_llama_server_command_rejects_unsupported_kv_type():
+    with pytest.raises(ValueError, match="kv_cache_type"):
+        llama_server_command(model_path="/m.gguf", port=8080, kv_cache_type="q3_k")
+
+
+def test_llama_server_accepts_types_ollama_does_not():
+    """llama-server's KV vocabulary is wider than Ollama's, and iq4_nl matters.
+
+    Ollama's OLLAMA_KV_CACHE_TYPE takes only f16/q8_0/q4_0. llama-server also
+    takes iq4_nl, which measured 224k of context in 4 GB of VRAM at 16.64 tok/s
+    where q4_0 could not load past 160k. Validating llama-server flags against
+    Ollama's shorter list rejects the better setting.
+    """
+    cmd = llama_server_command(model_path="/m.gguf", port=8080, kv_cache_type="iq4_nl")
+
+    assert cmd[cmd.index("-ctk") + 1] == "iq4_nl"
+
+
+def test_ollama_environment_still_rejects_llama_only_types():
+    """The narrower Ollama list is not widened by the llama-server change."""
+    with pytest.raises(ValueError, match="kv_cache_type"):
+        recommended_server_environment({}, kv_cache_type="iq4_nl")
+
+
+def test_default_context_leaves_vram_headroom():
+    """The shipped context must load reliably, not sit on the VRAM cliff.
+
+    Measured on the 4 GB RTX 3050 Ti with ``--cpu-moe`` and a q4_0 KV cache
+    (usable VRAM 3770 MiB):
+
+    ======  =========  ===========================
+    ctx     VRAM       outcome
+    ======  =========  ===========================
+    262144  --         OOM (needs 969 MiB more)
+    196608  --         OOM (needs 777 MiB more)
+    163840  3696 MiB   98% -- loaded once, aborted
+                       once in CUDA on the retry
+    131072  3420 MiB   91% -- loaded 2/2
+    ======  =========  ===========================
+
+    163840 fits arithmetically and still fails intermittently: at 98% the
+    allocation outcome depends on driver overhead and fragmentation rather
+    than on anything the caller controls. A default that OOMs some of the time
+    is worse than a smaller one that always works, so the shipped value keeps
+    real headroom.
+    """
+    assert DEFAULT_LLAMA_SERVER_CTX <= 131072
+
+
+def test_llama_server_command_supports_speculative_types():
+    cmd = llama_server_command(
+        model_path="/m.gguf",
+        port=8080,
+        spec_type="draft-mtp,ngram-mod",
+        spec_draft_n_max=3,
+    )
+    assert "--spec-type" in cmd
+    assert cmd[cmd.index("--spec-type") + 1] == "draft-mtp,ngram-mod"
+    assert "--spec-draft-n-max" in cmd
+    assert cmd[cmd.index("--spec-draft-n-max") + 1] == "3"
+
+
+def test_llama_server_command_supports_draft_model():
+    cmd = llama_server_command(
+        model_path="/m.gguf",
+        port=8080,
+        spec_type="draft-simple",
+        draft_model="/draft.gguf",
+    )
+    assert "--spec-type" in cmd
+    assert cmd[cmd.index("--spec-type") + 1] == "draft-simple"
+    assert "--spec-draft-model" in cmd
+    assert cmd[cmd.index("--spec-draft-model") + 1] == "/draft.gguf"
+
