@@ -24,3 +24,14 @@ scratch/
 
 !scratch/README.md
 .venv-vllm/
+
+# Neo (deney, 2026-09-05 duraklatıldı)
+hermes/hermes-agent/
+hermes/*.log
+hermes/*.pid
+neo-mobile/node_modules/
+neo-mobile/android/build/
+neo-mobile/android/app/build/
+neo-mobile/.expo/
+*.apk
+screenshots/
