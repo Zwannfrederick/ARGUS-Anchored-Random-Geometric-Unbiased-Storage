@@ -21,8 +21,19 @@ MMPROJ_PATH = MODELS_DIR / "mmproj-gemma-4-E4B-BF16.gguf"
 MTP_DRAFT_PATH = MODELS_DIR / "mtp-gemma-4-E4B-it.gguf"
 
 # Runtime binaries and libraries
-LLAMA_SERVER_BIN = Path("/usr/lib/ollama/llama-server")
+LLAMA_SERVER_BIN = Path(os.environ.get("HERMES_LLAMA_SERVER_BIN", "/usr/lib/ollama/llama-server"))
 LLAMA_CUDA_DIR = Path("/usr/lib/ollama/cuda_v13")
+
+# ARGUS v0.5 paged KV: llama-server patched with integrations/llama.cpp.
+# The KV directory should be on a physical filesystem; tmpfs pages cannot be evicted.
+ARGUS_KV_DIR = os.environ.get("HERMES_ARGUS_KV_DIR", "")
+ARGUS_KV_MAX_BYTES = os.environ.get("HERMES_ARGUS_KV_MAX_BYTES", str(64 << 30))
+ARGUS_KV_RESIDENT_BYTES = os.environ.get("HERMES_ARGUS_KV_RESIDENT_BYTES", "")
+ARGUS_KV_STATS_PATH = HERMES_ROOT / "argus_kv_stats.json"
+for _name, _value in (("HERMES_ARGUS_KV_MAX_BYTES", ARGUS_KV_MAX_BYTES),
+                      ("HERMES_ARGUS_KV_RESIDENT_BYTES", ARGUS_KV_RESIDENT_BYTES)):
+    if _value and (not _value.isdigit() or int(_value) <= 0):
+        raise ValueError(f"{_name} must be a positive byte count, got {_value!r}")
 
 # Server settings
 DEFAULT_HOST = "127.0.0.1"
@@ -42,10 +53,27 @@ GPU_LAYERS = int(os.environ.get("HERMES_GPU_LAYERS", 24))
 SPEC_DRAFT_N_MAX = 2
 SPEC_DRAFT_P_MIN = 0.0
 
-def get_cuda_env() -> Dict[str, str]:
-    """Returns environment variables required for Ollama CUDA ggml acceleration."""
+def argus_enabled() -> bool:
+    return bool(ARGUS_KV_DIR)
+
+
+def argus_server_args() -> list[str]:
+    """ARGUS owns host KV, so GPU KV offload is off and the paged kernel needs FA layout."""
+    return ["-nkvo", "-fa", "on"] if argus_enabled() else []
+
+
+def get_server_env() -> Dict[str, str]:
+    """Environment for llama-server: ARGUS budgets, or Ollama's CUDA ggml libraries."""
     env = dict(os.environ)
-    if LLAMA_CUDA_DIR.is_dir():
+    if argus_enabled():
+        env.update(
+            ARGUS_KV_DIR=ARGUS_KV_DIR,
+            ARGUS_KV_MAX_BYTES=ARGUS_KV_MAX_BYTES,
+            ARGUS_KV_STATS_PATH=str(ARGUS_KV_STATS_PATH),
+        )
+        if ARGUS_KV_RESIDENT_BYTES:
+            env["ARGUS_KV_RESIDENT_BYTES"] = ARGUS_KV_RESIDENT_BYTES
+    elif LLAMA_CUDA_DIR.is_dir():
         cuda_path = str(LLAMA_CUDA_DIR)
         parent_path = str(LLAMA_CUDA_DIR.parent)
         existing = env.get("LD_LIBRARY_PATH", "")
