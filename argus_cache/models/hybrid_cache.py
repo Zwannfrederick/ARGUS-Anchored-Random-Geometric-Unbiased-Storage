@@ -44,40 +44,39 @@ class HybridTopology:
     @classmethod
     def from_config(cls, config: Any) -> HybridTopology:
         """Derive and validate layer roles from HuggingFace or GGUF metadata."""
-        model_type = getattr(config, "model_type", "").lower()
+        if hasattr(config, "get_text_config"):
+            config = config.get_text_config(decoder=True)
+        else:
+            config = getattr(config, "text_config", config)
         num_layers = int(getattr(config, "num_hidden_layers", getattr(config, "n_layer", 0)))
-        interval = int(getattr(config, "full_attention_interval", 4))
-        q_heads = int(getattr(config, "num_attention_heads", getattr(config, "n_head", 24)))
-        kv_heads = int(getattr(config, "num_key_value_heads", getattr(config, "n_head_kv", 4)))
-        head_dim = int(getattr(config, "head_dim", 256))
+        interval = int(getattr(config, "full_attention_interval", 0))
+        q_heads = int(getattr(config, "num_attention_heads", getattr(config, "n_head", 0)))
+        kv_heads = int(getattr(config, "num_key_value_heads", getattr(config, "n_head_kv", 0)))
+        head_dim = int(getattr(config, "head_dim", 0))
+        layer_types = getattr(config, "layer_types", None)
 
         if num_layers <= 0:
             raise ValueError(f"Invalid num_hidden_layers: {num_layers}")
-        if interval <= 0:
+        if layer_types is None and interval <= 0:
             raise ValueError(f"Invalid full_attention_interval: {interval}")
+        if min(q_heads, kv_heads, head_dim) <= 0 or q_heads % kv_heads:
+            raise ValueError("Invalid attention head geometry")
 
-        # Derive roles
-        roles: Dict[int, LayerRole] = {}
-        num_full_attn = 0
-        num_recr = 0
-
-        # For Qwen3.5/Qwen3.8 hybrid models:
-        # Layers where (il + 1) % interval == 0 (or il % interval == interval - 1) are full attention
-        for il in range(num_layers):
-            if (il + 1) % interval == 0:
-                roles[il] = LayerRole.FULL_ATTENTION_KV
-                num_full_attn += 1
-            else:
-                roles[il] = LayerRole.RECURRENT_STATE
-                num_recr += 1
-
-        # Strict validation for Qwen3.5/Qwen3.8 64-layer contracts
-        if num_layers == 64 and interval == 4:
-            if num_full_attn != 16 or num_recr != 48:
-                raise ValueError(
-                    f"Contradictory topology: expected 16 full-attention and 48 recurrent layers, "
-                    f"got {num_full_attn} full-attention and {num_recr} recurrent layers."
-                )
+        if layer_types is None:
+            layer_types = [
+                "full_attention" if (il + 1) % interval == 0 else "linear_attention"
+                for il in range(num_layers)
+            ]
+        if len(layer_types) != num_layers:
+            raise ValueError("layer_types length does not match num_hidden_layers")
+        supported = {"full_attention": LayerRole.FULL_ATTENTION_KV,
+                     "linear_attention": LayerRole.RECURRENT_STATE}
+        if any(kind not in supported for kind in layer_types):
+            raise ValueError("Unsupported hybrid layer type")
+        # Explicit runtime metadata takes precedence over a periodic-layout hint.
+        roles = {il: supported[kind] for il, kind in enumerate(layer_types)}
+        num_full_attn = sum(role == LayerRole.FULL_ATTENTION_KV for role in roles.values())
+        num_recr = num_layers - num_full_attn
 
         return cls(
             num_total_layers=num_layers,

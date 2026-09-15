@@ -1,5 +1,46 @@
 # Changelog
 
+## v0.5.0 — Budgeted llama.cpp KV ownership and direct disk pages
+
+### Added
+- **llama.cpp host KV seam** (`integrations/llama.cpp/host-kv.patch`,
+  `csrc/ggml_host_buffer.cpp`): with `ARGUS_KV_DIR`, `llama_kv_cache` tensors
+  are allocated in ARGUS-owned file-backed host buffers under an explicit
+  `ARGUS_KV_MAX_BYTES` limit; unset, the binary follows the stock path.
+- **Native block attention** (`csrc/ggml_paged_attention.cpp`): exact block
+  softmax over GGML KV tensors without reconstructing the full cache, with
+  per-invocation worker coordination.
+- **Direct disk KV** (`csrc/ggml_disk_buffer.cpp`): with
+  `ARGUS_KV_STAGING_BYTES`, KV lives only in an unlinked `O_DIRECT` store.
+  Page writes go to a second slot and are read back and checksum-verified before
+  the descriptor moves. A single-depth prefetch worker refuses a full queue and
+  stale generations. Disk, descriptor metadata and all ARGUS staging are hard
+  budgets that fail explicitly.
+- **Standalone `PageStore` / `DiskBlockPool`** (`core/page_store.py`,
+  `core/disk_pool.py`): bounded RAM-to-disk movement, pinning, checksummed
+  atomic writes and one-page read-ahead for the Python path.
+- `bench_llama_paged_context.py --modes argus-direct` and `bench_disk_pages.py`.
+
+### Fixed
+- GGML invokes custom ops on every graph worker regardless of `n_tasks`; disk
+  attention and disk `set_rows` now run only on worker 0. This was the cause of
+  staging-budget overruns under multithreaded decode.
+
+### Measured
+- Qwen2.5-0.5B-Instruct Q4_K_M, CPU, 4 MiB staging, 1 MiB metadata budget:
+  `q8_0` and `q4_0` direct disk KV match stock llama.cpp with zero attention and
+  logit error and zero greedy mismatches over 19 steps including crop and state
+  restore. Peak staging 1.27 MiB.
+- Kernel references FP32/FP16/BF16/Q8/Q4 at 1/4/16 workers; stories15M FP32/FP16
+  lifecycle and CPU/GPU-offload server ownership parity.
+
+### Not included
+- No unified HF/llama.cpp tiering backend; the Python and native stores are
+  separate. No GPU-resident ARGUS KV, no per-page mixed precision in llama.cpp,
+  no vLLM integration.
+- No real long-context throughput or NVMe measurement. The 1M-token disk smoke
+  is synthetic (one layer, one head, head dimension 4).
+
 ## v0.4.0 — Direct paged attention, hybrid ownership, and an honest llama.cpp negative
 
 ### Added

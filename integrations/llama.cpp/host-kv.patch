@@ -1,0 +1,232 @@
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -70,6 +70,14 @@
+ 
+ target_link_libraries(llama PUBLIC ggml)
+ 
++set(ARGUS_CORE_DIR "" CACHE PATH "ARGUS csrc directory for experimental host KV ownership")
++if (ARGUS_CORE_DIR)
++    target_sources(llama PRIVATE "${ARGUS_CORE_DIR}/ggml_host_buffer.cpp" "${ARGUS_CORE_DIR}/ggml_paged_attention.cpp" "${ARGUS_CORE_DIR}/ggml_disk_buffer.cpp")
++    set_source_files_properties("${ARGUS_CORE_DIR}/ggml_disk_buffer.cpp" PROPERTIES SKIP_UNITY_BUILD_INCLUSION ON)
++    target_include_directories(llama PRIVATE "${ARGUS_CORE_DIR}" ../ggml/src)
++    target_compile_definitions(llama PRIVATE LLAMA_ARGUS_HOST)
++endif()
++
+ if (BUILD_SHARED_LIBS)
+     set_target_properties(llama PROPERTIES POSITION_INDEPENDENT_CODE ON)
+     target_compile_definitions(llama PRIVATE LLAMA_BUILD)
+--- a/src/llama-kv-cache.cpp
++++ b/src/llama-kv-cache.cpp
+@@ -1,4 +1,8 @@
+ #include "llama-kv-cache.h"
++#ifdef LLAMA_ARGUS_HOST
++#include "ggml_host_buffer.h"
++#include "ggml_disk_buffer.h"
++#endif
+ 
+ #include "llama-impl.h"
+ #include "llama-io.h"
+@@ -220,6 +224,18 @@
+             dev_name = ggml_backend_dev_name(dev);
+         }
+ 
++#ifdef LLAMA_ARGUS_HOST
++        if (std::getenv("ARGUS_KV_DIR") && !hparams.no_alloc) {
++            if (offload) {
++                throw std::runtime_error("ARGUS host KV requires --no-kv-offload (-nkvo)");
++            }
++            if (argus_ggml_disk_enabled() && v_trans) {
++                throw std::runtime_error("ARGUS disk KV requires flash attention layout (-fa on)");
++            }
++            buft = argus_ggml_disk_enabled() ? argus_ggml_disk_buffer_type() : argus_ggml_host_buffer_type();
++            dev_name = ggml_backend_buft_name(buft);
++        }
++#endif
+         LLAMA_LOG_DEBUG("%s: layer %3d: dev = %s\n", __func__, il, dev_name);
+ 
+         ggml_context * ctx = ctx_for_buft(buft);
+@@ -1186,6 +1202,11 @@
+ }
+ 
+ bool llama_kv_cache::get_can_shift() const {
++#ifdef LLAMA_ARGUS_HOST
++    for (const auto & layer : layers) {
++        if (layer.k && argus_ggml_is_disk_tensor(layer.k)) { return false; }
++    }
++#endif
+     // Step35 uses per-layer RoPE dims; K-shift assumes a single global n_rot.
+     if (model.arch == LLM_ARCH_STEP35) {
+         return false;
+@@ -1347,6 +1368,9 @@
+     }
+ 
+     // store the current K values into the cache
++#ifdef LLAMA_ARGUS_HOST
++    if (auto * stored = argus_ggml_disk_set_rows(ctx, k, k_cur, k_idxs)) { return stored; }
++#endif
+     return ggml_set_rows(ctx, k, k_cur, k_idxs);
+ }
+ 
+@@ -1382,6 +1406,9 @@
+             v = ggml_reshape_2d(ctx, v, n_embd_gqa, kv_size*n_stream);
+         }
+ 
++#ifdef LLAMA_ARGUS_HOST
++        if (auto * stored = argus_ggml_disk_set_rows(ctx, v, v_cur, v_idxs)) { return stored; }
++#endif
+         return ggml_set_rows(ctx, v, v_cur, v_idxs);
+     }
+ 
+--- a/src/llama-context.cpp
++++ b/src/llama-context.cpp
+@@ -1,4 +1,7 @@
+ #include "llama-context.h"
++#ifdef LLAMA_ARGUS_HOST
++#include "ggml_disk_buffer.h"
++#endif
+ 
+ #include "ggml.h"
+ #include "llama-arch.h"
+@@ -2692,6 +2695,19 @@
+     }
+ 
+     void write_tensor(ggml_tensor * tensor, size_t offset, size_t size) override {
++#ifdef LLAMA_ARGUS_HOST
++        if (argus_ggml_is_disk_tensor(tensor)) {
++            ArgusStagingBuffer block(4096);
++            while (size) {
++                const size_t count = std::min(size, block.size());
++                ggml_backend_tensor_get(tensor, block.data(), offset, count);
++                write(block.data(), count);
++                offset += count;
++                size -= count;
++            }
++            return;
++        }
++#endif
+         temp_buffer.resize(size);
+         ggml_backend_tensor_get(tensor, temp_buffer.data(), offset, size);
+         write(temp_buffer.data(), temp_buffer.size());
+@@ -2717,6 +2733,19 @@
+     }
+ 
+     void read_tensor(ggml_tensor * tensor, size_t offset, size_t size) override {
++#ifdef LLAMA_ARGUS_HOST
++        if (argus_ggml_is_disk_tensor(tensor)) {
++            ArgusStagingBuffer block(4096);
++            while (size) {
++                const size_t count = std::min(size, block.size());
++                read(block.data(), count);
++                ggml_backend_tensor_set(tensor, block.data(), offset, count);
++                offset += count;
++                size -= count;
++            }
++            return;
++        }
++#endif
+         temp_buffer.resize(size);
+         read(temp_buffer.data(), size);
+         ggml_backend_tensor_set(tensor, temp_buffer.data(), offset, size);
+--- a/src/llama-graph.cpp
++++ b/src/llama-graph.cpp
+@@ -1,4 +1,7 @@
+ #include "llama-graph.h"
++#ifdef LLAMA_ARGUS_HOST
++#include "ggml_host_buffer.h"
++#endif
+ 
+ #include "llama-impl.h"
+ #include "llama-model.h"
+@@ -2599,6 +2602,16 @@
+              int64_t   n_kv_max,
+                float   kq_scale,
+                  int   il) const {
++#ifdef LLAMA_ARGUS_HOST
++    if (ggml_tensor * paged = argus_ggml_paged_attention(ctx0, q, k, v, kq_mask,
++            kq_b || sinks || v_mla || hparams.attn_soft_cap || hparams.f_max_alibi_bias != 0.0f || arch == LLM_ARCH_GROK,
++            kq_scale)) {
++        ggml_tensor * cur = ggml_reshape_2d(ctx0, paged, paged->ne[0]*paged->ne[1], paged->ne[2]);
++        ggml_backend_sched_set_tensor_backend(sched, paged, backend_cpu);
++        ggml_build_forward_expand(gf, cur);
++        return cur;
++    }
++#endif
+     const bool v_trans = v->nb[1] > v->nb[2];
+ 
+     // split the batch into streams if needed
+--- a/ggml/include/ggml-cpu.h
++++ b/ggml/include/ggml-cpu.h
+@@ -125,6 +125,12 @@
+ 
+     GGML_BACKEND_API void ggml_cpu_init(void);
+ 
++    // Experimental external KV blocks: preserve the scalar flash-attention accumulator.
++    // partials: q rows * (2 + value dim), initialized to {-INFINITY, 0, zeros}.
++    // work: (key dim + 2 * value dim + 64) floats. dst uses FLASH_ATTN_EXT layout/params.
++    GGML_BACKEND_API void ggml_cpu_flash_attn_ext_accumulate(
++        struct ggml_tensor * dst, float * partials, void * work, bool final_block);
++
+     //
+     // CPU backend
+     //
+--- a/ggml/src/ggml-cpu/ops.cpp
++++ b/ggml/src/ggml-cpu/ops.cpp
+@@ -8616,7 +8616,7 @@
+         ggml_tensor * dst,
+         int ir0, int ir1,
+         int64_t ic_start, int64_t ic_end,
+-        float * partials, int64_t partial_stride) {
++        float * partials, int64_t partial_stride, bool resume = false) {
+ 
+     const bool write_partials = (partials != nullptr);
+     const ggml_tensor * q     = dst->src[0];
+@@ -8704,15 +8704,18 @@
+         const uint32_t h = iq2; // head index
+         const float slope = (max_bias > 0.0f) ? h < n_head_log2 ? powf(m0, h + 1) : powf(m1, 2*(h - n_head_log2) + 1) : 1.0f;
+ 
+-        float S = 0.0f;      // sum
+-        float M = -INFINITY; // maximum KQ value
++        float S = resume ? partials[ir * partial_stride + 1] : 0.0f;
++        float M = resume ? partials[ir * partial_stride] : -INFINITY;
+ 
+         float       * VKQ32 = (float       *) params->wdata + ith*(1*DK + 2*DV + CACHE_LINE_SIZE_F32); // FP32 VKQ accumulator
+         float       * V32   =                 (VKQ32 + 1*DV); // (temporary) FP32 V buffer
+         ggml_fp16_t * VKQ16 = (ggml_fp16_t *) (VKQ32 + 1*DV); // (temporary) FP16 VKQ accumulator
+         ggml_fp16_t * Q_q   = (ggml_fp16_t *) (VKQ32 + 2*DV); // (temporary) buffer for Q converted to quantized/FP16
+ 
+-        if (v->type == GGML_TYPE_F16) {
++        if (resume) {
++            GGML_ASSERT(v->type != GGML_TYPE_F16);
++            memcpy(VKQ32, partials + ir * partial_stride + 2, DV * sizeof(float));
++        } else if (v->type == GGML_TYPE_F16) {
+             memset(VKQ16, 0, DV*sizeof(ggml_fp16_t));
+         } else {
+             memset(VKQ32, 0, DV*sizeof(float));
+@@ -8845,6 +8848,27 @@
+ 
+             // permute(0, 2, 1, 3)
+             memcpy((char *) dst->data + (i3*ne2*ne1 + i2 + i1*ne1)*nb1, VKQ32, nb1);
++        }
++    }
++}
++
++void ggml_cpu_flash_attn_ext_accumulate(ggml_tensor * dst, float * partials, void * work, bool final_block) {
++    const auto * q = dst->src[0];
++    const int64_t rows = q->ne[1] * q->ne[2];
++    const int64_t dv = dst->ne[0], stride = dv + 2;
++    GGML_ASSERT(q->ne[3] == 1 && dst->src[4] == nullptr && dst->src[2]->type != GGML_TYPE_F16);
++    ggml_compute_params params{};
++    params.ith = 0;
++    params.nth = 1;
++    params.wdata = work;
++    ggml_compute_forward_flash_attn_ext_f16_one_chunk(&params, dst, 0, rows, 0, dst->src[1]->ne[1], partials, stride, true);
++    if (final_block) {
++        for (int64_t row = 0; row < rows; ++row) {
++            float * result = partials + row * stride + 2;
++            const float sum = partials[row * stride + 1];
++            ggml_vec_scale_f32(dv, result, sum == 0 ? 0 : 1.0f / sum);
++            const auto head = row / q->ne[1], token = row % q->ne[1];
++            memcpy(static_cast<char *>(dst->data) + head * dst->nb[1] + token * dst->nb[2], result, dv * sizeof(float));
+         }
+     }
+ }

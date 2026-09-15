@@ -13,6 +13,30 @@ değildir.
 
 İngilizce belge: [README.md](README.md)
 
+## v0.5: modelden bağımsız KV yerleşimi
+
+[Plan](plans/argus-v0.5.0.md) model contract'larını core dışında tutuyor.
+
+- **llama.cpp direct disk KV.** [llama.cpp entegrasyonu](integrations/llama.cpp/README.md)
+  tüm KV katmanlarını ARGUS'a ait `O_DIRECT` bir depoya koyar; disk, metadata ve
+  staging bütçeleri zorlanır, sayfa yazımları checksum ile doğrulanır, prefetch
+  sınırlıdır. Qwen2.5-0.5B üzerinde (CPU, `q8_0` ve `q4_0` KV, 4 MiB staging)
+  attention ve logit'ler decode, crop ve state restore boyunca stock llama.cpp ile
+  birebir aynı; tepe staging 1,27 MiB.
+- **llama.cpp blok attention** mapped host KV üzerinde; FP32/FP16/BF16/Q8/Q4 için
+  1/4/16 worker ile double-precision referansa karşı doğrulandı.
+- **Bağımsız `PageStore` / `DiskBlockPool`**: sınırlı pool kapasitesi, RAM→disk
+  taşıma, pin koruması, checksum'lı atomik yazım ve tek sayfalık prefetch. Direct
+  attention codec ile placement'ı ayırır; FP16/BF16, Q8/Q4 sayfaları ve
+  sliding-window maskesini destekler.
+
+v0.5'te olmayanlar: birleşik HF/llama.cpp tiering backend'i (Python page store ile
+native store ayrı), GPU'da duran ARGUS KV, llama.cpp içinde sayfa başına karışık
+hassasiyet ve gerçek uzun bağlam throughput ölçümü.
+[Sentetik 1M disk testi](docs/measurements/v050-disk-capacity-smoke-2026-09-15.json)
+tek katman, tek KV head ve head boyutu 4 kullanır; gerçek modelde 1M context veya
+NVMe performans kanıtı değildir.
+
 ## Bugün gerçekten kanıtlanan sonuç
 
 Uçtan uca ölçüm Qwen2.5-0.5B-Instruct, 4 GB RTX 3050 Ti Laptop GPU, FP16,
@@ -154,7 +178,7 @@ işlerken TTFT 99,88 ms'ye düşüyor. Bu koşudan hiçbir ARGUS iddiası
 çıkarılmıyor. Depoda durmasının sebebi şu: yanlış atfedilmiş bir kazanç, tam da
 sorgulanmadan hayatta kalan sonuç türüdür.
 
-ARGUS'un **llama.cpp entegrasyonu yoktur**. Yanında yayımlanan taramalar
+O deneyde **llama.cpp entegrasyonu yoktu**. Yanında yayımlanan taramalar
 (`load-mode-comparison`, `pmin-sweep`, `speculative-sweep-n2-n3-n4`) llama.cpp
 runtime ayarıdır ve öyle etiketlenmiştir.
 
@@ -167,7 +191,7 @@ Kanıt: [`docs/measurements/argus-ab-cache-comparison-2026-09-04.json`](docs/mea
 | HuggingFace Transformers | Ölçülmüş araştırma yolu | Modelin KV önbelleğini |
 | Ollama | Canlı test edilmiş dış adaptör | Ollama içini değil; yalnızca ayar ve süreleri |
 | vLLM | Kullanılamıyor, güvenli biçimde reddediyor | Hiçbir şeyi |
-| llama.cpp | Entegre değil, denetimle doğrulandı | Hiçbir şeyi; "Denenip olmayan şey" bölümüne bakın |
+| llama.cpp | Deneysel yama; host ve direct disk KV, CPU parity doğrulandı | ARGUS'a ait KV depolama, bütçeler ve attention; heterojen hassasiyet bekliyor |
 | SGLang | Uygulanmadı | Hiçbir şeyi |
 
 Eski vLLM entegrasyonu vLLM'in KV bloklarına sahip değildi ve onları
@@ -273,8 +297,9 @@ python benchmarks/bench_downstream.py \
 - `DirectPagedAttentionEngine` yalnızca yalıtılmış olarak ölçüldü. HuggingFace
   decode yoluna bağlanmadı; dolayısıyla sayıları henüz hiçbir uçtan uca
   sonuçta görünmüyor.
-- llama.cpp entegrasyonu yoktur; tek deneme yukarıda negatif sonuç olarak
-  yayımlanmıştır.
+- llama.cpp entegrasyonu yalnızca CPU attention ve host (`-nkvo`) KV kullanır;
+  direct disk KV birebir doğru, ama uzun bağlam hızı ölçülmedi. Önceki llama.cpp
+  A/B denemesi yukarıda negatif sonuç olarak duruyor.
 - q4_0 retrieval probu 31k token'da tek ve bağışlayıcı bir görevdir. Kuantize
   KV altında akıl yürütme, kod üretimi ve uzun menzilli tutarlılık ölçülmedi.
 

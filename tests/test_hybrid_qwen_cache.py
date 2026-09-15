@@ -68,6 +68,24 @@ def test_topology_fails_closed_on_contradictory_metadata():
         HybridTopology.from_config(SimpleNamespace(num_hidden_layers=64, full_attention_interval=0))
 
 
+def test_explicit_nested_layer_metadata_controls_kv_ownership():
+    text = SimpleNamespace(
+        num_hidden_layers=3, full_attention_interval=4,
+        layer_types=["full_attention", "linear_attention", "full_attention"],
+        num_attention_heads=4, num_key_value_heads=1, head_dim=8,
+    )
+    topology = HybridTopology.from_config(SimpleNamespace(text_config=text))
+    assert topology.num_full_attention_layers == 2
+    assert topology.is_full_attention(0) and topology.is_recurrent(1)
+    assert topology.exact_bf16_kv_bytes_per_token() == 64
+    text.layer_types = ["full_attention"]
+    with pytest.raises(ValueError, match="length"):
+        HybridTopology.from_config(text)
+    text.layer_types = ["full_attention", "unknown", "linear_attention"]
+    with pytest.raises(ValueError, match="Unsupported"):
+        HybridTopology.from_config(text)
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 def test_hybrid_cache_memory_ownership_and_state_digest_invariance():
     """Proves that ARGUS operations update KV cache while keeping DeltaNet digest invariant."""
@@ -173,4 +191,3 @@ def test_hybrid_cache_snapshot_and_rollback():
     for il in range(8):
         if topology.is_recurrent(il):
             assert torch.all(cache.get_recurrent_state(il) == 1.0)
-

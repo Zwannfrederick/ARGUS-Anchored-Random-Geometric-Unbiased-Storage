@@ -12,6 +12,30 @@ its HuggingFace decode latency is not yet suitable for low-latency serving.
 
 Türkçe belge: [README_TR.md](README_TR.md)
 
+## v0.5: model-independent KV placement
+
+The [v0.5 plan](plans/argus-v0.5.0.md) keeps model contracts outside the core.
+
+- **llama.cpp direct disk KV.** The [llama.cpp integration](integrations/llama.cpp/README.md)
+  places every KV layer in an ARGUS-owned `O_DIRECT` store with enforced disk,
+  metadata and staging budgets, checksum-verified page writes and bounded
+  prefetch. On Qwen2.5-0.5B (CPU, `q8_0` and `q4_0` KV, 4 MiB staging) attention
+  and logits match stock llama.cpp exactly across decode, crop and state restore;
+  peak staging was 1.27 MiB.
+- **llama.cpp block attention** over mapped host KV, checked against
+  double-precision references for FP32/FP16/BF16/Q8/Q4 at 1/4/16 workers.
+- **Standalone `PageStore` / `DiskBlockPool`** with bounded pool capacity,
+  RAM-to-disk movement, pinned-page protection, checksummed atomic writes and
+  one-page read-ahead. Direct attention distinguishes codec from placement and
+  supports FP16/BF16, Q8/Q4 pages and sliding-window masks.
+
+Not in v0.5: a unified HF/llama.cpp tiering backend (the Python page store and
+the native store are separate), GPU-resident ARGUS KV, per-page mixed precision
+inside llama.cpp, and real long-context throughput. The
+[1M-token synthetic disk check](docs/measurements/v050-disk-capacity-smoke-2026-09-15.json)
+uses one layer, one KV head and head dimension 4; it is not 1M-context model
+generation or an NVMe performance claim.
+
 ## What is proven today
 
 The current end-to-end benchmark uses Qwen2.5-0.5B-Instruct on an RTX 3050 Ti
@@ -135,7 +159,7 @@ reprocesses the whole prompt — not to ARGUS. No ARGUS claim is drawn from this
 run. It ships in the repository because a misattributed win is precisely the
 result that would otherwise go unchallenged.
 
-ARGUS has **no llama.cpp integration**. The sweeps published beside it
+That run had **no llama.cpp integration**. The sweeps published beside it
 (`load-mode-comparison`, `pmin-sweep`, `speculative-sweep-n2-n3-n4`) are
 llama.cpp runtime tuning and are labelled as such.
 
@@ -170,7 +194,7 @@ Detailed ownership and extension points are documented in
 | HuggingFace Transformers | Research path, measured | ARGUS owns the model's KV cache |
 | Ollama | External adapter, live-tested | Nothing inside Ollama; configuration and timing only |
 | vLLM | Unavailable, fails closed | Nothing; no false monkey patch is installed |
-| llama.cpp | Not integrated, audited negative | Nothing; see "What was tried and did not work" |
+| llama.cpp | Experimental patch; host and direct-disk KV, CPU parity tested | ARGUS-owned KV storage, budgets and attention; heterogeneous precision pending |
 | SGLang | Not implemented | Nothing |
 
 The former vLLM integration did not own vLLM KV blocks and could not compress
@@ -300,8 +324,9 @@ Benchmark classes are kept separate:
 - `DirectPagedAttentionEngine` is measured in isolation only. It has not been
   wired into the HuggingFace decode path, so its numbers do not yet appear in
   any end-to-end result.
-- There is no llama.cpp integration, and the one attempt is published as a
-  negative result above.
+- The llama.cpp integration is CPU-attention only with host (`-nkvo`) KV; direct
+  disk KV is exact but its long-context speed is unmeasured. The earlier A/B
+  attempt remains a negative result above.
 - The q4_0 retrieval probe is a single forgiving task at 31k tokens. Reasoning,
   code generation, and long-range coherence under quantized KV are unmeasured.
 

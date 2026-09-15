@@ -19,6 +19,7 @@ class CodecKind(enum.IntEnum):
     ACTIVE_FP16 = 0
     GGML_Q8_0 = 1
     GGML_Q4_0 = 2
+    ACTIVE_BF16 = 3
     CUSTOM_PLUGIN = 99
 
 
@@ -27,6 +28,7 @@ class PlacementLocation(enum.IntEnum):
     GPU_DEVICE = 0
     HOST_PINNED = 1
     HOST_PAGEABLE = 2
+    DISK = 3
 
 
 @dataclass
@@ -48,6 +50,8 @@ class StructureOfArraysPageTable:
     """High-performance Structure-of-Arrays (SoA) page table for hot-path decode dispatch."""
 
     def __init__(self, capacity: int = 4096, device: str = "cpu"):
+        if capacity < 1:
+            raise ValueError("Page table capacity must be positive")
         self.capacity = capacity
         self.device = device
         self.num_pages = 0
@@ -81,6 +85,12 @@ class StructureOfArraysPageTable:
         v_scale: float = 1.0,
     ) -> int:
         """Publishes a new page descriptor into the table."""
+        if page_id in self._page_id_to_idx:
+            raise ValueError(f"Page ID {page_id} already exists")
+        if not 0 <= page_id < 2**31 or logical_pos < 0 or not 0 < token_count < 2**31:
+            raise ValueError("Invalid page ID, position or token count")
+        codec = CodecKind(codec)
+        placement = PlacementLocation(placement)
         if self.num_pages >= self.capacity:
             self._grow_capacity(self.capacity * 2)
 
@@ -116,6 +126,9 @@ class StructureOfArraysPageTable:
         if idx is None:
             raise KeyError(f"Page ID {page_id} not found in page table")
 
+        new_placement = PlacementLocation(new_placement)
+        if new_codec is not None:
+            new_codec = CodecKind(new_codec)
         self.placements[idx] = int(new_placement)
         if new_codec is not None:
             self.codecs[idx] = int(new_codec)

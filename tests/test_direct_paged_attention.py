@@ -106,7 +106,7 @@ def test_contiguous_block_pool_allocation_and_recycling():
 
     pool = ContiguousBlockPool(
         codec=CodecKind.GGML_Q8_0,
-        placement=PlacementLocation.GPU_DEVICE,
+        placement=PlacementLocation.HOST_PAGEABLE,
         max_slots=max_slots,
         page_size=page_size,
         num_heads=num_heads,
