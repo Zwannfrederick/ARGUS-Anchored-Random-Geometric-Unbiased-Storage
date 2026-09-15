@@ -13,7 +13,7 @@ Yerel CPU derlemesi `scratch/llama.cpp-v050` altında, sabit revision arşivinde
 - **Sonraya not — uzun context ölçümü (M5):** uzun süren ladder testleri sonra
   yapılacak; ölçüm 262K basamağından başlanarak ele alınacak. 1M gerçek model
   bu makinede hedef değil (model sınırı 262K, CPU attention prefill saatler sürer).
-- **v0.6:** ölçüm stabilizasyonu, Python PageStore–native store birleşmesi (M1),
+- **v0.6:** ölçümlerle birlikte yeni ürün vizyonu görüşmesi; ölçüm stabilizasyonu, Python PageStore–native store birleşmesi (M1),
   hybrid/multimodal kalite, FP8/Q2 (M3), vLLM ve diğer entegrasyonlar.
 - Ölçüm diski: `scratch/kv` SATA SSD (`/dev/sda`) üzerinde; NVMe ölçümü için KV
   dizini `nvme0n1` üzerinde seçilmeli ve kayıtta cihaz yazılmalı.
