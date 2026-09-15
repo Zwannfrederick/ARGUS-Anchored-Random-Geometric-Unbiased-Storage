@@ -53,3 +53,32 @@ def test_streaming_attention_supports_grouped_query_attention():
     )
 
     torch.testing.assert_close(actual, expected, rtol=3e-3, atol=3e-3)
+
+
+@pytest.mark.parametrize("codec", ["q8_0", "q4_0", "int2", "one_bit"])
+def test_native_compressed_decode_matches_decoded_reference(codec, monkeypatch):
+    cache = PagedDynamicKVCache(pipeline=PipelineConfig(
+        tiers=[TierSpec(codec, codec, max_pages=-1)], page_size=128,
+        sink_tokens=0, max_active_pages=1, streaming_attention=True,
+        resurrection_threshold=2.0,
+    ))
+    try:
+        torch.manual_seed(17)
+        keys = torch.randn(1, 1, 384, 32, device="cuda", dtype=torch.float16)
+        values = torch.randn_like(keys)
+        cache.push_new_tokens(keys, values)
+        restored_k, restored_v = cache.get_all_keys_values()
+        query = torch.randn(1, 4, 1, 32, device="cuda", dtype=torch.float16)
+        expected = torch.nn.functional.scaled_dot_product_attention(
+            query, restored_k, restored_v, enable_gqa=True,
+        )
+
+        def forbid():
+            raise AssertionError("Full-cache reconstruction during decode")
+
+        monkeypatch.setattr(cache, "get_all_keys_values", forbid)
+        actual = cache.inplace_paged_attention(query)
+        torch.testing.assert_close(actual, expected, rtol=3e-3, atol=3e-3)
+        assert cache.pages_by_tier[codec]
+    finally:
+        cache.close()

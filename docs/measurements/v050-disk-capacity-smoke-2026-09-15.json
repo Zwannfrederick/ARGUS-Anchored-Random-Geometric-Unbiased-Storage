@@ -1,0 +1,27 @@
+{
+  "kind": "synthetic-filled-disk-cache",
+  "model_generation": false,
+  "production_benchmark": false,
+  "command": "OMP_NUM_THREADS=2 PYTHONPATH=. .venv/bin/python benchmarks/bench_disk_pages.py --directory scratch --tokens 1048576",
+  "warmups": 0,
+  "repeats": 1,
+  "tokens": 1048576,
+  "pages": 1024,
+  "page_size": 1024,
+  "geometry": {"layers": 1, "batch": 1, "kv_heads": 1, "head_dim": 4},
+  "fill_seconds": 0.27947275999940757,
+  "decode_seconds": 0.46845538900015526,
+  "max_rss_kib": 586520,
+  "pool_usage": {
+    "ACTIVE_FP16/DISK": {"live_bytes": 16809984, "capacity_bytes": 16826400}
+  },
+  "parity_passed": true,
+  "directory": "scratch",
+  "filesystem_device": "/dev/sda2",
+  "nvme_verified": false,
+  "python": "3.14.7",
+  "torch": "2.12.0+cu130",
+  "git_commit": "fa8c48b0212c7cb49af5c77d4ae62c513623c471",
+  "git_dirty": true,
+  "notes": "Tiny synthetic geometry, one CPU attention query, buffered filesystem I/O. RSS includes Python/PyTorch. Not a 1M-context model generation result, NVMe throughput result, or v0.5 release gate. Dirty working-tree implementation must accompany this artifact."
+}

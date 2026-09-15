@@ -54,6 +54,8 @@ _LAZY_EXPORTS = {
     "PlacementLocation": ("argus_cache.core.page_table", "PlacementLocation"),
     "StructureOfArraysPageTable": ("argus_cache.core.page_table", "StructureOfArraysPageTable"),
     "ContiguousBlockPool": ("argus_cache.core.backend_pool", "ContiguousBlockPool"),
+    "DiskBlockPool": ("argus_cache.core.disk_pool", "DiskBlockPool"),
+    "PageStore": ("argus_cache.core.page_store", "PageStore"),
     "DirectPagedAttentionEngine": ("argus_cache.core.direct_attention", "DirectPagedAttentionEngine"),
 }
 
@@ -206,5 +208,7 @@ __all__ = [
     "PlacementLocation",
     "StructureOfArraysPageTable",
     "ContiguousBlockPool",
+    "DiskBlockPool",
+    "PageStore",
     "DirectPagedAttentionEngine",
 ]

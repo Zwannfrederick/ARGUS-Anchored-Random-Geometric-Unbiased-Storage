@@ -148,6 +148,7 @@ class PagedDynamicQuantizedCache(Cache):
             threshold_sigma=self.threshold_sigma,
             max_active_pages=self.max_active_pages,
             balloon_driver=self.balloon_driver,
+            streaming_attention=True,
         )
 
     def _research_pipeline(self) -> PipelineConfig:

@@ -1,0 +1,21 @@
+{
+  "role": "final-validation-workload",
+  "repository": "bartowski/tencent_UI-Mate-9B-GGUF",
+  "revision": "695da95fcfcb1fed85e9b4dd6d698e3575f09288",
+  "upstream_model": "tencent/UI-Mate-9B",
+  "metadata_checked": "2026-09-15",
+  "local_files_verified": true,
+  "local_files_verified_date": "2026-09-15",
+  "files": [
+    {
+      "filename": "tencent_UI-Mate-9B-Q4_K_M.gguf",
+      "bytes": 5910783104,
+      "sha256": "a54257eb4caa664dc1d2654b1aaed31767e3e6b01b4c7ecce9f239c00af23e2c"
+    },
+    {
+      "filename": "mmproj-tencent_UI-Mate-9B-f16.gguf",
+      "bytes": 918166016,
+      "sha256": "5a8380c4637dddceed9dbc28fffcdfa8601909c0ece9fe218fbd6888ec5d2c16"
+    }
+  ]
+}
