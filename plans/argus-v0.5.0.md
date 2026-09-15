@@ -1,27 +1,25 @@
 # ARGUS v0.5 — modelden bağımsız KV runtime
 
-Tarih: 2026-09-15. Durum: devam oturumunda native doğrulama tamamlandı;
-sürüm tamamlanmış değildir.
+Tarih: 2026-09-15. Durum: **kapandı — v0.5.0 commit `9861e9c`**.
 Kapsam: kullanıcı tüm hedefleri, gerçek llama.cpp KV sahipliği dahil, onayladı.
+Kullanıcı sürümü aşağıdaki teslim edilen kapsamla kapatmaya karar verdi; kapanmayan
+kabul kapıları iptal edilmedi, v0.6'ya devredildi.
 
-Yeni oturum önce [v0.5 devir notunu](../docs/handoffs/v050-handoff-2026-09-15.md)
-okusun. CUDA derlemesi ve GPU model offload + ARGUS host KV smoke **tamamlandı**;
-Ancak devam oturumunda `/tmp` kaynak/derleme dosyaları kayıptı; sabit revision
-arşivinden `scratch/llama.cpp-v050` altında CPU derlemesi yeniden oluşturuldu.
+Tarihçe için [v0.5 devir notu](../docs/handoffs/v050-handoff-2026-09-15.md).
+Yerel CPU derlemesi `scratch/llama.cpp-v050` altında, sabit revision arşivinden.
 
-## Güncel kabul durumu
+## Kapanış durumu
 
-| Kapı | Durum | Kapanması için gereken |
+| Kapı | v0.5.0 sonucu | v0.6'ya devredilen |
 |---|---|---|
-| M1 — ortak native page yaşam döngüsü | Kısmi | Ayrı Python PageStore ile üretim native manager bağlantısı, append/crop/reset/state parity |
-| M2 — GPU/RAM/disk bütçeleri | Kısmi | Disk direct + staging bütçesi model parity ile doğrulandı; GPU/pinned tiering ve `argus-direct` gerçek cihaz ladder ölçümü açık |
-| M3 — attention contract kapsamı | Kısmi | Model aileleri, hybrid/multimodal lifecycle, FP8 ve eksik codec/quality kapıları |
-| M4 — runtime sahipliği | Kısmi | Host allocation kanıtlandı; heterojen native attention, GPU-resident KV ve vLLM açık |
-| M5 — gerçek 8K–1M üretim ölçümü | Açık | Sentetik 1M smoke gerçek model kabulü değildir |
-| M6 — UI-Mate/Hermes/Neo | Açık | Model dosyaları indirilmedi; vanilla ve ARGUS uçtan uca karşılaştırma yapılmadı |
+| M1 — ortak native page yaşam döngüsü | Native llama.cpp store'da append/crop/reset/state parity (Qwen q8_0/q4_0, stories15M f32/f16) | Python PageStore ile native store'un birleşmesi |
+| M2 — GPU/RAM/disk bütçeleri | Disk, metadata ve staging kesin bütçe; checksum'lı iki slot yazım, sınırlı prefetch, hata enjeksiyonu testleri | GPU/pinned tiering; `argus-direct` gerçek cihaz ladder ölçümü |
+| M3 — attention contract kapsamı | FP32/FP16/BF16/Q8/Q4 kernel referansı, 1/4/16 worker; iki model ailesi (Llama/stories15M, Qwen2.5) | Hybrid/multimodal lifecycle, FP8, Q2, kalite kapıları |
+| M4 — runtime sahipliği | llama.cpp KV allocation, write ve attention read ARGUS'ta; CPU ve GPU-offload server parity | GPU-resident KV, sayfa başına karışık hassasiyet, vLLM |
+| M5 — gerçek 8K–1M üretim ölçümü | Yapılmadı; yalnız sentetik 1M disk smoke | Tüm context ladder ve kalite ölçümü |
+| M6 — UI-Mate/Hermes/Neo | Hermes ARGUS KV modu, Neo plain chat ve KV durum kartı (commit `0df1033`); UI-Mate dosyaları SHA-256 ile doğrulandı | Vanilla ve ARGUS uçtan uca GUI workload karşılaştırması |
 
-Yüzde yerine bu kabul kapıları esas alınır. Sohbetteki %35–40 tahmini ölçülmüş
-ilerleme veya release onayı değildir.
+Aşağıdaki bölümler orijinal kabul tanımlarıdır ve v0.6 için geçerliliğini korur.
 
 ## Amaç ve sınır
 
