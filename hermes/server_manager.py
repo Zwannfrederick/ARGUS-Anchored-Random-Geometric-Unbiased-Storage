@@ -36,7 +36,8 @@ try:
         MTP_DRAFT_PATH,
         SPEC_DRAFT_N_MAX,
         SPEC_DRAFT_P_MIN,
-        get_cuda_env,
+        argus_server_args,
+        get_server_env,
     )
 except ModuleNotFoundError:
     from config import (
@@ -53,7 +54,8 @@ except ModuleNotFoundError:
         MTP_DRAFT_PATH,
         SPEC_DRAFT_N_MAX,
         SPEC_DRAFT_P_MIN,
-        get_cuda_env,
+        argus_server_args,
+        get_server_env,
     )
 
 PID_FILE = HERMES_ROOT / "hermes_server.pid"
@@ -110,14 +112,14 @@ class ServerManager:
             "--host", DEFAULT_HOST,
             "-c", str(ctx),
             "-ngl", str(gpu_layers),
-            "-fa", "on",
             "-ctk", KV_CACHE_TYPE,
             "-ctv", KV_CACHE_TYPE,
             "--no-webui",
             "--jinja",
         ]
+        cmd += argus_server_args() or ["-fa", "on"]
 
-        env = get_cuda_env()
+        env = get_server_env()
         log_fp = open(LOG_FILE, "a")
         proc = subprocess.Popen(
             cmd,

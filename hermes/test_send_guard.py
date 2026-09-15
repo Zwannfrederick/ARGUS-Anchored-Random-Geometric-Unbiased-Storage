@@ -286,7 +286,8 @@ def test_typing_clears_a_stale_draft_first():
         res, _, _ = _run(sup, "ui_type_text",
                          {"text": "merhaba", "target_app": "zapzap"}, {})
         assert res["ok"] is True, res
-        assert keys == [("a", ["ctrl"]), ("BackSpace", None)], keys
+        # Field-scoped clear; ctrl+a would leave a page selection in QtWebEngine apps.
+        assert keys == [("End", None), ("Home", ["shift"]), ("BackSpace", None)], keys
 
         keys.clear()
         _run(sup, "ui_type_text",

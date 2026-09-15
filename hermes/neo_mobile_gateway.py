@@ -48,6 +48,7 @@ if str(HERMES_DIR) not in sys.path:
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from argus_chat import build_routes as build_argus_chat_routes
 from cognitive_router import CognitiveRouter, RiskAssessment
 from config import BASE_URL
 from hermes_supervisor import HermesSupervisor, compute_action_hash
@@ -1045,6 +1046,7 @@ routes = [
     Route("/api/events/test_urgent", handle_test_urgent_event, methods=["POST"]),
     Route("/api/warmup", handle_manual_warmup, methods=["POST", "GET"]),
     WebSocketRoute("/ws", handle_ws),
+    *build_argus_chat_routes(_auth_ok, http_client),
 ]
 
 middleware = [
@@ -1072,11 +1074,11 @@ def main():
     print(f"==================================================")
     print(f"NEO MOBILE GATEWAY (HERMES AIAGENT ADAPTER)")
     print(f"==================================================")
-    print(f"Auth Token: {AUTH_TOKEN}")
     print(f"Token Path: {TOKEN_PATH}")
     print(f"Listening on: http://{HOST}:{PORT}")
     print(f"Screenshots: {SCREENSHOTS_DIR}")
     print(f"Database: {DB_PATH}")
+    print(f"Web Chat: http://127.0.0.1:{PORT}/chat")
     print(f"Single-Instance Lock: {GATEWAY_LOCK_FILE} (Active)")
     print(f"Auto-Warmup: Enabled (Dual-phase thinking off/on)")
     print(f"==================================================")

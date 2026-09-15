@@ -35,3 +35,8 @@ neo-mobile/android/app/build/
 neo-mobile/.expo/
 *.apk
 screenshots/
+
+# Signing secrets never belong in git
+neo-mobile/credentials.json
+*.keystore
+*.jks

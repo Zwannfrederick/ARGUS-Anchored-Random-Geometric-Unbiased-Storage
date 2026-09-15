@@ -1,0 +1,280 @@
+<!doctype html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Neo Sohbet</title>
+<style>
+:root {
+  --bg: #f6f6f4; --panel: #ffffff; --line: #e4e4e0; --text: #1c1c1a; --muted: #6b6b66;
+  --accent: #0f9d74; --accent-soft: #e3f4ee; --user: #1c1c1a; --user-text: #fafaf8; --danger: #c2410c;
+  --code: #f0f0ec;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0c0c0d; --panel: #151517; --line: #262629; --text: #ececea; --muted: #8d8d88;
+    --accent: #34d399; --accent-soft: #10291f; --user: #ececea; --user-text: #111; --danger: #fb923c;
+    --code: #1d1d20;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; font: 15px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif; background: var(--bg); color: var(--text); }
+button, input, textarea { font: inherit; color: inherit; }
+.app { display: grid; grid-template-columns: 260px 1fr; height: 100dvh; }
+aside { border-right: 1px solid var(--line); background: var(--panel); display: flex; flex-direction: column; min-height: 0; }
+.brand { padding: 18px 16px 10px; font-weight: 650; letter-spacing: -0.01em; display: flex; align-items: center; gap: 8px; }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+.dot.ok { background: var(--accent); }
+.new { margin: 4px 12px 10px; padding: 9px; border: 1px solid var(--line); border-radius: 10px; background: transparent; cursor: pointer; }
+.new:hover { border-color: var(--accent); }
+.list { overflow-y: auto; flex: 1; padding: 0 8px; }
+.item { display: flex; align-items: center; gap: 6px; padding: 8px 10px; border-radius: 8px; cursor: pointer; color: var(--muted); }
+.item span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.item.active, .item:hover { background: var(--accent-soft); color: var(--text); }
+.item button { border: 0; background: transparent; cursor: pointer; opacity: .5; padding: 0 4px; }
+.item button:hover { opacity: 1; color: var(--danger); }
+.kv { border-top: 1px solid var(--line); padding: 12px 16px 16px; font-size: 12.5px; color: var(--muted); }
+.kv h3 { margin: 0 0 8px; font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--text); }
+.bar { height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; margin: 6px 0 8px; }
+.bar i { display: block; height: 100%; background: var(--accent); width: 0; transition: width .4s; }
+.kv dl { display: grid; grid-template-columns: 1fr auto; gap: 2px 8px; margin: 0; }
+.kv dd { margin: 0; color: var(--text); font-variant-numeric: tabular-nums; }
+main { display: flex; flex-direction: column; min-height: 0; }
+.messages { flex: 1; overflow-y: auto; padding: 28px 16px 12px; }
+.inner { max-width: 760px; margin: 0 auto; display: flex; flex-direction: column; gap: 18px; }
+.msg { white-space: normal; overflow-wrap: anywhere; }
+.msg.user { align-self: flex-end; background: var(--user); color: var(--user-text); padding: 10px 14px; border-radius: 16px 16px 4px 16px; max-width: 85%; white-space: pre-wrap; }
+.msg.assistant p { margin: 0 0 .7em; }
+.msg.assistant p:last-child { margin-bottom: 0; }
+.msg pre { background: var(--code); padding: 12px; border-radius: 8px; overflow-x: auto; font-size: 13px; }
+.msg code { background: var(--code); padding: 1px 5px; border-radius: 4px; font-size: .92em; }
+.msg pre code { background: none; padding: 0; }
+.msg.error { color: var(--danger); }
+details.think { color: var(--muted); font-size: 13.5px; margin-bottom: 8px; }
+details.think summary { cursor: pointer; }
+details.think div { white-space: pre-wrap; border-left: 2px solid var(--line); padding-left: 10px; margin-top: 6px; }
+.empty { text-align: center; color: var(--muted); margin-top: 18vh; }
+.empty b { display: block; color: var(--text); font-size: 22px; margin-bottom: 6px; letter-spacing: -0.02em; }
+form { padding: 12px 16px calc(16px + env(safe-area-inset-bottom, 0px)); }
+.composer { max-width: 760px; margin: 0 auto; display: flex; gap: 8px; align-items: flex-end; background: var(--panel); border: 1px solid var(--line); border-radius: 16px; padding: 8px; }
+.composer:focus-within { border-color: var(--accent); }
+textarea { flex: 1; border: 0; background: transparent; resize: none; max-height: 220px; padding: 6px 8px; outline: none; }
+.send { border: 0; border-radius: 10px; background: var(--accent); color: #fff; padding: 8px 14px; cursor: pointer; font-weight: 600; }
+.send:disabled { opacity: .45; cursor: default; }
+.send.stop { background: var(--danger); }
+.token { position: fixed; inset: 0; background: rgba(0,0,0,.45); display: grid; place-items: center; padding: 16px; }
+.token form { background: var(--panel); border-radius: 14px; padding: 22px; max-width: 420px; width: 100%; border: 1px solid var(--line); }
+.token h2 { margin: 0 0 6px; font-size: 18px; }
+.token p { margin: 0 0 14px; color: var(--muted); font-size: 13.5px; }
+.token input { width: 100%; padding: 10px; border-radius: 8px; border: 1px solid var(--line); background: var(--bg); margin-bottom: 12px; }
+.menu { display: none; }
+@media (max-width: 760px) {
+  .app { grid-template-columns: 1fr; }
+  aside { position: fixed; inset: 0 25% 0 0; z-index: 5; transform: translateX(-102%); transition: transform .2s; }
+  aside.open { transform: none; box-shadow: 0 0 40px rgba(0,0,0,.3); }
+  .menu { display: block; position: fixed; top: calc(10px + env(safe-area-inset-top, 0px)); left: 10px; z-index: 4; border: 1px solid var(--line); background: var(--panel); border-radius: 8px; padding: 6px 10px; }
+  .messages { padding-top: 56px; }
+}
+</style>
+</head>
+<body>
+<div class="app">
+  <aside id="sidebar">
+    <div class="brand"><span class="dot" id="health"></span>Neo Sohbet</div>
+    <button class="new" id="new-chat" type="button">+ Yeni sohbet</button>
+    <nav class="list" id="chats" aria-label="Sohbetler"></nav>
+    <section class="kv" aria-live="polite">
+      <h3>ARGUS KV</h3>
+      <div id="kv-summary">Bağlanıyor…</div>
+      <div class="bar" role="img" id="kv-bar-label"><i id="kv-bar"></i></div>
+      <dl id="kv-details"></dl>
+    </section>
+  </aside>
+  <main>
+    <button class="menu" id="menu" type="button" aria-label="Sohbet listesi">☰</button>
+    <div class="messages" id="messages"><div class="inner" id="thread"></div></div>
+    <form id="composer">
+      <div class="composer">
+        <textarea id="input" rows="1" placeholder="Mesajını yaz… (Enter gönderir, Shift+Enter yeni satır)" aria-label="Mesaj"></textarea>
+        <button class="send" id="send" type="submit">Gönder</button>
+      </div>
+    </form>
+  </main>
+</div>
+<div class="token" id="token-dialog" hidden>
+  <form id="token-form">
+    <h2>Gateway anahtarı</h2>
+    <p>Masaüstünde <code>~/.hermes/neo_auth_token.txt</code> dosyasındaki anahtarı yapıştır. Yalnız bu tarayıcıda saklanır.</p>
+    <input id="token-input" type="password" autocomplete="off" required aria-label="Anahtar">
+    <button class="send" type="submit">Bağlan</button>
+  </form>
+</div>
+<script>
+const $ = (id) => document.getElementById(id);
+const store = {
+  get(key, fallback) { try { return JSON.parse(localStorage.getItem(key)) ?? fallback; } catch { return fallback; } },
+  set(key, value) { try { localStorage.setItem(key, JSON.stringify(value)); } catch {} },
+};
+let token = store.get('neo.token', '');
+let chats = store.get('neo.chats', []);
+let activeId = store.get('neo.active', null);
+let controller = null;
+
+const escapeHtml = (text) => text.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+function renderMarkdown(text) {
+  // Escape first; only code fences, inline code and bold become markup.
+  return escapeHtml(text).split(/```/).map((part, i) => {
+    if (i % 2) return `<pre><code>${part.replace(/^[\w-]*\n/, '')}</code></pre>`;
+    return part.split(/\n{2,}/).map((p) => p.trim() && `<p>${p
+      .replace(/`([^`]+)`/g, '<code>$1</code>')
+      .replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>')
+      .replace(/\n/g, '<br>')}</p>`).join('');
+  }).join('');
+}
+const bytes = (n) => n == null ? '—' : n < 1024 ** 2 ? `${(n / 1024).toFixed(0)} KB` : n < 1024 ** 3 ? `${(n / 1024 ** 2).toFixed(1)} MB` : `${(n / 1024 ** 3).toFixed(2)} GB`;
+const active = () => chats.find((c) => c.id === activeId);
+const save = () => { store.set('neo.chats', chats); store.set('neo.active', activeId); };
+
+function renderList() {
+  $('chats').replaceChildren(...chats.map((chat) => {
+    const row = document.createElement('div');
+    row.className = 'item' + (chat.id === activeId ? ' active' : '');
+    row.tabIndex = 0;
+    const title = document.createElement('span');
+    title.textContent = chat.title;
+    const remove = document.createElement('button');
+    remove.type = 'button'; remove.textContent = '×'; remove.setAttribute('aria-label', 'Sohbeti sil');
+    remove.onclick = (e) => { e.stopPropagation(); chats = chats.filter((c) => c.id !== chat.id); if (activeId === chat.id) activeId = chats[0]?.id ?? null; save(); render(); };
+    row.onclick = row.onkeydown = (e) => { if (e.type === 'click' || e.key === 'Enter') { activeId = chat.id; save(); render(); $('sidebar').classList.remove('open'); } };
+    row.append(title, remove);
+    return row;
+  }));
+}
+
+function messageNode(message) {
+  const node = document.createElement('div');
+  node.className = `msg ${message.role}${message.error ? ' error' : ''}`;
+  if (message.role === 'user') { node.textContent = message.content; return node; }
+  if (message.reasoning) {
+    const details = document.createElement('details');
+    details.className = 'think';
+    details.innerHTML = '<summary>Düşünce</summary><div></div>';
+    details.querySelector('div').textContent = message.reasoning;
+    node.append(details);
+  }
+  const body = document.createElement('div');
+  body.innerHTML = renderMarkdown(message.content || (message.reasoning ? '' : '…'));
+  node.append(body);
+  return node;
+}
+
+function renderThread() {
+  const chat = active();
+  if (!chat || !chat.messages.length) {
+    $('thread').innerHTML = '<div class="empty"><b>Yerel modelinle konuş</b>Her şey bu makinede kalır. KV belleği ARGUS tarafından yönetilir.</div>';
+    return;
+  }
+  $('thread').replaceChildren(...chat.messages.map(messageNode));
+  $('messages').scrollTop = $('messages').scrollHeight;
+}
+function render() { renderList(); renderThread(); }
+
+function newChat() {
+  const chat = { id: crypto.randomUUID(), title: 'Yeni sohbet', messages: [] };
+  chats.unshift(chat); activeId = chat.id; save(); render(); $('input').focus();
+}
+
+async function api(path, options = {}) {
+  const response = await fetch(path, { ...options, headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}`, ...options.headers } });
+  if (response.status === 401) { askToken(); throw new Error('Anahtar geçersiz'); }
+  return response;
+}
+
+async function send(text) {
+  let chat = active();
+  if (!chat) { newChat(); chat = active(); }
+  if (!chat.messages.length) chat.title = text.slice(0, 48);
+  chat.messages.push({ role: 'user', content: text });
+  const reply = { role: 'assistant', content: '', reasoning: '' };
+  chat.messages.push(reply);
+  save(); render();
+  controller = new AbortController();
+  setBusy(true);
+  try {
+    const response = await api('/api/chat/completions', {
+      method: 'POST', signal: controller.signal,
+      body: JSON.stringify({ messages: chat.messages.slice(0, -1).map(({ role, content }) => ({ role, content })) }),
+    });
+    if (!response.ok) throw new Error((await response.json().catch(() => ({}))).error || `HTTP ${response.status}`);
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const events = buffer.split('\n\n');
+      buffer = events.pop();
+      for (const event of events) {
+        const data = event.split('\n').filter((l) => l.startsWith('data:')).map((l) => l.slice(5).trim()).join('');
+        if (!data || data === '[DONE]') continue;
+        const parsed = JSON.parse(data);
+        if (parsed.error) throw new Error(typeof parsed.error === 'string' ? parsed.error : parsed.error.message);
+        const delta = parsed.choices?.[0]?.delta ?? {};
+        reply.content += delta.content ?? '';
+        reply.reasoning += delta.reasoning_content ?? '';
+      }
+      renderThread();
+    }
+  } catch (error) {
+    if (error.name !== 'AbortError') { reply.error = true; reply.content = reply.content || `Hata: ${error.message}`; }
+  } finally {
+    controller = null; setBusy(false); save(); renderThread(); renderList();
+  }
+}
+
+function setBusy(busy) {
+  $('send').textContent = busy ? 'Durdur' : 'Gönder';
+  $('send').classList.toggle('stop', busy);
+}
+
+async function pollStatus() {
+  if (!token) return;
+  try {
+    const [health, status] = await Promise.all([fetch('/health').then((r) => r.json()), api('/api/argus/status').then((r) => r.json())]);
+    $('health').classList.toggle('ok', !!health.llama_server?.ready);
+    const stats = status.stats;
+    if (!status.enabled) { $('kv-summary').textContent = 'Kapalı — stok llama.cpp KV'; $('kv-details').replaceChildren(); $('kv-bar').style.width = '0'; return; }
+    const budget = status.resident_budget_bytes;
+    const resident = stats?.resident_bytes;
+    $('kv-summary').textContent = stats ? `RAM'de ${bytes(resident)}${budget ? ` / bütçe ${bytes(budget)}` : ''}` : 'İlk attention bekleniyor';
+    const ratio = budget && resident != null ? Math.min(1, resident / budget) : stats ? Math.min(1, resident / stats.live_bytes) : 0;
+    $('kv-bar').style.width = `${(ratio * 100).toFixed(1)}%`;
+    $('kv-bar-label').setAttribute('aria-label', `Resident KV oranı yüzde ${(ratio * 100).toFixed(0)}`);
+    const rows = stats ? [['Ayrılan KV', bytes(stats.live_bytes)], ['Diskten okunan', bytes(stats.read_bytes)], ['Diske geri verilen', bytes(stats.paged_out_bytes)], ['Attention çağrısı', stats.attention_calls.toLocaleString('tr-TR')]] : [];
+    $('kv-details').replaceChildren(...rows.flatMap(([k, v]) => { const dt = document.createElement('dt'); dt.textContent = k; const dd = document.createElement('dd'); dd.textContent = v; return [dt, dd]; }));
+  } catch { $('health').classList.remove('ok'); }
+}
+
+function askToken() { $('token-dialog').hidden = false; $('token-input').focus(); }
+$('token-form').onsubmit = (e) => { e.preventDefault(); token = $('token-input').value.trim(); store.set('neo.token', token); $('token-dialog').hidden = true; pollStatus(); };
+$('new-chat').onclick = newChat;
+$('menu').onclick = () => $('sidebar').classList.toggle('open');
+$('composer').onsubmit = (e) => {
+  e.preventDefault();
+  if (controller) { controller.abort(); return; }
+  const text = $('input').value.trim();
+  if (!text) return;
+  $('input').value = ''; $('input').style.height = 'auto';
+  send(text);
+};
+$('input').onkeydown = (e) => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); $('composer').requestSubmit(); } };
+$('input').oninput = () => { $('input').style.height = 'auto'; $('input').style.height = `${$('input').scrollHeight}px`; };
+
+if (!token) askToken();
+render();
+pollStatus();
+setInterval(pollStatus, 2000);
+</script>
+</body>
+</html>
