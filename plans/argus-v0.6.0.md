@@ -60,10 +60,20 @@ bu çok aşamalı overlap'ın zaten çalıştığı anlamına gelmez.
 
 ## Performans problemi ve ölçüm sözleşmesi
 
-Çıkış noktası kayıtlı ölçüm: RTX 3050 Ti 4 GB + Qwen3.6-35B-A3B Q4_K_M,
+Çıkış noktası olarak alınan çift: RTX 3050 Ti 4 GB + Qwen3.6-35B-A3B Q4_K_M,
 32K/VRAM-KV **19,14 tok/s**, 262K/RAM-KV **8,78 tok/s**. Amaç 262K context'te
 heterogeneous tiering ile bu farkı mümkün olduğunca kapatmaktır. Context'ler
 farklı olduğundan bu iki sayı kontrollü placement A/B sonucu değildir.
+
+> **ARTEFAKTSIZ — doğrulanmadan baseline olarak kullanılamaz (2026-09-16).**
+> Bu çiftin `docs/measurements/` altında ölçüm dosyası yok. 19,14 yalnız
+> `docs/plans/control-audit.md` içinde düz metin iddia olarak geçiyor; 8,78
+> depoda hiçbir yerde geçmiyor. (Aramada çıkan `19.14 ms` eşleşmeleri farklı bir
+> büyüklüktür — 4096 context'teki TPOT; `262144` eşleşmeleri ise
+> `ARGUS_KV_PINNED_BYTES` byte değeridir.) Sayılar oturum notlarından geliyor.
+> v0.6 benchmark sözleşmesi bu çiftin üzerine kurulu olduğundan, ölçüm koşuları
+> başlamadan önce ya yeniden ölçülüp artefakt üretilmeli ya da artefaktı olan
+> başka bir çiftle değiştirilmelidir. README'ye bilerek alınmadı.
 
 19,14 tok/s'yi geçmek vaat veya zorunlu kabul kriteri değildir. Önce aynı kalite
 koşulu altında VRAM referansına yaklaşma oranı ölçülür. Örnek ara hedef
@@ -162,9 +172,10 @@ için hiçbir sayfa terfi etmiyor, 4 MiB GPU + 4 MiB pinned bütçeden yalnız
 
 **Depoda gerçekçi çalışma noktasında ARGUS ölçümü yok** ve policy gelmeden
 üretilemez — terfi eden sayfa olmadan ölçülecek bir yerleşim davranışı yoktur.
-Günlük kullanımı yansıtan referans stock tarafındaki kayıtlı çifttir:
-32K/VRAM-KV **19,14 tok/s** ve 262K/RAM-KV **8,78 tok/s**. v0.6'nın kapatmayı
-hedeflediği açık budur.
+Günlük kullanımı yansıtan referans olarak alınan stock çifti — 32K/VRAM-KV
+**19,14 tok/s** ve 262K/RAM-KV **8,78 tok/s** — yukarıdaki uyarıya tabidir:
+artefaktı yoktur ve doğrulanmadan baseline sayılamaz. v0.6'nın kapatmayı
+hedeflediği açık budur, fakat açığın büyüklüğü henüz ölçülmüş değildir.
 
 vLLM/SGLang, Hermes/Neo ürünleştirmesi, paketleme ve daha geniş codec/model
 kapsamı bu sözleşmenin ardından ayrıca önceliklendirilir; vizyon bunların
