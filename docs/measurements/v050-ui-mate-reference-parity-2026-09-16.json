@@ -1,0 +1,226 @@
+{
+  "date": "2026-09-16",
+  "gate": "v0.5 M6 — UI-Mate stock vs ARGUS on the pinned upstream adapter prompt/parser",
+  "scope": "One synthetic click request built by the upstream UI-Mate message builder, preprocessed and parsed by the upstream parser at the pinned revision; greedy sampling, one request per mode. Actions are parsed as data and never executed. This is a stock-vs-ARGUS equivalence measurement, not a UI-Mate quality benchmark and not a full Neo task.",
+  "reference_revision": "1cb9e1e44ce856e23b593992b02efbd489943fcb",
+  "reference_source": "https://github.com/Tencent/UI-Mate/tree/1cb9e1e44ce856e23b593992b02efbd489943fcb",
+  "reference_sha256": {
+    "ui_mate_agent.py": "60e1f6924745333dcb0d363e7187d9045d04c06924a1150f02d334311fc38d77",
+    "demo_workflow.py": "4939d179bc15035661819efa149c3e1a7a5075a2f2334478e3c53e49991fd0a4"
+  },
+  "fixture_sha256": "f439565d9481e34e644c99a4259d9bd08c3cd30e7134a539ed522907325d73ef",
+  "request_sha256": "2b8aa0247a1294b79ded43e1836751894faed91be8efd4d8e1030ccc3956af47",
+  "request_identical": true,
+  "llama_revision": "54315813269112dd0baed7112ec87ad93a8218ca",
+  "model": "scratch/models/tencent_UI-Mate-9B-Q4_K_M.gguf",
+  "mmproj": "scratch/models/mmproj-tencent_UI-Mate-9B-f16.gguf",
+  "device": "RTX 3050 Ti 4 GB, -ngl 8, -nkvo, -fa on, ctk/ctv f16, image-min-tokens 1024, -c 4096, -b 512, -ub 32, -t 6",
+  "kv_directory_device": "scratch/kv on SATA SSD (/dev/sda)",
+  "runs": {
+    "stock": {
+      "command": [
+        "scratch/llama.cpp-v050/build-cuda/bin/llama-server",
+        "-m",
+        "scratch/models/tencent_UI-Mate-9B-Q4_K_M.gguf",
+        "--mmproj",
+        "scratch/models/mmproj-tencent_UI-Mate-9B-f16.gguf",
+        "--no-mmproj-offload",
+        "--image-min-tokens",
+        "1024",
+        "-c",
+        "4096",
+        "-np",
+        "1",
+        "-ngl",
+        "8",
+        "-nkvo",
+        "-fa",
+        "on",
+        "-ctk",
+        "f16",
+        "-ctv",
+        "f16",
+        "-b",
+        "512",
+        "-ub",
+        "32",
+        "-t",
+        "6",
+        "--no-webui",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "44205"
+      ],
+      "log": "scratch/m2-ui-mate-reference-stock2.stock.log",
+      "seconds": 260.442354583,
+      "timings": {
+        "cache_n": 0,
+        "prompt_n": 2696,
+        "prompt_ms": 240873.875,
+        "prompt_per_token_ms": 89.34490912462908,
+        "prompt_per_second": 11.192579519053282,
+        "predicted_n": 119,
+        "predicted_ms": 19537.932,
+        "predicted_per_token_ms": 165.57569491525425,
+        "predicted_per_second": 6.039533764371787
+      },
+      "usage": {
+        "completion_tokens": 119,
+        "prompt_tokens": 2696,
+        "total_tokens": 2815,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      },
+      "finish_reason": "stop",
+      "content": "<action>\nClick the SAVE button in the Settings dialog.\n</action>\n\n<tool_call>\n<function=computer_use>\n<parameter=action>\nleft_click\n</parameter>\n<parameter=coordinate>\n[749, 623]\n</parameter>\n</function>\n</tool_call>",
+      "reasoning_content": "The user wants me to click the SAVE button. I can see a Settings dialog with two buttons: CANCEL and SAVE. The SAVE button is located on the right side of the dialog. I need to click on it to save the settings.\n",
+      "parsed_actions": [
+        "pyautogui.click(383, 239)"
+      ],
+      "harness_passed": false
+    },
+    "argus_cuda": {
+      "command": [
+        "scratch/llama.cpp-v050/build-cuda/bin/llama-server",
+        "-m",
+        "scratch/models/tencent_UI-Mate-9B-Q4_K_M.gguf",
+        "--mmproj",
+        "scratch/models/mmproj-tencent_UI-Mate-9B-f16.gguf",
+        "--no-mmproj-offload",
+        "--image-min-tokens",
+        "1024",
+        "-c",
+        "4096",
+        "-np",
+        "1",
+        "-ngl",
+        "8",
+        "-nkvo",
+        "-fa",
+        "on",
+        "-ctk",
+        "f16",
+        "-ctv",
+        "f16",
+        "-b",
+        "512",
+        "-ub",
+        "32",
+        "-t",
+        "6",
+        "--no-webui",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "59387"
+      ],
+      "log": "scratch/m2-ui-mate-reference-argus.argus-cuda.log",
+      "seconds": 751.978867241,
+      "argus_environment": {
+        "ARGUS_KV_DIR": "/home/zwannfrederick/Masaüstü/Sektor/Coding/mamba fix/scratch/kv/tmp49rrxjqg",
+        "ARGUS_KV_MAX_BYTES": "1073741824",
+        "ARGUS_KV_RESIDENT_BYTES": "8388608",
+        "ARGUS_KV_STAGING_BYTES": "4194304",
+        "ARGUS_KV_GPU_BYTES": "4194304",
+        "ARGUS_KV_PINNED_BYTES": "4194304",
+        "ARGUS_KV_STATS_PATH": "/home/zwannfrederick/Masaüstü/Sektor/Coding/mamba fix/scratch/kv/tmp49rrxjqg/stats.json"
+      },
+      "timings": {
+        "cache_n": 0,
+        "prompt_n": 2696,
+        "prompt_ms": 407942.274,
+        "prompt_per_token_ms": 151.31389985163204,
+        "prompt_per_second": 6.608778182179766,
+        "predicted_n": 119,
+        "predicted_ms": 344006.458,
+        "predicted_per_token_ms": 2915.3089661016948,
+        "predicted_per_second": 0.34301681627151315
+      },
+      "usage": {
+        "completion_tokens": 119,
+        "prompt_tokens": 2696,
+        "total_tokens": 2815,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      },
+      "finish_reason": "stop",
+      "content": "<action>\nClick the SAVE button in the Settings dialog.\n</action>\n\n<tool_call>\n<function=computer_use>\n<parameter=action>\nleft_click\n</parameter>\n<parameter=coordinate>\n[749, 623]\n</parameter>\n</function>\n</tool_call>",
+      "reasoning_content": "The user wants me to click the SAVE button. I can see a Settings dialog with two buttons: CANCEL and SAVE. The SAVE button is located on the right side of the dialog. I need to click on it to save the settings.\n",
+      "parsed_actions": [
+        "pyautogui.click(383, 239)"
+      ],
+      "harness_passed": false,
+      "stats": {
+        "mode": "direct",
+        "disk_bytes": 268435456,
+        "resident_bytes": 2363392,
+        "staging_bytes": 528384,
+        "peak_resident_bytes": 2363392,
+        "peak_staging_bytes": 532480,
+        "read_bytes": 14981922816,
+        "written_bytes": 184680448,
+        "committed_pages": 45088,
+        "stores": 1,
+        "gpu_bytes": 266240,
+        "pinned_bytes": 262144,
+        "ram_bytes": 0,
+        "peak_gpu_bytes": 266240,
+        "peak_pinned_bytes": 262144,
+        "peak_ram_bytes": 0,
+        "cuda_attention_calls": 1664
+      },
+      "teardown_log": [
+        "ARGUS_DISK free id=1 disk_live=0 resident_live=0 staging_live=0"
+      ]
+    }
+  },
+  "equivalence": {
+    "content_identical": true,
+    "reasoning_identical": true,
+    "parsed_actions_identical": true,
+    "completion_tokens_identical": true,
+    "prompt_tokens_identical": true,
+    "content_sha256": "3bd8a9c007944d6780f549fe66a1d4b9bac050dbbe75673272c02ec1c6aca25a"
+  },
+  "cost": {
+    "prefill_ms_per_token": {
+      "stock": 89.34490912462908,
+      "argus_cuda": 151.31389985163204
+    },
+    "decode_ms_per_token": {
+      "stock": 165.57569491525425,
+      "argus_cuda": 2915.3089661016948
+    },
+    "request_seconds": {
+      "stock": 260.442354583,
+      "argus_cuda": 751.978867241
+    },
+    "note": "This is the cost of the v0.5 mechanism with NO placement policy, not a tuned or starved configuration. argus_disk_move_page is called only from the test suite; nothing in the llama.cpp serving path promotes a page, so pages stay on disk and every attention read goes to disk: 14.98 GB read for this single request. The tier budgets were not the binding constraint — 4 MiB of GPU and 4 MiB of pinned were offered and only 266,240 and 262,144 bytes were ever used. Note also that resident_bytes is the page descriptor table (65,536 pages for 256 MiB of KV), not cached KV; ARGUS_KV_RESIDENT_BYTES budgets metadata, not a KV working set. These numbers are therefore not a daily-use operating point and must not be read as an ARGUS speed result. The repository currently holds no ARGUS measurement at a realistic operating point; producing one requires the v0.6 placement policy.",
+    "tier_utilisation": {
+      "gpu_budget_bytes": 4194304,
+      "gpu_used_bytes": 266240,
+      "pinned_budget_bytes": 4194304,
+      "pinned_used_bytes": 262144,
+      "ram_used_bytes": 0,
+      "disk_bytes": 268435456,
+      "reason": "no policy promotes pages; the only caller of argus_disk_move_page is the test suite"
+    }
+  },
+  "harness_assertion": {
+    "gate": "stock/ARGUS equivalence (user decision, 2026-09-16)",
+    "result": "passed — content, reasoning, parsed action and completion-token count are identical",
+    "model_grounding": {
+      "stock": false,
+      "argus_cuda": false,
+      "note": "Both paths return relative (749, 623), which the upstream adapter converts to pyautogui.click(383, 239): one pixel above the SAVE box, on its top border. This is a UI-Mate grounding property of this setup at 1024 image tokens, identical in both paths and therefore not an ARGUS regression. It is reported as an observation and does not gate M6. Earlier failed attempts are not retroactively counted as successes."
+    },
+    "harness_change": "benchmarks/check_ui_mate_reference.py previously asserted an absolute grounding hit, which stock fails too. It now asserts stock/ARGUS equivalence via compare() and reports model_grounding separately; a single-mode report states compared=false rather than claiming an equivalence it never measured."
+  },
+  "prior_incomplete_run": {
+    "file": "scratch/m2-ui-mate-reference.json",
+    "note": "The first ARGUS attempt hit the 600 s client timeout; a 1200 s retry reached the end of prefill (423.76 s) but its process died during decode before a report was written. Both are superseded by this run. The stock record in that file predates the request_sha256 field, so stock was re-run with the current harness to make the payload identity hash-verified."
+  }
+}

@@ -1,7 +1,8 @@
 # Experimental llama.cpp host KV ownership seam
 
 Pinned upstream revision: `54315813269112dd0baed7112ec87ad93a8218ca`.
-Patch: `host-kv.patch`. Implementation: `argus_cache/csrc/ggml_host_buffer.cpp`.
+Patches (in order): `host-kv.patch`, then `cuda-kv.patch`.
+Implementation: `argus_cache/csrc/ggml_*`.
 
 The patch routes `llama_kv_cache` tensor allocation to ARGUS-owned, file-backed
 host buffers when `ARGUS_KV_DIR` is set. The existing GGML tensor layout and
@@ -50,8 +51,8 @@ ARGUS_TEST_QUANT_GGUF="$PWD/scratch/models/qwen2.5-0.5b-instruct-q4_k_m.gguf" \
 ## Direct disk KV (v0.5)
 
 Setting `ARGUS_KV_STAGING_BYTES` together with `ARGUS_KV_DIR` places every KV
-layer on the `ARGUS_DISK` buffer. It requires `-nkvo -fa on`. K/V bytes keep
-GGML's codec (F32/F16/Q8_0/Q4_0) and live only in an unlinked `O_DIRECT` file;
+layer on the `ARGUS_DISK` buffer. It requires `-nkvo -fa on`. By default K/V bytes
+keep GGML's codec (F32/F16/Q8_0/Q4_0) and live only in an unlinked `O_DIRECT` file;
 tensor addresses are inaccessible handles, never resident KV.
 
 - Appends go through an ARGUS `set_rows` op. Each 4 KiB page is written to a
@@ -62,7 +63,7 @@ tensor addresses are inaccessible handles, never resident KV.
   the next visible block; a full queue or a stale generation after crop/reset is
   refused, and destruction joins pending work.
 - Budgets are enforced, not advisory: `ARGUS_KV_MAX_BYTES` bounds disk bytes,
-  `ARGUS_KV_RESIDENT_BYTES` bounds page-descriptor metadata, and
+  `ARGUS_KV_RESIDENT_BYTES` bounds page-descriptor and resident-handle metadata, and
   `ARGUS_KV_STAGING_BYTES` bounds all ARGUS attention scratch, bounce buffers and
   the prefetch stack process-wide. Exceeding any of them fails with an explicit
   error instead of growing. Staging must hold at least one encoded KV row plus a
@@ -94,6 +95,8 @@ before applying the patch; don't apply it blindly to another revision.
 ```sh
 git -C /path/to/llama.cpp apply --check /path/to/ARGUS/integrations/llama.cpp/host-kv.patch
 git -C /path/to/llama.cpp apply /path/to/ARGUS/integrations/llama.cpp/host-kv.patch
+git -C /path/to/llama.cpp apply --check /path/to/ARGUS/integrations/llama.cpp/cuda-kv.patch
+git -C /path/to/llama.cpp apply /path/to/ARGUS/integrations/llama.cpp/cuda-kv.patch
 cmake -S /path/to/llama.cpp -B /path/to/llama.cpp/build \
   -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=86 \
   -DLLAMA_BUILD_UI=OFF -DLLAMA_USE_PREBUILT_UI=OFF \
@@ -103,6 +106,97 @@ cmake --build /path/to/llama.cpp/build --target llama-cli llama-server -j2
 
 Quote paths containing spaces. CMake is a build tool, not an added Python
 runtime dependency.
+
+## CUDA mechanism (v0.5 M2)
+
+**v0.5 provides mechanism; v0.6 chooses policy.** With direct disk mode enabled,
+set positive `ARGUS_KV_GPU_BYTES` and `ARGUS_KV_PINNED_BYTES` to select CUDA
+attention. Both are hard ARGUS allocation limits, including their staging
+buffers. `ARGUS_KV_RAM_BYTES` is required only for explicit pageable-RAM
+placement. These limits exclude llama.cpp weights, graph outputs and workspace;
+they are not limits on total VRAM or process RSS.
+
+`argus_disk_move_page(tensor, offset, tier, expected_revision)` explicitly moves
+one aligned 4 KiB physical backing page. GPU, pinned RAM and pageable RAM retain
+the original codec bytes. The verified disk copy remains authoritative backing;
+every write is verified on disk before invalidating a resident copy. Promotion
+reserves its destination, copies and verifies before releasing the source.
+Demotion verifies the retained disk copy before releasing the resident source.
+Failed transfers and stale revisions preserve the published page. Atomicity is
+per physical page, not a multi-page logical KV transaction.
+Explicit migrations currently advance the store revision: commit them between
+completed attention operations. Committing a placement change during attention
+is rejected by its revision check. The overlapped staging pipeline does not
+publish placement changes. The v0.6 plan fixes the contract that lifts this
+restriction: content and placement become separate revision axes, so a prefetch
+checks only content and a migration checks only the page it moves. That split is
+a decided contract, not implemented behaviour — the rule above still holds here.
+
+The first CUDA attention kernel supports FP16 K/V, F32 queries, F16/F32 masks,
+head dimensions up to 256, GQA and one sequence on CUDA device 0. Q8/Q4 attention
+continues to use the CPU path; explicitly requesting CUDA for an unsupported
+codec fails. FP16 is this kernel's current limit, not a placement/codec coupling.
+The scheduler dispatches a real CUDA custom op; it never copies the entire
+disk-backed tensor to the GPU. CUDA graph capture is disabled for external I/O.
+
+Two 32-cell pinned/device tiles overlap transfer with the previous tile's
+compute. GPU-resident source pages use device-to-device copies. Online FP32
+softmax state spans all tiles, including partially or entirely masked rows.
+`ARGUS_KV_NO_OVERLAP=1` selects the serial reference. All tiles, softmax state and
+disk bounce buffers also count against the process-wide staging budget. Do not
+sum staging and tier counters as disjoint physical allocations.
+
+There is no automatic promotion, eviction, hotness prediction or codec conversion.
+The server starts with disk-backed pages and bounded GPU attention staging;
+the native lifecycle test explicitly promotes two pages. The scalar kernel and
+per-invocation staging allocations establish correctness, not throughput targets.
+No 262K performance improvement is claimed.
+
+On 2026-09-16, RTX 3050 Ti checks passed for D=48/64/256, all four placements
+(including unchanged Q8/Q4 encoded bytes, independently of kernel support),
+overlap/serial equality, short writes, corrupt backing, stale migration, budget
+refusal and teardown. A real stories15M lifecycle with a 600-token prefill,
+decode, crop and restore compared 19 steps with zero greedy mismatches;
+maximum attention error was 0.000344426 and logit error 0.0102015. It executed
+126 CUDA attention calls and explicitly migrated two pages. These tolerance
+results do not imply bitwise floating-point equality or hybrid lifecycle coverage.
+For floating KV, this native test uses stock non-flash F32 accumulation as its
+reference; the server workload separately compares against stock flash attention.
+The [measurement record](../../docs/measurements/v050-cuda-mechanism-2026-09-16.json)
+includes budgets and test scope.
+
+```sh
+ARGUS_LLAMA_CPP_DIR="$PWD/scratch/llama.cpp-v050" \
+ARGUS_LLAMA_BUILD=build-cuda ARGUS_TEST_CUDA=1 \
+ARGUS_TEST_GGUF="$PWD/scratch/models/stories15M.gguf" \
+  .venv/bin/python -m pytest -q tests/test_native_llama_paged.py -k cuda
+```
+
+Both patches were reverse/applied in order and all eight affected files matched
+the tested checkout. CPU-only builds can apply both patches; CUDA additions are
+conditional on `GGML_CUDA`.
+
+The opt-in `benchmarks/check_ui_mate_workload.py` compares Turkish, visual labels,
+coordinate grounding and a tool call on a generated fixture (Python 3.10+ and
+Pillow). It executes no desktop action. It uses the projector's recommended
+1024 minimum image tokens, UI-Mate's 0–999 relative coordinate convention and
+a server JSON schema for coordinates. Initial
+lower-resolution runs exposed coordinate drift despite matching text/tool
+outputs; see the [raw workload record](../../docs/measurements/v050-ui-mate-cuda-workload-2026-09-16.json).
+Do not treat this small fixture as full Neo or multimodal-quality acceptance.
+
+`benchmarks/check_ui_mate_reference.py` separately uses the upstream UI-Mate
+message builder and response parser at revision
+`1cb9e1e44ce856e23b593992b02efbd489943fcb`. Supply a reviewed checkout through
+`--reference-dir` (containing `agents/ui_mate_agent.py`, `agents/demo_workflow.py`
+and a `revision.txt` with that revision), plus the same `--server`, `--model`,
+`--mmproj`, `--kv-dir` and `--output` arguments. Its greedy comparison enables
+thinking and evaluates the resulting action as data. No generated Python code
+or desktop action is executed. Ad hoc visual-chat failures remain in the record;
+the official-prompt run is a separate protocol, not a rescore of those failures.
+The reference runner defaults to a 1200-second request timeout; use
+`--request-timeout` to change it and `--modes argus-cuda` for a targeted retry.
+The initial 600-second ARGUS timeout is retained in the measurement history.
 
 ## Ownership checks
 

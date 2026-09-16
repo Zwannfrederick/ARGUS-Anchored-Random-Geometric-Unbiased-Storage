@@ -1,7 +1,7 @@
 # ARGUS v0.5 — modelden bağımsız KV runtime
 
-Tarih: 2026-09-15. Durum: **yeniden açıldı**. Temel teslim commit `9861e9c`;
-v0.5.0 M2 ve M6 kapanınca yayımlanır.
+Tarih: 2026-09-16. Durum: **kapandı**. Temel teslim commit `9861e9c`;
+M2 ve M6 kapandı, v0.5.0 yayıma hazır.
 Kapsam: kullanıcı tüm hedefleri, gerçek llama.cpp KV sahipliği dahil, onayladı.
 
 Tarihçe için [v0.5 devir notu](../docs/handoffs/v050-handoff-2026-09-15.md).
@@ -13,21 +13,92 @@ Yerel CPU derlemesi `scratch/llama.cpp-v050` altında, sabit revision arşivinde
 - **Sonraya not — uzun context ölçümü (M5):** uzun süren ladder testleri sonra
   yapılacak; ölçüm 262K basamağından başlanarak ele alınacak. 1M gerçek model
   bu makinede hedef değil (model sınırı 262K, CPU attention prefill saatler sürer).
-- **v0.6:** ölçümlerle birlikte yeni ürün vizyonu görüşmesi; ölçüm stabilizasyonu, Python PageStore–native store birleşmesi (M1),
-  hybrid/multimodal kalite, FP8/Q2 (M3), vLLM ve diğer entegrasyonlar.
+- **v0.6:** [heterogeneous KV memory runtime vizyonu](argus-v0.6.0.md);
+  placement ve precision bağımsızlığı, policy ve 262K ölçüm sözleşmesi.
+  Python PageStore–native store birleşmesi yalnız gerekirse yapılır.
 - Ölçüm diski: `scratch/kv` SATA SSD (`/dev/sda`) üzerinde; NVMe ölçümü için KV
   dizini `nvme0n1` üzerinde seçilmeli ve kayıtta cihaz yazılmalı.
+
+## Onaylanan kalan iş sırası — 2026-09-16
+
+1. **M6 kısa parity:** UI-Mate için stock, ARGUS host KV ve direct disk KV
+   çıktısını kısa context'te karşılaştır; hybrid attention yolunu doğrula.
+2. **M2 tasarım, sonra uygulama:** GPU/pinned RAM sıcak katmanının tasarımını
+   görüşüp netleştir; ardından taşıma, kesin bütçe ve parity doğrulamasını tamamla.
+3. **M6 tam karşılaştırma:** aynı UI-Mate workload'unda Türkçe, screenshot
+   grounding, click doğruluğu ve tool calling için normal–ARGUS karşılaştırması.
+4. M2 ve M6 kabul kapıları geçince v0.5'i kapat; v0.6 implementation'ına ancak
+   kendi planındaki mimari ve benchmark kararları da netleşince başla.
+
+### 2026-09-16 ilerleme
+
+- M6 kısa text-only ön kontrol geçti: UI-Mate, CPU, q8_0 KV, context 256;
+  stock/ARGUS host/direct disk arasında 32 token ID ve tam çıktı birebir eşit.
+  Sekiz full-attention katmanının sahipliği ve teardown doğrulandı.
+  [Ölçüm ve tam kayıt](../docs/measurements/v050-ui-mate-short-parity-2026-09-16.json).
+- [M2 tasarımı](argus-v0.5-m2-design.md) `v0.5 = mechanism, v0.6 = policy`
+  ilkesiyle onaylandı ve uygulandı. Gerçek GPU/pinned/pageable allocation,
+  kaynak koruyan migration ve bounded CUDA attention kontrolleri geçti.
+  600-token prefill içeren native lifecycle: 19 adım, sıfır greedy farkı.
+  UI-Mate görsel/tool-calling karşılaştırması ve hybrid lifecycle ayrı kapılardır.
+- M2 son doğrulama: CPU native **9 passed**, CUDA **2 passed** (D=48/64/256;
+  Q8/Q4 encoded byte'lar da dört placement arasında değişmeden taşındı),
+  Hermes **9 passed**. [Mekanizma kaydı](../docs/measurements/v050-cuda-mechanism-2026-09-16.json).
+- M6 ilk GPU workload'unda Türkçe, etiket sırası ve tool argümanları eşleşti.
+  Düşük görüntü tokenıyla mutlak-piksel click isteğinde ARGUS koordinatı dışarı
+  taştı; JSON şeması bunu düzeltmedi. 1024 görüntü tokenıyla iki yol aynı
+  `(896,672)` sonucunu verdi fakat istenen 512×384 mutlak-piksel sözleşmesini
+  ikisi de sağlayamadı. [İlk kayıt ve tüm tekrarlar](../docs/measurements/v050-ui-mate-cuda-workload-2026-09-16.json).
+- UI-Mate'in [resmî adapter'ı](https://github.com/Tencent/UI-Mate/blob/main/agents/ui_mate_agent.py)
+  varsayılan olarak 0–999 relative koordinatı ekran boyutuna dönüştürür.
+  Harness bu sözleşmeyle açık bir yeni istek kullanacak şekilde düzeltildi;
+  eski başarısız istekler geriye dönük başarılı sayılmadı. M6 kabulü açık.
+- Açık relative istek de tek başına çözmedi: stock `(1234,1234)`, ARGUS
+  `(1247,1015)` üretti; aynı ölçüm kaydının `followups` alanında saklandı.
+  Sağlam baseline için resmî agent prompt/parser, revision
+  `1cb9e1e44ce856e23b593992b02efbd489943fcb`, ile ayrı kontrol hazırlanıyor.
+  Bu sırada CUDA kernel değişmedi; sonuç seçmek için eski testler silinmedi.
+- Resmî adapter koşusu tamamlandı: aynı payload (`request_sha256`
+  `2b8aa0247a...`) altında stock ve ARGUS **birebir aynı** yanıtı üretti —
+  aynı `reasoning_content`, aynı içerik, aynı `[749, 623]`, aynı
+  `pyautogui.click(383, 239)`, 119 completion token. Bu, M6'nın ARGUS
+  sorusunun yanıtıdır: direct disk KV yolu UI-Mate davranışını değiştirmiyor.
+  [Ölçüm](../docs/measurements/v050-ui-mate-reference-parity-2026-09-16.json).
+- **Kabul ölçütü kullanıcı kararıyla eşdeğerlik olarak sabitlendi (2026-09-16).**
+  Harness artık mutlak grounding kutusunu değil stock–ARGUS eşitliğini assert
+  ediyor (`compare()`); mutlak isabet `model_grounding` olarak raporlanıyor ve
+  kapıyı bloklamıyor. Tek modlu rapor `compared=false` der, ölçmediği eşdeğerliği
+  iddia etmez. Kapı kayıtlı ölçüm çiftinde geçti.
+  Mutlak grounding iki yolda da başarısız: model y=239 veriyor, kutu 240–320 —
+  SAVE butonunun üst kenarı. Bu, 1024 görüntü tokenıyla UI-Mate'in kendi
+  grounding özelliğidir, ARGUS regresyonu değildir; eski başarısız denemeler
+  geriye dönük başarılı sayılmadı.
+- Mekanizmanın bu workload'daki maliyeti: prefill 89,34 → 151,31 ms/token,
+  decode 165,58 → 2915,31 ms/token, istek 260,4 s → 752,0 s; tek istek için
+  diskten 14,98 GB okundu. **Bu bir günlük kullanım çalışma noktası değildir ve
+  ARGUS hız sonucu olarak okunamaz.** Neden: `argus_disk_move_page` yalnız test
+  suite'inden çağrılıyor; llama.cpp servis yolunda hiçbir şey sayfayı terfi
+  ettirmiyor, dolayısıyla her attention okuması diske gidiyor. Bütçe bağlayıcı
+  kısıt değildi — 4 MiB GPU ve 4 MiB pinned verildi, yalnız 266 240 ve 262 144
+  byte kullanıldı. Ayrıca `resident_bytes` KV cache değil descriptor tablosudur
+  (256 MiB KV için 65 536 sayfa); `ARGUS_KV_RESIDENT_BYTES` metadata bütçeler.
+  Depoda gerçekçi çalışma noktasında ARGUS ölçümü **yok**; böyle bir ölçüm v0.6
+  placement policy'sini gerektiriyor. v0.6'nın hedefi tam olarak budur.
+- Önceki iki ARGUS denemesi bu koşuyla geçersiz kılındı: ilki 600 s client
+  timeout'una, ikincisi prefill'i bitirdikten (423,76 s) sonra decode sırasında
+  süreç ölümüne takıldı. Stock da güncel harness'la yeniden koşuldu; böylece
+  payload özdeşliği çıkarım değil, hash doğrulaması.
 
 ## Kabul durumu
 
 | Kapı | Durum | Kalan |
 |---|---|---|
-| M1 — ortak native page yaşam döngüsü | Native store'da kapandı | Python–native birleşme v0.6 |
-| M2 — GPU/RAM/disk bütçeleri | Disk/metadata/staging kesin bütçe kapandı | **v0.5:** GPU ve pinned RAM sıcak katmanı, bütçe ve parity |
+| M1 — ortak native page yaşam döngüsü | Native store'da kapandı | Python–native birleşme v0.6'da gerekirse |
+| M2 — GPU/RAM/disk bütçeleri | Kapandı: açık migration + FP16 CUDA attention, bütçe/hata/lifecycle testleri ve M6 karşılaştırması geçti | Otomatik placement seçimi v0.6 |
 | M3 — attention contract kapsamı | Kernel referansları + iki model ailesi | Hybrid/multimodal kalite, FP8, Q2 v0.6 |
-| M4 — runtime sahipliği | llama.cpp allocation/write/read ARGUS'ta | GPU-resident KV M2 ile gelir; karışık hassasiyet, vLLM v0.6 |
+| M4 — runtime sahipliği | llama.cpp allocation/write/read ve CUDA attention ARGUS'ta | Karışık hassasiyet, vLLM v0.6 |
 | M5 — uzun context ölçümü | Ertelendi (kullanıcı notu) | 262K'dan başlayarak sonra |
-| M6 — UI-Mate/Hermes/Neo | Hermes ARGUS modu ve Neo KV kartı var (`0df1033`) | **v0.5:** UI-Mate normal vs ARGUS workload karşılaştırması |
+| M6 — UI-Mate/Hermes/Neo | Kapandı: resmî adapter prompt/parser'ında stock–ARGUS çıktısı birebir aynı | UI-Mate mutlak grounding kalitesi v0.6 gözlemi |
 
 ## Amaç ve sınır
 
@@ -37,8 +108,9 @@ Mevcut `argus_cache/core/` dizini korunur; sırf isim için `argus_core/` taşı
 Core'da model adına göre davranış seçilmez. Model kayıtları ve konumsal dönüşümler
 `models/`, runtime yaşam döngüsü ve entegrasyon kodu `adapters/` içinde kalır.
 
-Bu plan eski v0.4 kabul kapılarının geçtiği anlamına gelmez. Paket sürümü 0.4.0;
-önceki planın tamamlanmamış ölçümleri tarihsel kayıtta açık kalır.
+Bu plan eski v0.4 kabul kapılarının geçtiği anlamına gelmez. Paket metadata'sı
+0.5.0 olsa da sürüm kabulü açık; önceki planın tamamlanmamış ölçümleri tarihsel
+kayıtta açık kalır.
 
 ## Depodaki gerçek başlangıç noktası
 

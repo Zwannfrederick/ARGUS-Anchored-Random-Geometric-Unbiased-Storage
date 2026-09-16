@@ -29,8 +29,12 @@ The [v0.5 plan](plans/argus-v0.5.0.md) keeps model contracts outside the core.
   one-page read-ahead. Direct attention distinguishes codec from placement and
   supports FP16/BF16, Q8/Q4 pages and sliding-window masks.
 
-Not in v0.5: a unified HF/llama.cpp tiering backend (the Python page store and
-the native store are separate), GPU-resident ARGUS KV, per-page mixed precision
+v0.5 now has explicit GPU/pinned/pageable/disk migration and bounded FP16 CUDA
+attention; native lifecycle and failure checks pass. See the [integration contract](integrations/llama.cpp/README.md#cuda-mechanism-v05-m2).
+The complete UI-Mate/Neo acceptance (M6) remains open. v0.5 supplies mechanism;
+automatic placement and precision policy belong to v0.6.
+Beyond v0.5: a unified HF/llama.cpp tiering backend if needed (the Python page store and
+the native store are separate), per-page mixed precision
 inside llama.cpp, and real long-context throughput. The
 [1M-token synthetic disk check](docs/measurements/v050-disk-capacity-smoke-2026-09-15.json)
 uses one layer, one KV head and head dimension 4; it is not 1M-context model
