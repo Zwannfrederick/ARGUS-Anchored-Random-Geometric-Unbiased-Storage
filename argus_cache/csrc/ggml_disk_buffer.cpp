@@ -2,6 +2,9 @@
 #include "ggml-backend-impl.h"
 #include "ggml-cpu.h"
 #include "ggml-cpu/traits.h"
+#ifdef ARGUS_CUDA
+#include "ggml_cuda_attention.h"
+#endif
 
 #include <algorithm>
 #include <atomic>
@@ -26,11 +29,14 @@ struct Page {
     uint64_t generation = 0;
     uint32_t checksum = 0;
     uint32_t active = 0;
+#ifdef ARGUS_CUDA
+    ArgusTierBuffer * resident = nullptr;
+#endif
 };
 struct Store {
     void * address = MAP_FAILED;
     Page * pages = nullptr;
-    size_t bytes = 0, disk_bytes = 0, metadata_bytes = 0;
+    size_t bytes = 0, disk_bytes = 0, metadata_bytes = 0, metadata_charge = 0;
     int fd = -1;
     uint64_t id = 0;
     uint64_t revision = 0;
@@ -92,7 +98,7 @@ off_t offset(size_t page, uint32_t active) {
     return static_cast<off_t>((page * 2 + active) * page_size);
 }
 
-void read_page(Store & store, size_t page, void * data) {
+void read_disk_page(Store & store, size_t page, void * data) {
     const Page & descriptor = store.pages[page];
     if (!descriptor.generation || descriptor.active == 2) { std::memset(data, 0, page_size); return; }
     ssize_t got;
@@ -100,6 +106,18 @@ void read_page(Store & store, size_t page, void * data) {
     if (got != static_cast<ssize_t>(page_size)) { throw std::runtime_error("ARGUS short or failed direct page read"); }
     read_bytes += page_size;
     if (checksum(data) != descriptor.checksum) { throw std::runtime_error("ARGUS disk page checksum mismatch"); }
+}
+
+void read_page(Store & store, size_t page, void * data) {
+#ifdef ARGUS_CUDA
+    const auto & descriptor = store.pages[page];
+    if (descriptor.resident) {
+        descriptor.resident->read(data, 0, page_size);
+        if (checksum(data) != descriptor.checksum) { throw std::runtime_error("ARGUS resident checksum mismatch"); }
+        return;
+    }
+#endif
+    read_disk_page(store, page, data);
 }
 
 void write_page(Store & store, size_t page, void * data) {
@@ -123,6 +141,9 @@ void write_page(Store & store, size_t page, void * data) {
         throw std::runtime_error("ARGUS disk page write verification failed");
     }
     read_bytes += page_size;
+#ifdef ARGUS_CUDA
+    delete descriptor.resident;
+#endif
     descriptor = {descriptor.generation + 1, digest, inactive};
     ++store.revision;
     ++committed_pages;
@@ -205,6 +226,9 @@ void clear(ggml_backend_buffer_t buffer, uint8_t value) {
             }
         }
         for (size_t i = 0; i < count; ++i) {
+#ifdef ARGUS_CUDA
+            delete store.pages[i].resident;
+#endif
             store.pages[i] = {store.pages[i].generation + 1, 0, 2};
         }
         ++store.revision;
@@ -218,15 +242,18 @@ void * base(ggml_backend_buffer_t buffer) { return store_for(buffer).address; }
 
 void release(ggml_backend_buffer_t buffer) {
     auto * store = static_cast<Store *>(buffer->context);
-    const auto metadata = store->metadata_bytes, physical = store->disk_bytes;
+    const auto metadata = store->metadata_bytes, charged = store->metadata_charge, physical = store->disk_bytes;
     const auto id = store->id;
+#ifdef ARGUS_CUDA
+    for (size_t i = 0; i < rounded(store->bytes) / page_size; ++i) { delete store->pages[i].resident; }
+#endif
     munmap(store->address, rounded(store->bytes));
     close(store->fd);
     store->~Store();
     munmap(store, metadata);
     std::lock_guard<std::mutex> guard(budget_mutex);
     disk_live -= physical;
-    metadata_live -= metadata;
+    metadata_live -= charged;
     --stores;
     std::fprintf(stderr, "ARGUS_DISK free id=%llu disk_live=%zu resident_live=%zu staging_live=%zu\n",
                  static_cast<unsigned long long>(id), disk_live, metadata_live, staging_live);
@@ -239,13 +266,18 @@ ggml_backend_buffer_t allocate(ggml_backend_buffer_type_t type, size_t bytes) tr
     }
     const size_t physical = allocation * 2;
     const size_t metadata = rounded(descriptor_offset + allocation / page_size * sizeof(Page));
+    size_t metadata_charge = metadata;
+#ifdef ARGUS_CUDA
+    // Reserve both handles during a migration; payloads have separate tier budgets.
+    metadata_charge += allocation / page_size * 2 * sizeof(ArgusTierBuffer);
+#endif
     const size_t max_disk = limit("ARGUS_KV_MAX_BYTES"), max_resident = limit("ARGUS_KV_RESIDENT_BYTES");
     if (argus_disk_staging_limit() < 2 * page_size) { throw std::runtime_error("ARGUS staging needs at least 8192 bytes"); }
     const char * directory = std::getenv("ARGUS_KV_DIR");
     if (!directory || !*directory) { throw std::runtime_error("ARGUS_KV_DIR is required"); }
     std::lock_guard<std::mutex> guard(budget_mutex);
     if (physical > max_disk || disk_live > max_disk - physical ||
-        metadata > max_resident || metadata_live > max_resident - metadata) {
+        metadata_charge > max_resident || metadata_live > max_resident - metadata_charge) {
         throw std::runtime_error("ARGUS disk or resident metadata budget exceeded");
     }
     std::string pattern = std::string(directory) + "/argus-direct-XXXXXX";
@@ -277,6 +309,7 @@ ggml_backend_buffer_t allocate(ggml_backend_buffer_type_t type, size_t bytes) tr
     store->bytes = bytes;
     store->disk_bytes = physical;
     store->metadata_bytes = metadata;
+    store->metadata_charge = metadata_charge;
     store->id = ++next_id;
     const ggml_backend_buffer_i iface = {release, base, nullptr, fill, set, get, nullptr, nullptr, copy, clear, nullptr};
     auto * result = ggml_backend_buffer_init(type, iface, store, bytes);
@@ -288,7 +321,7 @@ ggml_backend_buffer_t allocate(ggml_backend_buffer_type_t type, size_t bytes) tr
         return nullptr;
     }
     disk_live += physical;
-    metadata_live += metadata;
+    metadata_live += metadata_charge;
     peak_metadata = std::max(peak_metadata, metadata_live);
     ++stores;
     std::fprintf(stderr, "ARGUS_DISK allocate id=%llu logical_bytes=%zu disk_bytes=%zu metadata_bytes=%zu\n",
@@ -459,6 +492,16 @@ ggml_tensor * argus_ggml_disk_set_rows(ggml_context * ctx, ggml_tensor * target,
 void argus_disk_publish_stats() {
     const char * path = std::getenv("ARGUS_KV_STATS_PATH");
     if (!path || !*path) { return; }
+    std::string tier_stats;
+#ifdef ARGUS_CUDA
+    const auto usage = argus_tier_usage();
+    tier_stats = ",\"gpu_bytes\":" + std::to_string(usage.gpu) +
+        ",\"pinned_bytes\":" + std::to_string(usage.pinned) + ",\"ram_bytes\":" + std::to_string(usage.ram) +
+        ",\"peak_gpu_bytes\":" + std::to_string(usage.peak_gpu) +
+        ",\"peak_pinned_bytes\":" + std::to_string(usage.peak_pinned) +
+        ",\"peak_ram_bytes\":" + std::to_string(usage.peak_ram) +
+        ",\"cuda_attention_calls\":" + std::to_string(usage.attention_calls);
+#endif
     std::lock_guard<std::mutex> guard(budget_mutex);
     const std::string scratch = std::string(path) + ".tmp";
     FILE * stream = std::fopen(scratch.c_str(), "w");
@@ -466,11 +509,83 @@ void argus_disk_publish_stats() {
     const int wrote = std::fprintf(stream,
         "{\"mode\":\"direct\",\"disk_bytes\":%zu,\"resident_bytes\":%zu,\"staging_bytes\":%zu,"
         "\"peak_resident_bytes\":%zu,\"peak_staging_bytes\":%zu,\"read_bytes\":%zu,"
-        "\"written_bytes\":%zu,\"committed_pages\":%zu,\"stores\":%zu}\n",
+        "\"written_bytes\":%zu,\"committed_pages\":%zu,\"stores\":%zu%s}\n",
         disk_live, metadata_live, staging_live, peak_metadata, peak_staging,
-        read_bytes.load(), written_bytes.load(), committed_pages.load(), stores);
+        read_bytes.load(), written_bytes.load(), committed_pages.load(), stores, tier_stats.c_str());
     const int closed = std::fclose(stream);
     if (wrote < 0 || closed || std::rename(scratch.c_str(), path)) {
         throw std::runtime_error("ARGUS could not publish stats");
     }
 }
+
+#ifdef ARGUS_CUDA
+void argus_disk_move_page(const ggml_tensor * tensor, size_t start, ArgusTier tier, ArgusDiskRevision expected) {
+    if (!argus_ggml_is_disk_tensor(tensor)) { throw std::invalid_argument("ARGUS move requires disk-backed tensor"); }
+    const auto * storage = tensor->view_src ? tensor->view_src : tensor;
+    auto & store = store_for(storage->buffer);
+    const size_t position = checked_offset(store, tensor, start, page_size);
+    if (position % page_size || start > ggml_nbytes(tensor) || page_size > ggml_nbytes(tensor) - start) {
+        throw std::invalid_argument("ARGUS move requires a complete aligned page inside the tensor");
+    }
+    std::lock_guard<std::mutex> guard(store.mutex);
+    if (!(expected == ArgusDiskRevision{store.id, store.revision})) { throw std::runtime_error("ARGUS stale migration"); }
+    auto & page = store.pages[position / page_size];
+    if (!page.generation || page.active == 2) { throw std::invalid_argument("ARGUS cannot promote an unwritten page"); }
+    if ((page.resident ? page.resident->tier() : ArgusTier::disk) == tier) { return; }
+    if (page.generation == UINT64_MAX || store.revision == UINT64_MAX) { throw std::runtime_error("ARGUS generation exhausted"); }
+    std::unique_ptr<ArgusTierBuffer> target;
+    Bounce data;
+    if (tier != ArgusTier::disk) {
+        read_page(store, position / page_size, data.data);
+        const auto digest = checksum(data.data);
+        target = std::make_unique<ArgusTierBuffer>(tier, page_size);
+        target->write(data.data, page_size);
+        target->read(data.data, 0, page_size);
+        if (checksum(data.data) != digest) { throw std::runtime_error("ARGUS migration verification failed"); }
+    } else {
+        // A retained backing copy can still have suffered corruption since its write.
+        read_disk_page(store, position / page_size, data.data);
+    }
+    delete page.resident;
+    page.resident = target.release();
+    ++page.generation;
+    ++store.revision;
+}
+
+void argus_disk_stage_cuda(const ggml_tensor * tensor, void * host, void * device,
+                          size_t start, size_t bytes, void * stream) {
+    if (!argus_ggml_is_disk_tensor(tensor)) { throw std::invalid_argument("ARGUS staging requires disk tensor"); }
+    if (!host || !device || start > ggml_nbytes(tensor) || bytes > ggml_nbytes(tensor) - start) {
+        throw std::out_of_range("ARGUS CUDA staging range");
+    }
+    const auto * storage = tensor->view_src ? tensor->view_src : tensor;
+    auto & store = store_for(storage->buffer);
+    size_t position = checked_offset(store, tensor, start, bytes);
+    Bounce bounce;
+    std::lock_guard<std::mutex> guard(store.mutex);
+    try {
+        size_t copied = 0;
+        while (copied < bytes) {
+            const size_t page_index = position / page_size, within = position % page_size;
+            const size_t count = std::min(bytes - copied, page_size - within);
+            const auto & page = store.pages[page_index];
+            if (page.resident && page.resident->tier() == ArgusTier::gpu && page.active != 2) {
+                argus_cuda_copy(static_cast<char *>(device) + copied,
+                    static_cast<char *>(page.resident->data()) + within, count, true, stream);
+            } else {
+                read_page(store, page_index, bounce.data);
+                std::memcpy(static_cast<char *>(host) + copied, static_cast<char *>(bounce.data) + within, count);
+                argus_cuda_copy(static_cast<char *>(device) + copied, static_cast<char *>(host) + copied,
+                                count, false, stream);
+            }
+            position += count;
+            copied += count;
+        }
+        argus_cuda_wait(stream);
+    } catch (...) {
+        // Drain queued copies before unlocking resident pages or releasing caller buffers.
+        argus_cuda_wait(stream);
+        throw;
+    }
+}
+#endif
