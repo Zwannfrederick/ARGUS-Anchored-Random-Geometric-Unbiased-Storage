@@ -4,6 +4,9 @@
 #include "ggml_host_buffer.h"
 #include "ggml_disk_buffer.h"
 #include "ggml-cpu.h"
+#ifdef ARGUS_CUDA
+#include "ggml_cuda_attention.h"
+#endif
 
 #include <algorithm>
 #include <atomic>
@@ -383,6 +386,10 @@ ggml_tensor * argus_ggml_paged_attention(
         ggml_tensor * mask, bool unsupported_features, float scale) {
     const ggml_tensor * storage = k->view_src ? k->view_src : k;
     const bool disk = argus_ggml_is_disk_tensor(k);
+    if (!disk && std::getenv("ARGUS_KV_GPU_BYTES") && storage->buffer &&
+        ggml_backend_buffer_get_type(storage->buffer) == argus_ggml_host_buffer_type()) {
+        throw std::runtime_error("ARGUS GPU KV requires direct disk backing and explicit staging budget");
+    }
     if (!disk && (!argus_kv_resident_budget() || !storage->buffer ||
         ggml_backend_buffer_get_type(storage->buffer) != argus_ggml_host_buffer_type())) {
         return nullptr;
@@ -403,6 +410,13 @@ ggml_tensor * argus_ggml_paged_attention(
     }
     if (disk) {
         if (!argus_ggml_is_disk_tensor(v)) { throw std::runtime_error("ARGUS disk K requires disk V"); }
+        if (std::getenv("ARGUS_KV_GPU_BYTES")) {
+#ifdef ARGUS_CUDA
+            return argus_ggml_cuda_attention(ctx, q, k, v, mask, scale);
+#else
+            throw std::runtime_error("ARGUS GPU KV requires a CUDA build");
+#endif
+        }
         disk_scratch_size(q, k, v, mask);
     }
     ggml_tensor * args[] = {q, k, v, mask};

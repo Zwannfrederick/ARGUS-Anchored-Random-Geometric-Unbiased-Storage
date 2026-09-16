@@ -1,0 +1,144 @@
+--- a/ggml/include/ggml-cuda.h
++++ b/ggml/include/ggml-cuda.h
+@@ -24,6 +24,11 @@
+ 
+ GGML_BACKEND_API bool ggml_backend_is_cuda(ggml_backend_t backend);
+ 
++// One external custom operation, registered before graph scheduling.
++typedef void (*ggml_cuda_custom_compute_t)(struct ggml_tensor *, int device, void * stream);
++GGML_BACKEND_API void ggml_backend_cuda_register_custom_op(
++    ggml_custom_op_t cpu_marker, ggml_cuda_custom_compute_t compute, ggml_backend_buffer_type_t external_buffer);
++
+ // device buffer
+ GGML_BACKEND_API ggml_backend_buffer_type_t ggml_backend_cuda_buffer_type(int device);
+ 
+--- a/ggml/src/ggml-cuda/ggml-cuda.cu
++++ b/ggml/src/ggml-cuda/ggml-cuda.cu
+@@ -2064,7 +2064,32 @@
+         nb1, nb2, nb3, stream);
+ }
+ 
++struct external_custom_op {
++    ggml_custom_op_t marker;
++    ggml_cuda_custom_compute_t compute;
++    ggml_backend_buffer_type_t buffer;
++};
++static std::atomic<const external_custom_op *> external_op{nullptr};
++void ggml_backend_cuda_register_custom_op(ggml_custom_op_t marker, ggml_cuda_custom_compute_t compute,
++                                          ggml_backend_buffer_type_t buffer) {
++    static const external_custom_op registered{marker, compute, buffer};
++    GGML_ASSERT(registered.marker == marker && registered.compute == compute && registered.buffer == buffer);
++    external_op.store(&registered);
++}
++static bool is_external_op(const ggml_tensor * op) {
++    const auto * registered = external_op.load();
++    if (op->op != GGML_OP_CUSTOM || !registered) { return false; }
++    ggml_custom_op_params params;
++    memcpy(&params, op->op_params, sizeof params);
++    return params.fun == registered->marker;
++}
++
+ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct ggml_tensor * dst) {
++    if (is_external_op(dst)) {
++        external_op.load()->compute(dst, ctx.device, ctx.stream());
++        return true;
++    }
++
+     switch (dst->op) {
+         case GGML_OP_ARGMAX:
+             ggml_cuda_argmax(ctx, dst);
+@@ -2562,6 +2587,7 @@
+ 
+     for (int i = 0; i < cgraph->n_nodes; i++) {
+         ggml_tensor * node = cgraph->nodes[i];
++        if (is_external_op(node)) { return false; } // External I/O cannot be captured.
+ 
+         if (ggml_cuda_is_view_or_noop(node)) {
+             continue;
+@@ -4343,7 +4369,8 @@
+                 for (int j = 0; j < GGML_MAX_SRC; j++) {
+                     if (node->src[j] != nullptr) {
+                         assert(node->src[j]->buffer);
+-                        assert(node->src[j]->buffer->buft == ggml_backend_cuda_buffer_type(cuda_ctx->device) ||
++                        assert((is_external_op(node) && node->src[j]->buffer->buft == external_op.load()->buffer) ||
++                               node->src[j]->buffer->buft == ggml_backend_cuda_buffer_type(cuda_ctx->device) ||
+                                (integrated && ggml_backend_buft_is_cuda_host(node->src[j]->buffer->buft)));
+                     }
+                 }
+@@ -5062,6 +5089,11 @@
+ 
+ // TODO: move these functions here
+ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const ggml_tensor * op) {
++    if (is_external_op(op)) {
++        auto * context = static_cast<ggml_backend_cuda_device_context *>(dev->context);
++        return context->device == 0;
++    }
++
+     ggml_backend_cuda_device_context * dev_ctx = (ggml_backend_cuda_device_context *) dev->context;
+ 
+     // check if all the sources are allocated on this device
+@@ -5520,6 +5552,11 @@
+ }
+ 
+ static bool ggml_backend_cuda_device_supports_buft(ggml_backend_dev_t dev, ggml_backend_buffer_type_t buft) {
++    const auto * registered = external_op.load();
++    if (registered && buft == registered->buffer) {
++        return static_cast<ggml_backend_cuda_device_context *>(dev->context)->device == 0;
++    }
++
+     ggml_backend_cuda_device_context * dev_ctx = (ggml_backend_cuda_device_context *) dev->context;
+     const bool integrated = ggml_cuda_info().devices[dev_ctx->device].integrated;
+     return (ggml_backend_buft_is_cuda(buft) && buft->device == dev) || (integrated && ggml_backend_buft_is_cuda_host(buft));
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -76,6 +76,14 @@
+     set_source_files_properties("${ARGUS_CORE_DIR}/ggml_disk_buffer.cpp" PROPERTIES SKIP_UNITY_BUILD_INCLUSION ON)
+     target_include_directories(llama PRIVATE "${ARGUS_CORE_DIR}" ../ggml/src)
+     target_compile_definitions(llama PRIVATE LLAMA_ARGUS_HOST)
++    if (GGML_CUDA)
++        enable_language(CUDA)
++        target_sources(llama PRIVATE "${ARGUS_CORE_DIR}/ggml_cuda_attention.cu")
++        set_source_files_properties("${ARGUS_CORE_DIR}/ggml_cuda_attention.cu" PROPERTIES SKIP_UNITY_BUILD_INCLUSION ON)
++        target_compile_definitions(llama PRIVATE ARGUS_CUDA)
++        target_link_libraries(llama PRIVATE ggml-cuda)
++        set_target_properties(llama PROPERTIES CUDA_STANDARD 17)
++    endif()
+ endif()
+ 
+ if (BUILD_SHARED_LIBS)
+--- a/src/llama-graph.cpp
++++ b/src/llama-graph.cpp
+@@ -1,6 +1,10 @@
+ #include "llama-graph.h"
+ #ifdef LLAMA_ARGUS_HOST
+ #include "ggml_host_buffer.h"
++#ifdef ARGUS_CUDA
++#include "ggml_cuda_attention.h"
++#include "ggml-cuda.h"
++#endif
+ #endif
+ 
+ #include "llama-impl.h"
+@@ -2607,7 +2611,21 @@
+             kq_b || sinks || v_mla || hparams.attn_soft_cap || hparams.f_max_alibi_bias != 0.0f || arch == LLM_ARCH_GROK,
+             kq_scale)) {
+         ggml_tensor * cur = ggml_reshape_2d(ctx0, paged, paged->ne[0]*paged->ne[1], paged->ne[2]);
+-        ggml_backend_sched_set_tensor_backend(sched, paged, backend_cpu);
++        ggml_backend_t target_backend = backend_cpu;
++#ifdef ARGUS_CUDA
++        if (argus_ggml_is_cuda_attention(paged)) {
++            target_backend = nullptr;
++            for (int i = 0; i < ggml_backend_sched_get_n_backends(sched); ++i) {
++                auto * candidate = ggml_backend_sched_get_backend(sched, i);
++                if (ggml_backend_is_cuda(candidate) && ggml_backend_supports_op(candidate, paged)) {
++                    target_backend = candidate;
++                    break;
++                }
++            }
++            if (!target_backend) { throw std::runtime_error("ARGUS CUDA attention needs CUDA device 0 in the scheduler"); }
++        }
++#endif
++        ggml_backend_sched_set_tensor_backend(sched, paged, target_backend);
+         ggml_build_forward_expand(gf, cur);
+         return cur;
+     }

@@ -117,3 +117,42 @@ def test_llama_server_stock_host_and_paged_outputs_match(tmp_path):
         capture_output=True, text=True, timeout=1800,
     )
     assert result.returncode == 0, result.stderr[-3000:]
+
+
+@pytest.mark.skipif(os.environ.get("ARGUS_TEST_CUDA") != "1", reason="set ARGUS_TEST_CUDA=1 for real CUDA mechanism checks")
+def test_cuda_tier_migration_and_attention(tmp_path):
+    import shutil
+
+    nvcc = shutil.which("nvcc")
+    if nvcc is None:
+        pytest.skip("CUDA toolkit required")
+    cuda = Path(nvcc).resolve().parents[1]
+    obj = tmp_path / "cuda_attention.o"
+    subprocess.run(
+        [nvcc, "-std=c++17", "-arch=sm_86", "-Xcompiler=-fPIC",
+         f"-I{LLAMA}/ggml/include", f"-I{LLAMA}/ggml/src", f"-I{ROOT}/argus_cache/csrc",
+         "-c", str(ROOT / "argus_cache/csrc/ggml_cuda_attention.cu"), "-o", str(obj)], check=True,
+    )
+    binary = _compile(tmp_path, "tests/cpp/test_ggml_cuda_mechanism.cpp",
+                      ["-DARGUS_CUDA", f"-I{cuda}/include", str(ROOT / "argus_cache/csrc/ggml_disk_buffer.cpp"),
+                       str(obj), f"-L{cuda}/lib64", f"-Wl,-rpath,{cuda}/lib64",
+                       "-Wl,--wrap=pwrite", "-Wl,--wrap=pread", "-pthread"],
+                      ["-lggml-base", "-lggml-cpu", "-lggml", "-lcudart"])
+    for dimension in (48, 64, 256):
+        subprocess.run([binary, _storage(), str(dimension)], check=True, timeout=180)
+
+
+@pytest.mark.skipif(os.environ.get("ARGUS_TEST_CUDA") != "1", reason="set ARGUS_TEST_CUDA=1 with CUDA build")
+def test_cuda_attention_native_lifecycle(tmp_path):
+    binary = _compile(tmp_path, "tests/cpp/test_llama_paged_attention.cpp", ["-DARGUS_TEST_CUDA_TIER"], ["-lllama", "-lggml-base"])
+    env = {**os.environ, "ARGUS_KV_STAGING_BYTES": "4194304", "ARGUS_KV_GPU_BYTES": "4194304",
+           "ARGUS_KV_PINNED_BYTES": "4194304", "ARGUS_TEST_PROMPT_TOKENS": "64"}
+    env.pop("ARGUS_TEST_REPORT_LOGITS_ONLY", None)
+    result = subprocess.run([binary, MODEL, _storage(), "f16"], env=env, capture_output=True, text=True, timeout=600)
+    assert result.returncode == 0, result.stderr[-4000:]
+    report = json.loads(next(line for line in result.stdout.splitlines() if line.startswith('{"kv_type"')))
+    assert report["compared_steps"] == 19 and report["greedy_mismatches"] == 0
+    assert report["migrated_pages"] == 2
+    assert report["stats"]["cuda_attention_calls"] > 0
+    for key in ("peak_staging_bytes", "peak_gpu_bytes", "peak_pinned_bytes"):
+        assert report["stats"][key] <= 4194304

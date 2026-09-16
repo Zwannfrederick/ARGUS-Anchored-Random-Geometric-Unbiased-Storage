@@ -4,6 +4,9 @@
 // only KV ownership and the attention kernel differ.
 #include "llama.h"
 #include "ggml-backend.h"
+#ifdef ARGUS_TEST_CUDA_TIER
+#include "ggml_cuda_attention.h"
+#endif
 
 #include <algorithm>
 #include <cctype>
@@ -43,15 +46,33 @@ size_t argus_rss_bytes() {
 
 struct FirstAttention {
     std::vector<float> values;
+    bool move_pages = false;
+    int moved_pages = 0;
 };
 
 // Captures layer 0's attention output; later layers amplify rounding differently per model.
 bool capture_first_attention(ggml_tensor * tensor, bool ask, void * user_data) {
     const bool wanted = std::strcmp(tensor->name, "kqv_out-0") == 0 && tensor->type == GGML_TYPE_F32;
     if (ask || !wanted) { return wanted || !ask; }
-    auto & values = static_cast<FirstAttention *>(user_data)->values;
+    auto & captured = *static_cast<FirstAttention *>(user_data);
+    auto & values = captured.values;
     values.resize(ggml_nelements(tensor));
     ggml_backend_tensor_get(tensor, values.data(), 0, ggml_nbytes(tensor));
+#ifdef ARGUS_TEST_CUDA_TIER
+    if (captured.move_pages && !captured.moved_pages) {
+        auto * operation = tensor;
+        for (int depth = 0; operation && depth < 8 && !argus_ggml_is_cuda_attention(operation); ++depth) {
+            operation = operation->src[0];
+        }
+        require(operation && argus_ggml_is_cuda_attention(operation), "CUDA attention node not found");
+        // Explicit test placement, not an eviction or hotness policy in the runtime.
+        for (int input : {1, 2}) {
+            auto * kv = operation->src[input];
+            argus_disk_move_page(kv, 0, input == 1 ? ArgusTier::gpu : ArgusTier::pinned, argus_disk_revision(kv));
+            ++captured.moved_pages;
+        }
+    }
+#endif
     return true;
 }
 
@@ -122,6 +143,9 @@ int main(int argc, char ** argv) try {
 
     params.cb_eval = capture_first_attention;
     params.cb_eval_user_data = &argus_attention;
+#ifdef ARGUS_TEST_CUDA_TIER
+    argus_attention.move_pages = true;
+#endif
     auto * argus = llama_init_from_model(model, params);
     require(argus, "argus context");
 
@@ -204,6 +228,11 @@ int main(int argc, char ** argv) try {
 
     llama_free(argus);
     llama_free(stock);
+#ifdef ARGUS_TEST_CUDA_TIER
+    require(argus_attention.moved_pages == 2, "native pages were not migrated");
+    const auto remaining = argus_tier_usage();
+    require(!remaining.gpu && !remaining.pinned && !remaining.ram, "native tier allocations leaked");
+#endif
     setenv("ARGUS_KV_MAX_BYTES", "1", 1);
     require(llama_init_from_model(model, params) == nullptr, "1-byte allocation budget must refuse");
     llama_model_free(model);
@@ -212,9 +241,9 @@ int main(int argc, char ** argv) try {
     rmdir(directory);
     std::printf("{\"kv_type\":\"%s\",\"compared_steps\":%d,\"max_abs_first_attention_error\":%.9g,"
                 "\"greedy_mismatches\":%d,\"strict_logits\":%s,\"max_abs_logit_error\":%.9g,"
-                "\"argus_kv_rss_bytes\":%zu,\"resident_budget_bytes\":%zu,\"stats\":%s}\n",
+                "\"argus_kv_rss_bytes\":%zu,\"resident_budget_bytes\":%zu,\"migrated_pages\":%d,\"stats\":%s}\n",
                 argc > 3 ? argv[3] : "f16", compared_steps, attention_error, greedy_mismatches,
-                strict_logits ? "true" : "false", max_error, rss, resident_budget,
+                strict_logits ? "true" : "false", max_error, rss, resident_budget, argus_attention.moved_pages,
                 published.empty() ? "null" : published.c_str());
     return 0;
 } catch (const std::exception & error) {
