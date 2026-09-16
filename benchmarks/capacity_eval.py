@@ -13,7 +13,7 @@ import torch
 # Add parent directory to path so we can import core
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from core.memory_manager import PagedDynamicKVCache, ArgusConfig
+from argus_cache.core.memory_manager import PagedDynamicKVCache, ArgusConfig
 
 def format_bytes(b):
     """Formats bytes to a readable string."""

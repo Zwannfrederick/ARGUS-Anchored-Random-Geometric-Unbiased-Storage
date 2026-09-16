@@ -315,7 +315,7 @@ def generate_text(model, mode, cache=None, ssm_state=None, prompt="zwann", gen_l
                 
         elif mode == "paged_quantized":
             # Powered by our 5-tier Paged Cache!
-            from core.dashboard import render_dashboard
+            from argus_cache.core.dashboard import render_dashboard
             import time
             
             paged_cache = PagedDynamicQuantizedCache(

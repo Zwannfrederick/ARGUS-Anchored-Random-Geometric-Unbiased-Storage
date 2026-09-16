@@ -1,0 +1,75 @@
+# Guards packaging and repository hygiene, not correctness.
+#
+# The test suite needs a CUDA device, which hosted runners do not have, so this
+# workflow deliberately does NOT run it: a green badge here means the package
+# ships the right files, not that ARGUS works. The full suite runs locally and
+# its result is recorded in the release notes.
+#
+# torch is installed only because setup.py imports it for BuildExtension and
+# CUDAExtension; the CPU wheel is enough to import those classes and build an
+# sdist, and nothing here compiles the extension.
+name: packaging
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+
+jobs:
+  packaging:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build tooling
+        run: |
+          python -m pip install --upgrade pip
+          pip install build twine setuptools wheel pytest pillow
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+
+      - name: Build sdist
+        run: python -m build --sdist --no-isolation
+
+      - name: Check distribution metadata
+        run: twine check dist/*
+
+      - name: Assert the sdist installs only the intended packages
+        run: |
+          python - <<'PY'
+          import sys, tarfile
+          from pathlib import Path
+
+          sdist = next(Path("dist").glob("*.tar.gz"))
+          with tarfile.open(sdist) as archive:
+              member = next(m for m in archive.getmembers()
+                            if m.name.endswith("egg-info/top_level.txt"))
+              shipped = set(archive.extractfile(member).read().decode().split())
+
+          expected = {"argus_cache", "argus_cpp_backend"}
+          if shipped != expected:
+              sys.exit(f"{sdist.name} would install {sorted(shipped)}; "
+                       f"expected {sorted(expected)}. A stray top-level package "
+                       f"collides with anything else by that name in the user's "
+                       f"environment.")
+          print(f"{sdist.name} installs {sorted(shipped)}")
+          PY
+
+      # One hygiene test imports the attention wrapper, which reaches
+      # argus_cpp_backend, and nothing here compiles that extension. It guards a
+      # past regression rather than packaging, so it is deselected here and runs
+      # in the local suite that gates every release.
+      - name: Repository hygiene and offline checks
+        run: |
+          pytest -q tests/test_import_hygiene.py tests/test_ui_mate_workload.py \
+            --deselect tests/test_import_hygiene.py::test_canonical_wrapper_keeps_the_arguments_the_copy_dropped
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: dist/*.tar.gz

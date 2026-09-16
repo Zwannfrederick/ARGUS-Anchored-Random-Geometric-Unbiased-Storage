@@ -14,8 +14,8 @@ import torch
 # Ensure workspace is in path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from core.memory_manager import PagedDynamicKVCache, ArgusConfig
-from core.balloon_driver import ElasticCacheBalloonDriver
+from argus_cache.core.memory_manager import PagedDynamicKVCache, ArgusConfig
+from argus_cache.core.balloon_driver import ElasticCacheBalloonDriver
 
 def run_simulation(steps, device):
     print("=" * 90)

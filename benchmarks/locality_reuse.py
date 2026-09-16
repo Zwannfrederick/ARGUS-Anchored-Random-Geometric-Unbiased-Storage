@@ -20,7 +20,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 try:
     from argus_cache.core.memory_manager import PagedDynamicKVCache, ArgusConfig
 except ImportError:
-    from core.memory_manager import PagedDynamicKVCache, ArgusConfig
+    from argus_cache.core.memory_manager import PagedDynamicKVCache, ArgusConfig
 
 
 class SimulatedLLMGeneration:

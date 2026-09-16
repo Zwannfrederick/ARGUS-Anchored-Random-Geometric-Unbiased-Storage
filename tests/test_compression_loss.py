@@ -5,11 +5,11 @@ import os
 # Add parent directory to path so we can import core
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from core.quantization import (
+from argus_cache.core.quantization import (
     quantize_to_1bit_packed,
     dequantize_from_1bit_packed
 )
-from core.memory_manager import isolate_outliers
+from argus_cache.core.memory_manager import isolate_outliers
 
 def lossless_delta_encode(tensor, seq_dim=-2):
     """

@@ -13,7 +13,7 @@ import random
 # Add parent directory to path so we can import core
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from core.memory_manager import PagedDynamicKVCache, ArgusConfig
+from argus_cache.core.memory_manager import PagedDynamicKVCache, ArgusConfig
 
 def run_telemetry_simulation():
     print("\033[1;35m[ARGUS] Simulating 100K Token Long-Context Run with Hierarchical Memory Cascades...\033[0m")

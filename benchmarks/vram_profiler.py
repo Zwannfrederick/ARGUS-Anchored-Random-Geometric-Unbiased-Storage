@@ -6,8 +6,8 @@ import time
 # Add parent directory to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from core.memory_manager import PagedDynamicKVCache
-from models.attention_wrapper import PagedDynamicQuantizedCache
+from argus_cache.core.memory_manager import PagedDynamicKVCache
+from argus_cache.models.attention_wrapper import PagedDynamicQuantizedCache
 
 # Standard HF DynamicCache mockup for baseline comparison
 class StandardFp16Cache:
