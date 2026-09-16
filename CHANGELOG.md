@@ -1,5 +1,30 @@
 # Changelog
 
+## v0.5.1 — Packaging fixes
+
+### Fixed
+- **Stray top-level `models` package.** `find_packages()` picked up the
+  repository's root `core/` and `models/` re-export shims, which exist for this
+  repository's own tests and benchmarks. `models/` has an `__init__.py`, so
+  installing the package put a top-level `models` into the user's environment,
+  where it could shadow or collide with anything else by that name. Packaging is
+  now restricted to `argus_cache` and its subpackages; the repository-local
+  shims still work for tests and benchmarks run from the repository root.
+- **Stale duplicate metadata in `setup.py`.** It still declared
+  `version="0.4.0"` along with its own name, description, classifiers and
+  requirements. `pyproject.toml` takes precedence, so the wrong version was
+  inert rather than shipped, but it was a second source of truth waiting to
+  diverge. `setup.py` now carries only the extension build.
+- **Unhelpful build failure without torch.** Building the CUDA extension needs
+  torch importable, and it must be the same torch the extension will run
+  against, so torch deliberately stays out of `build-system.requires` and the
+  documented install is `pip install --no-build-isolation`. Doing it the other
+  way raised a bare `ModuleNotFoundError: No module named 'torch'`; it now
+  explains the requirement and gives the two commands.
+
+No runtime behaviour changed. v0.5.0 remains correct for anyone who installed it
+the documented way; reinstall only to drop the stray `models` package.
+
 ## v0.5.0 — Budgeted llama.cpp KV ownership and direct disk pages
 
 ### Added

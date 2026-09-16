@@ -1,15 +1,29 @@
+"""Builds the CUDA extension. All distribution metadata lives in pyproject.toml.
+
+The extension links against libtorch, so it must be compiled against the same
+torch it will later run against; a build-isolated environment would install its
+own torch and produce an extension that fails at import with an undefined
+symbol. torch therefore stays out of build-system.requires and the documented
+install is `pip install --no-build-isolation`.
+"""
 from setuptools import setup, find_packages
-from torch.utils.cpp_extension import BuildExtension, CUDAExtension
+
+try:
+    from torch.utils.cpp_extension import BuildExtension, CUDAExtension
+except ModuleNotFoundError as error:
+    raise SystemExit(
+        "argus_cache builds a PyTorch CUDA extension, so torch must already be\n"
+        "importable in the environment that builds it, and it must be the same\n"
+        "torch the package will run against.\n\n"
+        "    pip install torch\n"
+        "    pip install --no-build-isolation argus-cache\n"
+    ) from error
 
 setup(
-    name="argus_cache",
-    version="0.4.0",
-    author="Muhammed Emin Çelik",
-    description="Heterogeneous KV-cache memory management: paged transformer KV storage across FP16/FP8/INT8/INT4/INT2/1-bit tiers and CPU spill",
-    long_description=open("README.md").read() if open("README.md") else "",
-    long_description_content_type="text/markdown",
-    license="Apache-2.0",
-    packages=find_packages(),
+    # Root-level core/ and models/ are re-export shims for this repository's own
+    # tests and benchmarks; installing them would put top-level packages by those
+    # names into the user's environment.
+    packages=find_packages(include=["argus_cache", "argus_cache.*"]),
     ext_modules=[
         CUDAExtension(
             name="argus_cpp_backend",
@@ -29,26 +43,4 @@ setup(
     cmdclass={
         "build_ext": BuildExtension
     },
-    classifiers=[
-        "Development Status :: 4 - Beta",
-        "Intended Audience :: Science/Research",
-        "License :: OSI Approved :: Apache Software License",
-        "Programming Language :: Python :: 3",
-        "Programming Language :: Python :: 3.8",
-        "Programming Language :: Python :: 3.9",
-        "Programming Language :: Python :: 3.10",
-        "Programming Language :: Python :: 3.11",
-        "Programming Language :: Python :: 3.12",
-        "Topic :: Scientific/Engineering :: Artificial Intelligence",
-    ],
-    install_requires=[
-        "torch>=2.0.0",
-        "triton>=2.0.0",
-        "transformers>=4.38.0",
-    ],
-    extras_require={
-        "gateway": ["httpx"],
-        "dev": ["pytest", "matplotlib", "httpx"],
-    },
-    python_requires=">=3.8",
 )
