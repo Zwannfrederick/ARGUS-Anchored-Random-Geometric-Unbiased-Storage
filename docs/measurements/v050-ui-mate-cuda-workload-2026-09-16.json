@@ -430,13 +430,13 @@
         }
       ],
       "argus_environment": {
-        "ARGUS_KV_DIR": "/home/zwannfrederick/Masaüstü/Sektor/Coding/mamba fix/scratch/kv/tmpz_bcug4f",
+        "ARGUS_KV_DIR": "scratch/kv/tmpz_bcug4f",
         "ARGUS_KV_MAX_BYTES": "1073741824",
         "ARGUS_KV_RESIDENT_BYTES": "8388608",
         "ARGUS_KV_STAGING_BYTES": "4194304",
         "ARGUS_KV_GPU_BYTES": "4194304",
         "ARGUS_KV_PINNED_BYTES": "4194304",
-        "ARGUS_KV_STATS_PATH": "/home/zwannfrederick/Masaüstü/Sektor/Coding/mamba fix/scratch/kv/tmpz_bcug4f/stats.json"
+        "ARGUS_KV_STATS_PATH": "scratch/kv/tmpz_bcug4f/stats.json"
       },
       "stats": {
         "mode": "direct",
@@ -686,13 +686,13 @@
             }
           ],
           "argus_environment": {
-            "ARGUS_KV_DIR": "/home/zwannfrederick/Masaüstü/Sektor/Coding/mamba fix/scratch/kv/tmp6gbwa2iw",
+            "ARGUS_KV_DIR": "scratch/kv/tmp6gbwa2iw",
             "ARGUS_KV_MAX_BYTES": "1073741824",
             "ARGUS_KV_RESIDENT_BYTES": "8388608",
             "ARGUS_KV_STAGING_BYTES": "4194304",
             "ARGUS_KV_GPU_BYTES": "4194304",
             "ARGUS_KV_PINNED_BYTES": "4194304",
-            "ARGUS_KV_STATS_PATH": "/home/zwannfrederick/Masaüstü/Sektor/Coding/mamba fix/scratch/kv/tmp6gbwa2iw/stats.json"
+            "ARGUS_KV_STATS_PATH": "scratch/kv/tmp6gbwa2iw/stats.json"
           },
           "stats": {
             "mode": "direct",
@@ -914,13 +914,13 @@
             }
           ],
           "argus_environment": {
-            "ARGUS_KV_DIR": "/home/zwannfrederick/Masaüstü/Sektor/Coding/mamba fix/scratch/kv/tmpiz0gtno0",
+            "ARGUS_KV_DIR": "scratch/kv/tmpiz0gtno0",
             "ARGUS_KV_MAX_BYTES": "1073741824",
             "ARGUS_KV_RESIDENT_BYTES": "8388608",
             "ARGUS_KV_STAGING_BYTES": "4194304",
             "ARGUS_KV_GPU_BYTES": "4194304",
             "ARGUS_KV_PINNED_BYTES": "4194304",
-            "ARGUS_KV_STATS_PATH": "/home/zwannfrederick/Masaüstü/Sektor/Coding/mamba fix/scratch/kv/tmpiz0gtno0/stats.json"
+            "ARGUS_KV_STATS_PATH": "scratch/kv/tmpiz0gtno0/stats.json"
           },
           "stats": {
             "mode": "direct",
@@ -1145,13 +1145,13 @@
             }
           ],
           "argus_environment": {
-            "ARGUS_KV_DIR": "/home/zwannfrederick/Masaüstü/Sektor/Coding/mamba fix/scratch/kv/tmp8832032g",
+            "ARGUS_KV_DIR": "scratch/kv/tmp8832032g",
             "ARGUS_KV_MAX_BYTES": "1073741824",
             "ARGUS_KV_RESIDENT_BYTES": "8388608",
             "ARGUS_KV_STAGING_BYTES": "4194304",
             "ARGUS_KV_GPU_BYTES": "4194304",
             "ARGUS_KV_PINNED_BYTES": "4194304",
-            "ARGUS_KV_STATS_PATH": "/home/zwannfrederick/Masaüstü/Sektor/Coding/mamba fix/scratch/kv/tmp8832032g/stats.json"
+            "ARGUS_KV_STATS_PATH": "scratch/kv/tmp8832032g/stats.json"
           },
           "stats": {
             "mode": "direct",
@@ -1340,13 +1340,13 @@
           ],
           "cases": [],
           "argus_environment": {
-            "ARGUS_KV_DIR": "/home/zwannfrederick/Masaüstü/Sektor/Coding/mamba fix/scratch/kv/tmpmxevykqa",
+            "ARGUS_KV_DIR": "scratch/kv/tmpmxevykqa",
             "ARGUS_KV_MAX_BYTES": "1073741824",
             "ARGUS_KV_RESIDENT_BYTES": "8388608",
             "ARGUS_KV_STAGING_BYTES": "4194304",
             "ARGUS_KV_GPU_BYTES": "4194304",
             "ARGUS_KV_PINNED_BYTES": "4194304",
-            "ARGUS_KV_STATS_PATH": "/home/zwannfrederick/Masaüstü/Sektor/Coding/mamba fix/scratch/kv/tmpmxevykqa/stats.json"
+            "ARGUS_KV_STATS_PATH": "scratch/kv/tmpmxevykqa/stats.json"
           },
           "error": "TimeoutError: timed out",
           "exit_code": 0,

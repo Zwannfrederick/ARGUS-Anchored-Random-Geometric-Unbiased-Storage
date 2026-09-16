@@ -29,10 +29,25 @@ The [v0.5 plan](plans/argus-v0.5.0.md) keeps model contracts outside the core.
   one-page read-ahead. Direct attention distinguishes codec from placement and
   supports FP16/BF16, Q8/Q4 pages and sliding-window masks.
 
-v0.5 now has explicit GPU/pinned/pageable/disk migration and bounded FP16 CUDA
-attention; native lifecycle and failure checks pass. See the [integration contract](integrations/llama.cpp/README.md#cuda-mechanism-v05-m2).
-The complete UI-Mate/Neo acceptance (M6) remains open. v0.5 supplies mechanism;
-automatic placement and precision policy belong to v0.6.
+v0.5 is **closed**. It has explicit GPU/pinned/pageable/disk migration and
+bounded FP16 CUDA attention; native lifecycle and failure checks pass. See the
+[integration contract](integrations/llama.cpp/README.md#cuda-mechanism-v05-m2).
+M6 closed on stock/ARGUS equivalence: under an identical payload, driven by the
+pinned upstream UI-Mate message builder and parser, both paths produce
+byte-identical output — same reasoning, same coordinate, same parsed action,
+same completion-token count
+([measurement](docs/measurements/v050-ui-mate-reference-parity-2026-09-16.json)).
+
+**v0.5 supplies mechanism only, and this bounds what its numbers mean.** Nothing
+in the serving path promotes a page — `argus_disk_move_page` is called only by
+tests — so every attention read goes to disk. In that UI-Mate run decode cost
+2915 ms/token against stock's 166 ms/token and one request read 14.98 GB, with
+4 MiB of GPU and 4 MiB of pinned budget offered and only ~0.5 MiB ever used.
+That is the cost of having no policy, not a tuned or a starved configuration,
+and it is not an operating point. **This repository holds no ARGUS measurement
+at a realistic operating point**, and none can exist before automatic placement
+lands in v0.6. The daily-use reference remains the stock pair: 32K context with
+KV in VRAM at 19.14 tok/s versus 262K context with KV in RAM at 8.78 tok/s.
 Beyond v0.5: a unified HF/llama.cpp tiering backend if needed (the Python page store and
 the native store are separate), per-page mixed precision
 inside llama.cpp, and real long-context throughput. The

@@ -8,9 +8,9 @@
     {
       "mode": "stock",
       "command": [
-        "/home/zwannfrederick/Masaüstü/Sektor/Coding/mamba fix/scratch/llama.cpp-v050/build-cpu/bin/llama-server",
+        "scratch/llama.cpp-v050/build-cpu/bin/llama-server",
         "-m",
-        "/home/zwannfrederick/Masaüstü/Sektor/Coding/mamba fix/scratch/models/tencent_UI-Mate-9B-Q4_K_M.gguf",
+        "scratch/models/tencent_UI-Mate-9B-Q4_K_M.gguf",
         "-c",
         "256",
         "-np",
@@ -77,7 +77,7 @@
         ],
         "id_slot": 0,
         "stop": true,
-        "model": "/home/zwannfrederick/Masaüstü/Sektor/Coding/mamba fix/scratch/models/tencent_UI-Mate-9B-Q4_K_M.gguf",
+        "model": "scratch/models/tencent_UI-Mate-9B-Q4_K_M.gguf",
         "tokens_predicted": 32,
         "tokens_evaluated": 34,
         "generation_settings": {
@@ -261,9 +261,9 @@
     {
       "mode": "host",
       "command": [
-        "/home/zwannfrederick/Masaüstü/Sektor/Coding/mamba fix/scratch/llama.cpp-v050/build-cpu/bin/llama-server",
+        "scratch/llama.cpp-v050/build-cpu/bin/llama-server",
         "-m",
-        "/home/zwannfrederick/Masaüstü/Sektor/Coding/mamba fix/scratch/models/tencent_UI-Mate-9B-Q4_K_M.gguf",
+        "scratch/models/tencent_UI-Mate-9B-Q4_K_M.gguf",
         "-c",
         "256",
         "-np",
@@ -291,9 +291,9 @@
         "59965"
       ],
       "settings": {
-        "ARGUS_KV_DIR": "/home/zwannfrederick/Masaüstü/Sektor/Coding/mamba fix/scratch/kv/ui-mate-parity-rtly_ke8",
+        "ARGUS_KV_DIR": "scratch/kv/ui-mate-parity-rtly_ke8",
         "ARGUS_KV_MAX_BYTES": "268435456",
-        "ARGUS_KV_STATS_PATH": "/home/zwannfrederick/Masaüstü/Sektor/Coding/mamba fix/scratch/kv/ui-mate-parity-rtly_ke8/stats.json"
+        "ARGUS_KV_STATS_PATH": "scratch/kv/ui-mate-parity-rtly_ke8/stats.json"
       },
       "completion": {
         "index": 0,
@@ -334,7 +334,7 @@
         ],
         "id_slot": 0,
         "stop": true,
-        "model": "/home/zwannfrederick/Masaüstü/Sektor/Coding/mamba fix/scratch/models/tencent_UI-Mate-9B-Q4_K_M.gguf",
+        "model": "scratch/models/tencent_UI-Mate-9B-Q4_K_M.gguf",
         "tokens_predicted": 32,
         "tokens_evaluated": 34,
         "generation_settings": {
@@ -538,9 +538,9 @@
     {
       "mode": "direct",
       "command": [
-        "/home/zwannfrederick/Masaüstü/Sektor/Coding/mamba fix/scratch/llama.cpp-v050/build-cpu/bin/llama-server",
+        "scratch/llama.cpp-v050/build-cpu/bin/llama-server",
         "-m",
-        "/home/zwannfrederick/Masaüstü/Sektor/Coding/mamba fix/scratch/models/tencent_UI-Mate-9B-Q4_K_M.gguf",
+        "scratch/models/tencent_UI-Mate-9B-Q4_K_M.gguf",
         "-c",
         "256",
         "-np",
@@ -568,9 +568,9 @@
         "54679"
       ],
       "settings": {
-        "ARGUS_KV_DIR": "/home/zwannfrederick/Masaüstü/Sektor/Coding/mamba fix/scratch/kv/ui-mate-parity-qtnu86qg",
+        "ARGUS_KV_DIR": "scratch/kv/ui-mate-parity-qtnu86qg",
         "ARGUS_KV_MAX_BYTES": "268435456",
-        "ARGUS_KV_STATS_PATH": "/home/zwannfrederick/Masaüstü/Sektor/Coding/mamba fix/scratch/kv/ui-mate-parity-qtnu86qg/stats.json",
+        "ARGUS_KV_STATS_PATH": "scratch/kv/ui-mate-parity-qtnu86qg/stats.json",
         "ARGUS_KV_RESIDENT_BYTES": "1048576",
         "ARGUS_KV_STAGING_BYTES": "4194304",
         "ARGUS_KV_BLOCK_CELLS": "32"
@@ -614,7 +614,7 @@
         ],
         "id_slot": 0,
         "stop": true,
-        "model": "/home/zwannfrederick/Masaüstü/Sektor/Coding/mamba fix/scratch/models/tencent_UI-Mate-9B-Q4_K_M.gguf",
+        "model": "scratch/models/tencent_UI-Mate-9B-Q4_K_M.gguf",
         "tokens_predicted": 32,
         "tokens_evaluated": 34,
         "generation_settings": {

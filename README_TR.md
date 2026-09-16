@@ -30,10 +30,25 @@ değildir.
   attention codec ile placement'ı ayırır; FP16/BF16, Q8/Q4 sayfaları ve
   sliding-window maskesini destekler.
 
-v0.5'te açık GPU/pinned/pageable/disk migration ve bütçeli FP16 CUDA attention
-eklendi; native lifecycle ve hata kontrolleri geçti. [Entegrasyon sözleşmesi](integrations/llama.cpp/README.md#cuda-mechanism-v05-m2).
-Tam UI-Mate/Neo kabulü (M6) açık. v0.5 mekanizmayı sağlar; otomatik yerleşim ve
-precision policy v0.6'da kalır.
+v0.5 **kapandı**. Açık GPU/pinned/pageable/disk migration ve bütçeli FP16 CUDA
+attention var; native lifecycle ve hata kontrolleri geçti.
+[Entegrasyon sözleşmesi](integrations/llama.cpp/README.md#cuda-mechanism-v05-m2).
+M6, stock–ARGUS eşdeğerliğiyle kapandı: sabitlenmiş upstream UI-Mate mesaj
+kurucusu ve parser'ıyla, aynı payload altında iki yol da birebir aynı çıktıyı
+üretti — aynı reasoning, aynı koordinat, aynı parse edilmiş eylem, aynı
+completion token sayısı
+([ölçüm](docs/measurements/v050-ui-mate-reference-parity-2026-09-16.json)).
+
+**v0.5 yalnız mekanizma sağlar ve bu, sayılarının anlamını sınırlar.** Servis
+yolunda hiçbir şey sayfayı terfi ettirmiyor — `argus_disk_move_page` yalnız
+testlerden çağrılıyor — dolayısıyla her attention okuması diske gidiyor. O
+UI-Mate koşusunda decode stock'un 166 ms/token'ına karşı 2915 ms/token sürdü ve
+tek istek 14,98 GB okudu; 4 MiB GPU ve 4 MiB pinned bütçe verilmişken yalnız
+~0,5 MiB kullanıldı. Bu, policy yokluğunun maliyetidir — ayarlanmış ya da
+kısılmış bir konfigürasyon değil — ve bir çalışma noktası değildir. **Bu depoda
+gerçekçi çalışma noktasında ARGUS ölçümü yoktur** ve v0.6'daki otomatik yerleşim
+gelmeden olamaz. Günlük kullanımı yansıtan referans stock çiftidir: KV VRAM'de
+32K bağlamda 19,14 tok/s, KV RAM'de 262K bağlamda 8,78 tok/s.
 v0.5 sonrası: gerekirse birleşik HF/llama.cpp tiering backend'i (Python page store ile
 native store ayrı), llama.cpp içinde sayfa başına karışık
 hassasiyet ve gerçek uzun bağlam throughput ölçümü.
