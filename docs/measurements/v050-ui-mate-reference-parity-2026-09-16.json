@@ -119,13 +119,13 @@
       "log": "scratch/m2-ui-mate-reference-argus.argus-cuda.log",
       "seconds": 751.978867241,
       "argus_environment": {
-        "ARGUS_KV_DIR": "/home/zwannfrederick/Masaüstü/Sektor/Coding/mamba fix/scratch/kv/tmp49rrxjqg",
+        "ARGUS_KV_DIR": "scratch/kv/tmp49rrxjqg",
         "ARGUS_KV_MAX_BYTES": "1073741824",
         "ARGUS_KV_RESIDENT_BYTES": "8388608",
         "ARGUS_KV_STAGING_BYTES": "4194304",
         "ARGUS_KV_GPU_BYTES": "4194304",
         "ARGUS_KV_PINNED_BYTES": "4194304",
-        "ARGUS_KV_STATS_PATH": "/home/zwannfrederick/Masaüstü/Sektor/Coding/mamba fix/scratch/kv/tmp49rrxjqg/stats.json"
+        "ARGUS_KV_STATS_PATH": "scratch/kv/tmp49rrxjqg/stats.json"
       },
       "timings": {
         "cache_n": 0,
