@@ -1,0 +1,1386 @@
+{
+  "fixture_sha256": "f439565d9481e34e644c99a4259d9bd08c3cd30e7134a539ed522907325d73ef",
+  "scope": "Four fixed prompts; simulated clicks, no tools executed. Not a quality benchmark or policy performance claim.",
+  "llama_revision": "54315813269112dd0baed7112ec87ad93a8218ca",
+  "runs": [
+    {
+      "mode": "stock",
+      "command": [
+        "scratch/llama.cpp-v050/build-cuda/bin/llama-server",
+        "-m",
+        "scratch/models/tencent_UI-Mate-9B-Q4_K_M.gguf",
+        "--mmproj",
+        "scratch/models/mmproj-tencent_UI-Mate-9B-f16.gguf",
+        "--no-mmproj-offload",
+        "-c",
+        "4096",
+        "-np",
+        "1",
+        "-ngl",
+        "8",
+        "-nkvo",
+        "-fa",
+        "on",
+        "-ctk",
+        "f16",
+        "-ctv",
+        "f16",
+        "-b",
+        "512",
+        "-ub",
+        "32",
+        "-t",
+        "6",
+        "--no-webui",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "58015"
+      ],
+      "cases": [
+        {
+          "name": "turkish",
+          "passed": true,
+          "response": {
+            "choices": [
+              {
+                "finish_reason": "stop",
+                "index": 0,
+                "message": {
+                  "role": "assistant",
+                  "content": "Ankara"
+                }
+              }
+            ],
+            "created": 1789556832,
+            "model": "scratch/models/tencent_UI-Mate-9B-Q4_K_M.gguf",
+            "system_fingerprint": "b0-unknown",
+            "object": "chat.completion",
+            "usage": {
+              "completion_tokens": 4,
+              "prompt_tokens": 33,
+              "total_tokens": 37,
+              "prompt_tokens_details": {
+                "cached_tokens": 0
+              }
+            },
+            "id": "chatcmpl-8KoixveHrRxx9R7oOlN1ZKN6RdkIQ4gR",
+            "timings": {
+              "cache_n": 0,
+              "prompt_n": 33,
+              "prompt_ms": 3526.681,
+              "prompt_per_token_ms": 106.86912121212121,
+              "prompt_per_second": 9.35723985242782,
+              "predicted_n": 4,
+              "predicted_ms": 589.521,
+              "predicted_per_token_ms": 196.50699999999998,
+              "predicted_per_second": 5.088877241014315
+            }
+          },
+          "seconds": 4.192773610000586
+        },
+        {
+          "name": "grounding",
+          "passed": true,
+          "response": {
+            "choices": [
+              {
+                "finish_reason": "stop",
+                "index": 0,
+                "message": {
+                  "role": "assistant",
+                  "content": "CANCEL\nSAVE"
+                }
+              }
+            ],
+            "created": 1789556852,
+            "model": "scratch/models/tencent_UI-Mate-9B-Q4_K_M.gguf",
+            "system_fingerprint": "b0-unknown",
+            "object": "chat.completion",
+            "usage": {
+              "completion_tokens": 4,
+              "prompt_tokens": 225,
+              "total_tokens": 229,
+              "prompt_tokens_details": {
+                "cached_tokens": 0
+              }
+            },
+            "id": "chatcmpl-bsE3XF0WCPGaNabMPlZdeXF9ngvKP4cD",
+            "timings": {
+              "cache_n": 0,
+              "prompt_n": 225,
+              "prompt_ms": 19472.702,
+              "prompt_per_token_ms": 86.54534222222223,
+              "prompt_per_second": 11.554636844953514,
+              "predicted_n": 4,
+              "predicted_ms": 764.037,
+              "predicted_per_token_ms": 254.679,
+              "predicted_per_second": 3.9265114124054197
+            }
+          },
+          "seconds": 20.287775680997584
+        },
+        {
+          "name": "click",
+          "passed": false,
+          "response": {
+            "choices": [
+              {
+                "finish_reason": "stop",
+                "index": 0,
+                "message": {
+                  "role": "assistant",
+                  "content": "```json\n[\n    {\"point_2d\": [416, 289], \"label\": \"center_of_SAVE_button\"}\n]\n```"
+                }
+              }
+            ],
+            "created": 1789556875,
+            "model": "scratch/models/tencent_UI-Mate-9B-Q4_K_M.gguf",
+            "system_fingerprint": "b0-unknown",
+            "object": "chat.completion",
+            "usage": {
+              "completion_tokens": 36,
+              "prompt_tokens": 241,
+              "total_tokens": 277,
+              "prompt_tokens_details": {
+                "cached_tokens": 0
+              }
+            },
+            "id": "chatcmpl-7VnMdFL2muC543EEeiIc9YAWelwSgSp6",
+            "timings": {
+              "cache_n": 0,
+              "prompt_n": 241,
+              "prompt_ms": 17784.512,
+              "prompt_per_token_ms": 73.79465560165974,
+              "prompt_per_second": 13.551116836942168,
+              "predicted_n": 36,
+              "predicted_ms": 5222.009,
+              "predicted_per_token_ms": 149.20025714285714,
+              "predicted_per_second": 6.702401317194207
+            }
+          },
+          "seconds": 23.01345190199936
+        },
+        {
+          "name": "tool_call",
+          "passed": true,
+          "response": {
+            "choices": [
+              {
+                "finish_reason": "tool_calls",
+                "index": 0,
+                "message": {
+                  "role": "assistant",
+                  "content": "",
+                  "tool_calls": [
+                    {
+                      "type": "function",
+                      "function": {
+                        "name": "ui_click",
+                        "arguments": "{\"text\":\"SAVE\"}"
+                      },
+                      "id": "TLrJ7j2LI8C4ZiWAWC46wkpC7T5xJk3N"
+                    }
+                  ]
+                }
+              }
+            ],
+            "created": 1789556918,
+            "model": "scratch/models/tencent_UI-Mate-9B-Q4_K_M.gguf",
+            "system_fingerprint": "b0-unknown",
+            "object": "chat.completion",
+            "usage": {
+              "completion_tokens": 26,
+              "prompt_tokens": 474,
+              "total_tokens": 500,
+              "prompt_tokens_details": {
+                "cached_tokens": 0
+              }
+            },
+            "id": "chatcmpl-8Nysbzs5HeA1KpFWL7FhyrjQNRqDEAVc",
+            "timings": {
+              "cache_n": 0,
+              "prompt_n": 474,
+              "prompt_ms": 35767.061,
+              "prompt_per_token_ms": 75.45793459915612,
+              "prompt_per_second": 13.252416797678736,
+              "predicted_n": 26,
+              "predicted_ms": 7300.495,
+              "predicted_per_token_ms": 292.0198,
+              "predicted_per_second": 3.4244253300632357
+            }
+          },
+          "seconds": 43.136047733998566
+        }
+      ],
+      "argus_environment": {},
+      "exit_code": 0,
+      "log": "scratch/m2-ui-mate-workload.stock.log",
+      "log_sha256": "0aa186b1ffbb63cb6e2fa9ff1943b38d904ed3cddb84a5d1b6c145e73328c09a",
+      "teardown_log": []
+    },
+    {
+      "mode": "argus-cuda",
+      "command": [
+        "scratch/llama.cpp-v050/build-cuda/bin/llama-server",
+        "-m",
+        "scratch/models/tencent_UI-Mate-9B-Q4_K_M.gguf",
+        "--mmproj",
+        "scratch/models/mmproj-tencent_UI-Mate-9B-f16.gguf",
+        "--no-mmproj-offload",
+        "-c",
+        "4096",
+        "-np",
+        "1",
+        "-ngl",
+        "8",
+        "-nkvo",
+        "-fa",
+        "on",
+        "-ctk",
+        "f16",
+        "-ctv",
+        "f16",
+        "-b",
+        "512",
+        "-ub",
+        "32",
+        "-t",
+        "6",
+        "--no-webui",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "48065"
+      ],
+      "cases": [
+        {
+          "name": "turkish",
+          "passed": true,
+          "response": {
+            "choices": [
+              {
+                "finish_reason": "stop",
+                "index": 0,
+                "message": {
+                  "role": "assistant",
+                  "content": "Ankara"
+                }
+              }
+            ],
+            "created": 1789556934,
+            "model": "scratch/models/tencent_UI-Mate-9B-Q4_K_M.gguf",
+            "system_fingerprint": "b0-unknown",
+            "object": "chat.completion",
+            "usage": {
+              "completion_tokens": 4,
+              "prompt_tokens": 33,
+              "total_tokens": 37,
+              "prompt_tokens_details": {
+                "cached_tokens": 0
+              }
+            },
+            "id": "chatcmpl-zQeDPMXLkvhYA5noNtG8CfQkCY85flGL",
+            "timings": {
+              "cache_n": 0,
+              "prompt_n": 33,
+              "prompt_ms": 3717.173,
+              "prompt_per_token_ms": 112.64160606060605,
+              "prompt_per_second": 8.877714327527936,
+              "predicted_n": 4,
+              "predicted_ms": 954.349,
+              "predicted_per_token_ms": 318.11633333333333,
+              "predicted_per_second": 3.1435041059402793
+            }
+          },
+          "seconds": 4.678595564000716
+        },
+        {
+          "name": "grounding",
+          "passed": true,
+          "response": {
+            "choices": [
+              {
+                "finish_reason": "stop",
+                "index": 0,
+                "message": {
+                  "role": "assistant",
+                  "content": "CANCEL\nSAVE"
+                }
+              }
+            ],
+            "created": 1789556963,
+            "model": "scratch/models/tencent_UI-Mate-9B-Q4_K_M.gguf",
+            "system_fingerprint": "b0-unknown",
+            "object": "chat.completion",
+            "usage": {
+              "completion_tokens": 4,
+              "prompt_tokens": 225,
+              "total_tokens": 229,
+              "prompt_tokens_details": {
+                "cached_tokens": 0
+              }
+            },
+            "id": "chatcmpl-RwSwnHjgwhbVgzh9vMvPuBoXJJsiJPgY",
+            "timings": {
+              "cache_n": 0,
+              "prompt_n": 225,
+              "prompt_ms": 26561.934,
+              "prompt_per_token_ms": 118.05304000000001,
+              "prompt_per_second": 8.47076873242739,
+              "predicted_n": 4,
+              "predicted_ms": 2450.506,
+              "predicted_per_token_ms": 816.8353333333333,
+              "predicted_per_second": 1.2242369535108262
+            }
+          },
+          "seconds": 29.079639730000054
+        },
+        {
+          "name": "click",
+          "passed": false,
+          "response": {
+            "choices": [
+              {
+                "finish_reason": "stop",
+                "index": 0,
+                "message": {
+                  "role": "assistant",
+                  "content": "```json\n[\n    {\"point_2d\": [655, 264], \"label\": \"center_of_the_SAVE_button\"}\n]\n```"
+                }
+              }
+            ],
+            "created": 1789557043,
+            "model": "scratch/models/tencent_UI-Mate-9B-Q4_K_M.gguf",
+            "system_fingerprint": "b0-unknown",
+            "object": "chat.completion",
+            "usage": {
+              "completion_tokens": 37,
+              "prompt_tokens": 241,
+              "total_tokens": 278,
+              "prompt_tokens_details": {
+                "cached_tokens": 0
+              }
+            },
+            "id": "chatcmpl-lVkDXlfiwCD92umAVy2WdZ3KX1x9Iysp",
+            "timings": {
+              "cache_n": 0,
+              "prompt_n": 241,
+              "prompt_ms": 31125.64,
+              "prompt_per_token_ms": 129.15203319502075,
+              "prompt_per_second": 7.742812677907988,
+              "predicted_n": 37,
+              "predicted_ms": 49583.581,
+              "predicted_per_token_ms": 1377.3216944444443,
+              "predicted_per_second": 0.7260467935948394
+            }
+          },
+          "seconds": 80.71574891499768
+        },
+        {
+          "name": "tool_call",
+          "passed": true,
+          "response": {
+            "choices": [
+              {
+                "finish_reason": "tool_calls",
+                "index": 0,
+                "message": {
+                  "role": "assistant",
+                  "content": "",
+                  "tool_calls": [
+                    {
+                      "type": "function",
+                      "function": {
+                        "name": "ui_click",
+                        "arguments": "{\"text\":\"SAVE\"}"
+                      },
+                      "id": "HrKYWFKPVp9cUBS2uhH9UCSJl1elXhOS"
+                    }
+                  ]
+                }
+              }
+            ],
+            "created": 1789557111,
+            "model": "scratch/models/tencent_UI-Mate-9B-Q4_K_M.gguf",
+            "system_fingerprint": "b0-unknown",
+            "object": "chat.completion",
+            "usage": {
+              "completion_tokens": 26,
+              "prompt_tokens": 474,
+              "total_tokens": 500,
+              "prompt_tokens_details": {
+                "cached_tokens": 0
+              }
+            },
+            "id": "chatcmpl-KAjJo4yEUlfUAoCEglDGi4OcsEF8WBPj",
+            "timings": {
+              "cache_n": 0,
+              "prompt_n": 474,
+              "prompt_ms": 47520.66,
+              "prompt_per_token_ms": 100.25455696202532,
+              "prompt_per_second": 9.974608938512217,
+              "predicted_n": 26,
+              "predicted_ms": 19227.784,
+              "predicted_per_token_ms": 769.11136,
+              "predicted_per_second": 1.3002018329309295
+            }
+          },
+          "seconds": 67.22487911099961
+        }
+      ],
+      "argus_environment": {
+        "ARGUS_KV_DIR": "/home/zwannfrederick/Masaüstü/Sektor/Coding/mamba fix/scratch/kv/tmpz_bcug4f",
+        "ARGUS_KV_MAX_BYTES": "1073741824",
+        "ARGUS_KV_RESIDENT_BYTES": "8388608",
+        "ARGUS_KV_STAGING_BYTES": "4194304",
+        "ARGUS_KV_GPU_BYTES": "4194304",
+        "ARGUS_KV_PINNED_BYTES": "4194304",
+        "ARGUS_KV_STATS_PATH": "/home/zwannfrederick/Masaüstü/Sektor/Coding/mamba fix/scratch/kv/tmpz_bcug4f/stats.json"
+      },
+      "stats": {
+        "mode": "direct",
+        "disk_bytes": 268435456,
+        "resident_bytes": 2363392,
+        "staging_bytes": 528384,
+        "peak_resident_bytes": 2363392,
+        "peak_staging_bytes": 532480,
+        "read_bytes": 1159200768,
+        "written_bytes": 68419584,
+        "committed_pages": 16704,
+        "stores": 1,
+        "gpu_bytes": 266240,
+        "pinned_bytes": 262144,
+        "ram_bytes": 0,
+        "peak_gpu_bytes": 266240,
+        "peak_pinned_bytes": 262144,
+        "peak_ram_bytes": 0,
+        "cuda_attention_calls": 856
+      },
+      "exit_code": 0,
+      "log": "scratch/m2-ui-mate-workload.argus-cuda.log",
+      "log_sha256": "73bdcd3cd2c36c2a9095264d33d2d5a9cc785505c85d1dc261639149e474ef1d",
+      "teardown_log": [
+        "ARGUS_DISK free id=1 disk_live=0 resident_live=0 staging_live=0"
+      ],
+      "last_published_stats_after_exit": {
+        "mode": "direct",
+        "disk_bytes": 268435456,
+        "resident_bytes": 2363392,
+        "staging_bytes": 528384,
+        "peak_resident_bytes": 2363392,
+        "peak_staging_bytes": 532480,
+        "read_bytes": 1159200768,
+        "written_bytes": 68419584,
+        "committed_pages": 16704,
+        "stores": 1,
+        "gpu_bytes": 266240,
+        "pinned_bytes": 262144,
+        "ram_bytes": 0,
+        "peak_gpu_bytes": 266240,
+        "peak_pinned_bytes": 262144,
+        "peak_ram_bytes": 0,
+        "cuda_attention_calls": 856
+      }
+    }
+  ],
+  "date": "2026-09-16",
+  "model_manifest": "plans/ui-mate-v050-artifact-manifest.json",
+  "notes": [
+    "Initial run had no JSON response schema for click. Current harness adds one; its repeat is recorded separately.",
+    "Stock click [416,289] is inside SAVE; ARGUS click [655,264] is outside the 512x384 image. Both fail requested x/y JSON format.",
+    "Turkish, left-to-right labels and ui_click tool arguments match. This is not full grounding or end-to-end Neo acceptance.",
+    "FP16 stock host flash attention and ARGUS FP32-accumulator CUDA attention are not bitwise equivalent. No cause is assigned to the coordinate discrepancy by this test.",
+    "Server warns that Qwen-VL grounding expects at least 1024 image tokens. This run used default image preprocessing (241 tokens including click prompt); a higher-resolution controlled run remains necessary.",
+    "Concurrent CPU native tests and different startup/cache conditions make timings diagnostic only.",
+    "The stats file is last published during attention; it is not a post-destruction live allocation measurement."
+  ],
+  "comparison": [
+    {
+      "case": "turkish",
+      "stock_passed": true,
+      "argus_passed": true,
+      "content_equal": true
+    },
+    {
+      "case": "grounding",
+      "stock_passed": true,
+      "argus_passed": true,
+      "content_equal": true
+    },
+    {
+      "case": "click",
+      "stock_passed": false,
+      "argus_passed": false,
+      "content_equal": false
+    },
+    {
+      "case": "tool_call",
+      "stock_passed": true,
+      "argus_passed": true,
+      "content_equal": true
+    }
+  ],
+  "followups": {
+    "structured_absolute": {
+      "fixture_sha256": "f439565d9481e34e644c99a4259d9bd08c3cd30e7134a539ed522907325d73ef",
+      "scope": "Same click request as initial workload, now constrained by server JSON schema; no actual click executed.",
+      "runs": [
+        {
+          "mode": "stock",
+          "command": [
+            "scratch/llama.cpp-v050/build-cuda/bin/llama-server",
+            "-m",
+            "scratch/models/tencent_UI-Mate-9B-Q4_K_M.gguf",
+            "--mmproj",
+            "scratch/models/mmproj-tencent_UI-Mate-9B-f16.gguf",
+            "--no-mmproj-offload",
+            "-c",
+            "4096",
+            "-np",
+            "1",
+            "-ngl",
+            "8",
+            "-nkvo",
+            "-fa",
+            "on",
+            "-ctk",
+            "f16",
+            "-ctv",
+            "f16",
+            "-b",
+            "512",
+            "-ub",
+            "32",
+            "-t",
+            "6",
+            "--no-webui",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "51217"
+          ],
+          "cases": [
+            {
+              "name": "click",
+              "passed": true,
+              "response": {
+                "choices": [
+                  {
+                    "finish_reason": "stop",
+                    "index": 0,
+                    "message": {
+                      "role": "assistant",
+                      "content": "{\"x\": 448, \"y\": 288}"
+                    }
+                  }
+                ],
+                "created": 1789557219,
+                "model": "scratch/models/tencent_UI-Mate-9B-Q4_K_M.gguf",
+                "system_fingerprint": "b0-unknown",
+                "object": "chat.completion",
+                "usage": {
+                  "completion_tokens": 17,
+                  "prompt_tokens": 241,
+                  "total_tokens": 258,
+                  "prompt_tokens_details": {
+                    "cached_tokens": 0
+                  }
+                },
+                "id": "chatcmpl-j79ELn2rvN6GCnD3JEq2XBoiUzc9ogNu",
+                "timings": {
+                  "cache_n": 0,
+                  "prompt_n": 241,
+                  "prompt_ms": 20146.835,
+                  "prompt_per_token_ms": 83.59682572614108,
+                  "prompt_per_second": 11.962176689291397,
+                  "predicted_n": 17,
+                  "predicted_ms": 2425.973,
+                  "predicted_per_token_ms": 151.6233125,
+                  "predicted_per_second": 6.595291868458553
+                }
+              },
+              "seconds": 22.58050050300153
+            }
+          ],
+          "argus_environment": {},
+          "exit_code": 0,
+          "log": "scratch/m2-ui-mate-structured-click.stock.log",
+          "teardown_log": []
+        },
+        {
+          "mode": "argus-cuda",
+          "command": [
+            "scratch/llama.cpp-v050/build-cuda/bin/llama-server",
+            "-m",
+            "scratch/models/tencent_UI-Mate-9B-Q4_K_M.gguf",
+            "--mmproj",
+            "scratch/models/mmproj-tencent_UI-Mate-9B-f16.gguf",
+            "--no-mmproj-offload",
+            "-c",
+            "4096",
+            "-np",
+            "1",
+            "-ngl",
+            "8",
+            "-nkvo",
+            "-fa",
+            "on",
+            "-ctk",
+            "f16",
+            "-ctv",
+            "f16",
+            "-b",
+            "512",
+            "-ub",
+            "32",
+            "-t",
+            "6",
+            "--no-webui",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "35313"
+          ],
+          "cases": [
+            {
+              "name": "click",
+              "passed": false,
+              "response": {
+                "choices": [
+                  {
+                    "finish_reason": "stop",
+                    "index": 0,
+                    "message": {
+                      "role": "assistant",
+                      "content": "{\"x\": 593, \"y\": 296}"
+                    }
+                  }
+                ],
+                "created": 1789557261,
+                "model": "scratch/models/tencent_UI-Mate-9B-Q4_K_M.gguf",
+                "system_fingerprint": "b0-unknown",
+                "object": "chat.completion",
+                "usage": {
+                  "completion_tokens": 17,
+                  "prompt_tokens": 241,
+                  "total_tokens": 258,
+                  "prompt_tokens_details": {
+                    "cached_tokens": 0
+                  }
+                },
+                "id": "chatcmpl-6mFWo8FNP7IwvT6faSCJekk7QfPq5nn2",
+                "timings": {
+                  "cache_n": 0,
+                  "prompt_n": 241,
+                  "prompt_ms": 28805.188,
+                  "prompt_per_token_ms": 119.52360165975104,
+                  "prompt_per_second": 8.366548414820276,
+                  "predicted_n": 17,
+                  "predicted_ms": 9017.621,
+                  "predicted_per_token_ms": 563.6013125,
+                  "predicted_per_second": 1.7743038879101263
+                }
+              },
+              "seconds": 37.82943644899933
+            }
+          ],
+          "argus_environment": {
+            "ARGUS_KV_DIR": "/home/zwannfrederick/Masaüstü/Sektor/Coding/mamba fix/scratch/kv/tmp6gbwa2iw",
+            "ARGUS_KV_MAX_BYTES": "1073741824",
+            "ARGUS_KV_RESIDENT_BYTES": "8388608",
+            "ARGUS_KV_STAGING_BYTES": "4194304",
+            "ARGUS_KV_GPU_BYTES": "4194304",
+            "ARGUS_KV_PINNED_BYTES": "4194304",
+            "ARGUS_KV_STATS_PATH": "/home/zwannfrederick/Masaüstü/Sektor/Coding/mamba fix/scratch/kv/tmp6gbwa2iw/stats.json"
+          },
+          "stats": {
+            "mode": "direct",
+            "disk_bytes": 268435456,
+            "resident_bytes": 2363392,
+            "staging_bytes": 528384,
+            "peak_resident_bytes": 2363392,
+            "peak_staging_bytes": 532480,
+            "read_bytes": 202244096,
+            "written_bytes": 17104896,
+            "committed_pages": 4176,
+            "stores": 1,
+            "gpu_bytes": 266240,
+            "pinned_bytes": 262144,
+            "ram_bytes": 0,
+            "peak_gpu_bytes": 266240,
+            "peak_pinned_bytes": 262144,
+            "peak_ram_bytes": 0,
+            "cuda_attention_calls": 224
+          },
+          "exit_code": 0,
+          "log": "scratch/m2-ui-mate-structured-click.argus-cuda.log",
+          "last_published_stats_after_exit": {
+            "mode": "direct",
+            "disk_bytes": 268435456,
+            "resident_bytes": 2363392,
+            "staging_bytes": 528384,
+            "peak_resident_bytes": 2363392,
+            "peak_staging_bytes": 532480,
+            "read_bytes": 202244096,
+            "written_bytes": 17104896,
+            "committed_pages": 4176,
+            "stores": 1,
+            "gpu_bytes": 266240,
+            "pinned_bytes": 262144,
+            "ram_bytes": 0,
+            "peak_gpu_bytes": 266240,
+            "peak_pinned_bytes": 262144,
+            "peak_ram_bytes": 0,
+            "cuda_attention_calls": 224
+          },
+          "teardown_log": [
+            "ARGUS_DISK free id=1 disk_live=0 resident_live=0 staging_live=0"
+          ]
+        }
+      ],
+      "date": "2026-09-16",
+      "notes": [
+        "Default low image-token preprocessing, before image-min-tokens 1024 repeat.",
+        "Stock [448,288] hits SAVE; ARGUS [593,296] is outside image. A valid JSON shape alone did not fix grounding."
+      ]
+    },
+    "absolute_image_1024": {
+      "fixture_sha256": "f439565d9481e34e644c99a4259d9bd08c3cd30e7134a539ed522907325d73ef",
+      "scope": "Controlled grounding repeat: JSON schema and image-min-tokens 1024 as required by local projector warning; no actual click executed.",
+      "runs": [
+        {
+          "mode": "stock",
+          "command": [
+            "scratch/llama.cpp-v050/build-cuda/bin/llama-server",
+            "-m",
+            "scratch/models/tencent_UI-Mate-9B-Q4_K_M.gguf",
+            "--mmproj",
+            "scratch/models/mmproj-tencent_UI-Mate-9B-f16.gguf",
+            "--no-mmproj-offload",
+            "--image-min-tokens",
+            "1024",
+            "-c",
+            "4096",
+            "-np",
+            "1",
+            "-ngl",
+            "8",
+            "-nkvo",
+            "-fa",
+            "on",
+            "-ctk",
+            "f16",
+            "-ctv",
+            "f16",
+            "-b",
+            "512",
+            "-ub",
+            "32",
+            "-t",
+            "6",
+            "--no-webui",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "38475"
+          ],
+          "cases": [
+            {
+              "name": "click",
+              "passed": false,
+              "response": {
+                "choices": [
+                  {
+                    "finish_reason": "stop",
+                    "index": 0,
+                    "message": {
+                      "role": "assistant",
+                      "content": "{\"x\": 896, \"y\": 672}"
+                    }
+                  }
+                ],
+                "created": 1789557515,
+                "model": "scratch/models/tencent_UI-Mate-9B-Q4_K_M.gguf",
+                "system_fingerprint": "b0-unknown",
+                "object": "chat.completion",
+                "usage": {
+                  "completion_tokens": 17,
+                  "prompt_tokens": 1085,
+                  "total_tokens": 1102,
+                  "prompt_tokens_details": {
+                    "cached_tokens": 0
+                  }
+                },
+                "id": "chatcmpl-aKRlsfowpcvK1FJ70vjeItbgddBVgj0H",
+                "timings": {
+                  "cache_n": 0,
+                  "prompt_n": 1085,
+                  "prompt_ms": 191842.489,
+                  "prompt_per_token_ms": 176.8133539170507,
+                  "prompt_per_second": 5.655681416852343,
+                  "predicted_n": 17,
+                  "predicted_ms": 3502.159,
+                  "predicted_per_token_ms": 218.8849375,
+                  "predicted_per_second": 4.568610391475658
+                }
+              },
+              "seconds": 195.37148563299706
+            }
+          ],
+          "argus_environment": {},
+          "exit_code": 0,
+          "log": "scratch/m2-ui-mate-grounding-1024.stock.log",
+          "teardown_log": [],
+          "log_sha256": "c4374a5cd5f66389a9c8ecf6ac811bdd41abe07daba98f77daa2d5a34ac62fd6"
+        },
+        {
+          "mode": "argus-cuda",
+          "command": [
+            "scratch/llama.cpp-v050/build-cuda/bin/llama-server",
+            "-m",
+            "scratch/models/tencent_UI-Mate-9B-Q4_K_M.gguf",
+            "--mmproj",
+            "scratch/models/mmproj-tencent_UI-Mate-9B-f16.gguf",
+            "--no-mmproj-offload",
+            "--image-min-tokens",
+            "1024",
+            "-c",
+            "4096",
+            "-np",
+            "1",
+            "-ngl",
+            "8",
+            "-nkvo",
+            "-fa",
+            "on",
+            "-ctk",
+            "f16",
+            "-ctv",
+            "f16",
+            "-b",
+            "512",
+            "-ub",
+            "32",
+            "-t",
+            "6",
+            "--no-webui",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "52819"
+          ],
+          "cases": [
+            {
+              "name": "click",
+              "passed": false,
+              "response": {
+                "choices": [
+                  {
+                    "finish_reason": "stop",
+                    "index": 0,
+                    "message": {
+                      "role": "assistant",
+                      "content": "{\"x\": 896, \"y\": 672}"
+                    }
+                  }
+                ],
+                "created": 1789557792,
+                "model": "scratch/models/tencent_UI-Mate-9B-Q4_K_M.gguf",
+                "system_fingerprint": "b0-unknown",
+                "object": "chat.completion",
+                "usage": {
+                  "completion_tokens": 17,
+                  "prompt_tokens": 1085,
+                  "total_tokens": 1102,
+                  "prompt_tokens_details": {
+                    "cached_tokens": 0
+                  }
+                },
+                "id": "chatcmpl-SATVs4M6tgjWVDV73KBSyUwDtfHhwPEV",
+                "timings": {
+                  "cache_n": 0,
+                  "prompt_n": 1085,
+                  "prompt_ms": 245590.918,
+                  "prompt_per_token_ms": 226.35107649769586,
+                  "prompt_per_second": 4.417915812342866,
+                  "predicted_n": 17,
+                  "predicted_ms": 27130.736,
+                  "predicted_per_token_ms": 1695.671,
+                  "predicted_per_second": 0.5897370421502756
+                }
+              },
+              "seconds": 272.74797612600014
+            }
+          ],
+          "argus_environment": {
+            "ARGUS_KV_DIR": "/home/zwannfrederick/Masaüstü/Sektor/Coding/mamba fix/scratch/kv/tmpiz0gtno0",
+            "ARGUS_KV_MAX_BYTES": "1073741824",
+            "ARGUS_KV_RESIDENT_BYTES": "8388608",
+            "ARGUS_KV_STAGING_BYTES": "4194304",
+            "ARGUS_KV_GPU_BYTES": "4194304",
+            "ARGUS_KV_PINNED_BYTES": "4194304",
+            "ARGUS_KV_STATS_PATH": "/home/zwannfrederick/Masaüstü/Sektor/Coding/mamba fix/scratch/kv/tmpiz0gtno0/stats.json"
+          },
+          "stats": {
+            "mode": "direct",
+            "disk_bytes": 268435456,
+            "resident_bytes": 2363392,
+            "staging_bytes": 528384,
+            "peak_resident_bytes": 2363392,
+            "peak_staging_bytes": 532480,
+            "read_bytes": 1379794944,
+            "written_bytes": 72417280,
+            "committed_pages": 17680,
+            "stores": 1,
+            "gpu_bytes": 266240,
+            "pinned_bytes": 262144,
+            "ram_bytes": 0,
+            "peak_gpu_bytes": 266240,
+            "peak_pinned_bytes": 262144,
+            "peak_ram_bytes": 0,
+            "cuda_attention_calls": 440
+          },
+          "exit_code": 0,
+          "last_published_stats_after_exit": {
+            "mode": "direct",
+            "disk_bytes": 268435456,
+            "resident_bytes": 2363392,
+            "staging_bytes": 528384,
+            "peak_resident_bytes": 2363392,
+            "peak_staging_bytes": 532480,
+            "read_bytes": 1379794944,
+            "written_bytes": 72417280,
+            "committed_pages": 17680,
+            "stores": 1,
+            "gpu_bytes": 266240,
+            "pinned_bytes": 262144,
+            "ram_bytes": 0,
+            "peak_gpu_bytes": 266240,
+            "peak_pinned_bytes": 262144,
+            "peak_ram_bytes": 0,
+            "cuda_attention_calls": 440
+          },
+          "log": "scratch/m2-ui-mate-grounding-1024.argus-cuda.log",
+          "teardown_log": [
+            "ARGUS_DISK free id=1 disk_live=0 resident_live=0 staging_live=0"
+          ],
+          "log_sha256": "ada336cbc40a686a69da1953eadc07a8956d33c5267941593689a2b243d2d366"
+        }
+      ],
+      "date": "2026-09-16",
+      "notes": [
+        "Both paths returned exactly {\"x\":896,\"y\":672}; both failed the explicitly requested absolute pixel contract.",
+        "Official UI-Mate adapter defaults to relative 0-999 coordinates (scale_coordinate). A new explicitly normalized request is tested separately; old failures are not rescored.",
+        "Equal output on this request is not proof that increasing image tokens fixes all earlier stock/ARGUS differences.",
+        "GPU attention is scalar and disk-backed without automatic resident-page selection. Timings are not a v0.6 performance result."
+      ]
+    },
+    "relative_image_1024": {
+      "fixture_sha256": "f439565d9481e34e644c99a4259d9bd08c3cd30e7134a539ed522907325d73ef",
+      "scope": "Normalized 0-999 coordinates, JSON schema and minimum 1024 image tokens. No action executed. Earlier absolute-coordinate failures remain separate.",
+      "coordinate_contract_source": "https://github.com/Tencent/UI-Mate/blob/main/agents/ui_mate_agent.py",
+      "runs": [
+        {
+          "mode": "stock",
+          "command": [
+            "scratch/llama.cpp-v050/build-cuda/bin/llama-server",
+            "-m",
+            "scratch/models/tencent_UI-Mate-9B-Q4_K_M.gguf",
+            "--mmproj",
+            "scratch/models/mmproj-tencent_UI-Mate-9B-f16.gguf",
+            "--no-mmproj-offload",
+            "--image-min-tokens",
+            "1024",
+            "-c",
+            "4096",
+            "-np",
+            "1",
+            "-ngl",
+            "8",
+            "-nkvo",
+            "-fa",
+            "on",
+            "-ctk",
+            "f16",
+            "-ctv",
+            "f16",
+            "-b",
+            "512",
+            "-ub",
+            "32",
+            "-t",
+            "6",
+            "--no-webui",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "44931"
+          ],
+          "cases": [
+            {
+              "name": "click",
+              "passed": false,
+              "response": {
+                "choices": [
+                  {
+                    "finish_reason": "stop",
+                    "index": 0,
+                    "message": {
+                      "role": "assistant",
+                      "content": "{\"x\": 1234, \"y\": 1234}"
+                    }
+                  }
+                ],
+                "created": 1789575655,
+                "model": "scratch/models/tencent_UI-Mate-9B-Q4_K_M.gguf",
+                "system_fingerprint": "b0-unknown",
+                "object": "chat.completion",
+                "usage": {
+                  "completion_tokens": 19,
+                  "prompt_tokens": 1106,
+                  "total_tokens": 1125,
+                  "prompt_tokens_details": {
+                    "cached_tokens": 0
+                  }
+                },
+                "id": "chatcmpl-Ru72DfeDCWhcHIhW3M4I9dJ3h1LUyXGQ",
+                "timings": {
+                  "cache_n": 0,
+                  "prompt_n": 1106,
+                  "prompt_ms": 179478.687,
+                  "prompt_per_token_ms": 162.2772938517179,
+                  "prompt_per_second": 6.162291570586317,
+                  "predicted_n": 19,
+                  "predicted_ms": 2883.472,
+                  "predicted_per_token_ms": 160.1928888888889,
+                  "predicted_per_second": 6.2424743503665026
+                }
+              },
+              "seconds": 182.387788929
+            }
+          ],
+          "argus_environment": {},
+          "exit_code": 0,
+          "log": "scratch/m2-ui-mate-relative-click.stock.log",
+          "teardown_log": []
+        },
+        {
+          "mode": "argus-cuda",
+          "command": [
+            "scratch/llama.cpp-v050/build-cuda/bin/llama-server",
+            "-m",
+            "scratch/models/tencent_UI-Mate-9B-Q4_K_M.gguf",
+            "--mmproj",
+            "scratch/models/mmproj-tencent_UI-Mate-9B-f16.gguf",
+            "--no-mmproj-offload",
+            "--image-min-tokens",
+            "1024",
+            "-c",
+            "4096",
+            "-np",
+            "1",
+            "-ngl",
+            "8",
+            "-nkvo",
+            "-fa",
+            "on",
+            "-ctk",
+            "f16",
+            "-ctv",
+            "f16",
+            "-b",
+            "512",
+            "-ub",
+            "32",
+            "-t",
+            "6",
+            "--no-webui",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "32905"
+          ],
+          "cases": [
+            {
+              "name": "click",
+              "passed": false,
+              "response": {
+                "choices": [
+                  {
+                    "finish_reason": "stop",
+                    "index": 0,
+                    "message": {
+                      "role": "assistant",
+                      "content": "{\"x\": 1247, \"y\": 1015}"
+                    }
+                  }
+                ],
+                "created": 1789575907,
+                "model": "scratch/models/tencent_UI-Mate-9B-Q4_K_M.gguf",
+                "system_fingerprint": "b0-unknown",
+                "object": "chat.completion",
+                "usage": {
+                  "completion_tokens": 19,
+                  "prompt_tokens": 1106,
+                  "total_tokens": 1125,
+                  "prompt_tokens_details": {
+                    "cached_tokens": 0
+                  }
+                },
+                "id": "chatcmpl-oszLlWhWoYB5o0IOUVAwpxalHzfU0hfW",
+                "timings": {
+                  "cache_n": 0,
+                  "prompt_n": 1106,
+                  "prompt_ms": 223228.043,
+                  "prompt_per_token_ms": 201.83367359855336,
+                  "prompt_per_second": 4.954574636485076,
+                  "predicted_n": 19,
+                  "predicted_ms": 24533.194,
+                  "predicted_per_token_ms": 1362.9552222222221,
+                  "predicted_per_second": 0.7336998191103856
+                }
+              },
+              "seconds": 247.78590763399995
+            }
+          ],
+          "argus_environment": {
+            "ARGUS_KV_DIR": "/home/zwannfrederick/Masaüstü/Sektor/Coding/mamba fix/scratch/kv/tmp8832032g",
+            "ARGUS_KV_MAX_BYTES": "1073741824",
+            "ARGUS_KV_RESIDENT_BYTES": "8388608",
+            "ARGUS_KV_STAGING_BYTES": "4194304",
+            "ARGUS_KV_GPU_BYTES": "4194304",
+            "ARGUS_KV_PINNED_BYTES": "4194304",
+            "ARGUS_KV_STATS_PATH": "/home/zwannfrederick/Masaüstü/Sektor/Coding/mamba fix/scratch/kv/tmp8832032g/stats.json"
+          },
+          "stats": {
+            "mode": "direct",
+            "disk_bytes": 268435456,
+            "resident_bytes": 2363392,
+            "staging_bytes": 528384,
+            "peak_resident_bytes": 2363392,
+            "peak_staging_bytes": 532480,
+            "read_bytes": 1468727296,
+            "written_bytes": 73924608,
+            "committed_pages": 18048,
+            "stores": 1,
+            "gpu_bytes": 266240,
+            "pinned_bytes": 262144,
+            "ram_bytes": 0,
+            "peak_gpu_bytes": 266240,
+            "peak_pinned_bytes": 262144,
+            "peak_ram_bytes": 0,
+            "cuda_attention_calls": 456
+          },
+          "exit_code": 0,
+          "last_published_stats_after_exit": {
+            "mode": "direct",
+            "disk_bytes": 268435456,
+            "resident_bytes": 2363392,
+            "staging_bytes": 528384,
+            "peak_resident_bytes": 2363392,
+            "peak_staging_bytes": 532480,
+            "read_bytes": 1468727296,
+            "written_bytes": 73924608,
+            "committed_pages": 18048,
+            "stores": 1,
+            "gpu_bytes": 266240,
+            "pinned_bytes": 262144,
+            "ram_bytes": 0,
+            "peak_gpu_bytes": 266240,
+            "peak_pinned_bytes": 262144,
+            "peak_ram_bytes": 0,
+            "cuda_attention_calls": 456
+          },
+          "log": "scratch/m2-ui-mate-relative-click.argus-cuda.log",
+          "teardown_log": [
+            "ARGUS_DISK free id=1 disk_live=0 resident_live=0 staging_live=0"
+          ]
+        }
+      ],
+      "date": "2026-09-16",
+      "notes": [
+        "Explicit relative coordinate request still failed in both stock and ARGUS. Coordinate normalization alone did not establish a working baseline.",
+        "This was an ad hoc visual-chat prompt with thinking disabled, not the upstream GUI-agent prompt. A pinned upstream prompt/parser test follows separately."
+      ]
+    },
+    "official_reference_600": {
+      "fixture_sha256": "f439565d9481e34e644c99a4259d9bd08c3cd30e7134a539ed522907325d73ef",
+      "reference_revision": "1cb9e1e44ce856e23b593992b02efbd489943fcb",
+      "reference_source": "https://github.com/Tencent/UI-Mate/tree/1cb9e1e44ce856e23b593992b02efbd489943fcb",
+      "reference_sha256": {
+        "ui_mate_agent.py": "60e1f6924745333dcb0d363e7187d9045d04c06924a1150f02d334311fc38d77",
+        "demo_workflow.py": "4939d179bc15035661819efa149c3e1a7a5075a2f2334478e3c53e49991fd0a4"
+      },
+      "scope": "One synthetic click with upstream message builder, preprocessing and parser; greedy sampling. Actions are not executed. Not a full Neo task or quality benchmark.",
+      "runs": [
+        {
+          "mode": "stock",
+          "command": [
+            "scratch/llama.cpp-v050/build-cuda/bin/llama-server",
+            "-m",
+            "scratch/models/tencent_UI-Mate-9B-Q4_K_M.gguf",
+            "--mmproj",
+            "scratch/models/mmproj-tencent_UI-Mate-9B-f16.gguf",
+            "--no-mmproj-offload",
+            "--image-min-tokens",
+            "1024",
+            "-c",
+            "4096",
+            "-np",
+            "1",
+            "-ngl",
+            "8",
+            "-nkvo",
+            "-fa",
+            "on",
+            "-ctk",
+            "f16",
+            "-ctv",
+            "f16",
+            "-b",
+            "512",
+            "-ub",
+            "32",
+            "-t",
+            "6",
+            "--no-webui",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "38577"
+          ],
+          "cases": [
+            {
+              "name": "reference_click",
+              "passed": false,
+              "response": {
+                "choices": [
+                  {
+                    "finish_reason": "stop",
+                    "index": 0,
+                    "message": {
+                      "role": "assistant",
+                      "content": "<action>\nClick the SAVE button in the Settings dialog.\n</action>\n\n<tool_call>\n<function=computer_use>\n<parameter=action>\nleft_click\n</parameter>\n<parameter=coordinate>\n[749, 623]\n</parameter>\n</function>\n</tool_call>",
+                      "reasoning_content": "The user wants me to click the SAVE button. I can see a Settings dialog with two buttons: CANCEL and SAVE. The SAVE button is located on the right side of the dialog. I need to click on it to save the settings.\n"
+                    }
+                  }
+                ],
+                "created": 1789576207,
+                "model": "scratch/models/tencent_UI-Mate-9B-Q4_K_M.gguf",
+                "system_fingerprint": "b0-unknown",
+                "object": "chat.completion",
+                "usage": {
+                  "completion_tokens": 119,
+                  "prompt_tokens": 2696,
+                  "total_tokens": 2815,
+                  "prompt_tokens_details": {
+                    "cached_tokens": 0
+                  }
+                },
+                "id": "chatcmpl-jtab75Z3uwvWwoi0bnQ9COYfMgOY5h9P",
+                "timings": {
+                  "cache_n": 0,
+                  "prompt_n": 2696,
+                  "prompt_ms": 247932.457,
+                  "prompt_per_token_ms": 91.96307752225519,
+                  "prompt_per_second": 10.873929265340196,
+                  "predicted_n": 119,
+                  "predicted_ms": 20697.849,
+                  "predicted_per_token_ms": 175.4055,
+                  "predicted_per_second": 5.701075507894565
+                }
+              },
+              "seconds": 268.660944632,
+              "parsed_actions": [
+                "pyautogui.click(383, 239)"
+              ]
+            }
+          ],
+          "argus_environment": {},
+          "exit_code": 0,
+          "log": "scratch/m2-ui-mate-reference.stock.log",
+          "teardown_log": []
+        },
+        {
+          "mode": "argus-cuda",
+          "command": [
+            "scratch/llama.cpp-v050/build-cuda/bin/llama-server",
+            "-m",
+            "scratch/models/tencent_UI-Mate-9B-Q4_K_M.gguf",
+            "--mmproj",
+            "scratch/models/mmproj-tencent_UI-Mate-9B-f16.gguf",
+            "--no-mmproj-offload",
+            "--image-min-tokens",
+            "1024",
+            "-c",
+            "4096",
+            "-np",
+            "1",
+            "-ngl",
+            "8",
+            "-nkvo",
+            "-fa",
+            "on",
+            "-ctk",
+            "f16",
+            "-ctv",
+            "f16",
+            "-b",
+            "512",
+            "-ub",
+            "32",
+            "-t",
+            "6",
+            "--no-webui",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "45421"
+          ],
+          "cases": [],
+          "argus_environment": {
+            "ARGUS_KV_DIR": "/home/zwannfrederick/Masaüstü/Sektor/Coding/mamba fix/scratch/kv/tmpmxevykqa",
+            "ARGUS_KV_MAX_BYTES": "1073741824",
+            "ARGUS_KV_RESIDENT_BYTES": "8388608",
+            "ARGUS_KV_STAGING_BYTES": "4194304",
+            "ARGUS_KV_GPU_BYTES": "4194304",
+            "ARGUS_KV_PINNED_BYTES": "4194304",
+            "ARGUS_KV_STATS_PATH": "/home/zwannfrederick/Masaüstü/Sektor/Coding/mamba fix/scratch/kv/tmpmxevykqa/stats.json"
+          },
+          "error": "TimeoutError: timed out",
+          "exit_code": 0,
+          "last_published_stats_after_exit": {
+            "mode": "direct",
+            "disk_bytes": 268435456,
+            "resident_bytes": 2363392,
+            "staging_bytes": 528384,
+            "peak_resident_bytes": 2363392,
+            "peak_staging_bytes": 532480,
+            "read_bytes": 9952755712,
+            "written_bytes": 181075968,
+            "committed_pages": 44208,
+            "stores": 1,
+            "gpu_bytes": 266240,
+            "pinned_bytes": 262144,
+            "ram_bytes": 0,
+            "peak_gpu_bytes": 266240,
+            "peak_pinned_bytes": 262144,
+            "peak_ram_bytes": 0,
+            "cuda_attention_calls": 1224
+          },
+          "log": "scratch/m2-ui-mate-reference.argus-cuda.log",
+          "teardown_log": [
+            "ARGUS_DISK free id=1 disk_live=0 resident_live=0 staging_live=0"
+          ]
+        }
+      ],
+      "request_timeout_seconds": 600,
+      "notes": [
+        "Stock official-prompt action click(383,239) is one pixel above the fixed SAVE box (top y=240); failed without moving the acceptance boundary.",
+        "ARGUS timed out after 600 seconds; it completed prefill in 410.72 seconds. This is an incomplete response, not a scored grounding failure.",
+        "An ARGUS-only retry uses the same prompt and a 1200 second request timeout."
+      ]
+    }
+  }
+}

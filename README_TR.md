@@ -30,8 +30,12 @@ değildir.
   attention codec ile placement'ı ayırır; FP16/BF16, Q8/Q4 sayfaları ve
   sliding-window maskesini destekler.
 
-v0.5'te olmayanlar: birleşik HF/llama.cpp tiering backend'i (Python page store ile
-native store ayrı), GPU'da duran ARGUS KV, llama.cpp içinde sayfa başına karışık
+v0.5'te açık GPU/pinned/pageable/disk migration ve bütçeli FP16 CUDA attention
+eklendi; native lifecycle ve hata kontrolleri geçti. [Entegrasyon sözleşmesi](integrations/llama.cpp/README.md#cuda-mechanism-v05-m2).
+Tam UI-Mate/Neo kabulü (M6) açık. v0.5 mekanizmayı sağlar; otomatik yerleşim ve
+precision policy v0.6'da kalır.
+v0.5 sonrası: gerekirse birleşik HF/llama.cpp tiering backend'i (Python page store ile
+native store ayrı), llama.cpp içinde sayfa başına karışık
 hassasiyet ve gerçek uzun bağlam throughput ölçümü.
 [Sentetik 1M disk testi](docs/measurements/v050-disk-capacity-smoke-2026-09-15.json)
 tek katman, tek KV head ve head boyutu 4 kullanır; gerçek modelde 1M context veya

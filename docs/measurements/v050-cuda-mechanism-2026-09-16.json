@@ -1,0 +1,89 @@
+{
+  "date": "2026-09-16",
+  "scope": "v0.5 mechanism, not policy or long-context performance",
+  "llama_revision": "54315813269112dd0baed7112ec87ad93a8218ca",
+  "patches": [
+    "host-kv.patch",
+    "cuda-kv.patch"
+  ],
+  "device": "RTX 3050 Ti Laptop 4 GB",
+  "model": "stories15M.gguf",
+  "model_sha256": "61b50d457809a5194818fd22e6724b456cd7bb9a6264c52c8110684c53f3704a",
+  "prefill_tokens": 600,
+  "limits": {
+    "gpu": 4194304,
+    "pinned": 4194304,
+    "staging": 4194304,
+    "metadata": 1048576
+  },
+  "native_lifecycle": {
+    "kv_type": "f16",
+    "compared_steps": 19,
+    "max_abs_first_attention_error": 0.00034442544,
+    "greedy_mismatches": 0,
+    "strict_logits": true,
+    "max_abs_logit_error": 0.0102014542,
+    "argus_kv_rss_bytes": 45056,
+    "resident_budget_bytes": 1048576,
+    "migrated_pages": 2,
+    "stats": {
+      "mode": "direct",
+      "disk_bytes": 14155776,
+      "resident_bytes": 128000,
+      "staging_bytes": 151552,
+      "peak_resident_bytes": 128000,
+      "peak_staging_bytes": 163840,
+      "read_bytes": 158539776,
+      "written_bytes": 37847040,
+      "committed_pages": 9240,
+      "stores": 1,
+      "gpu_bytes": 77824,
+      "pinned_bytes": 73728,
+      "ram_bytes": 0,
+      "peak_gpu_bytes": 90112,
+      "peak_pinned_bytes": 77824,
+      "peak_ram_bytes": 0,
+      "cuda_attention_calls": 126
+    }
+  },
+  "checks": {
+    "cpu_native": "9 passed, 3 deselected; final rebuild; 166.42 seconds",
+    "hermes": "9 passed; outside sandbox; 0.26 seconds",
+    "cuda_contract_dimensions": [
+      48,
+      64,
+      256
+    ],
+    "cuda_contract_max_errors": [
+      1.74393e-07,
+      2.08961e-07,
+      3.8083e-07
+    ],
+    "overlap_serial_equal": true,
+    "migration_failure_source_preserved": true,
+    "patch_reverse_apply_files_identical": 8,
+    "cuda_pytest_final": "2 passed, 10 deselected in 14.77 seconds",
+    "quantized_placement_roundtrip": [
+      "Q8_0",
+      "Q4_0"
+    ],
+    "workload_scorers": "2 passed; relative coordinate validation and non-executing action parser"
+  },
+  "notes": [
+    "Short native CUDA pytest uses 64 prompt tokens; recorded standalone native run uses default 600.",
+    "Tests explicitly migrate pages; server does not select resident pages automatically.",
+    "GPU/pinned counters include staging: do not add them to staging as disjoint memory.",
+    "Native test asserts resident GPU/pinned/pageable allocations are zero after teardown. Snapshot in native_lifecycle is intentionally taken before teardown.",
+    "Expected final one-byte-budget refusal in native stderr is an asserted failure-injection check.",
+    "Hermes TestClient stalled in sandbox; interrupted and passed with scoped escalation.",
+    "CPU and workload checks overlapped: workload timings are diagnostic, not controlled performance measurements."
+  ],
+  "implementation_sha256": {
+    "argus_cache/csrc/ggml_cuda_attention.cu": "950759f34339be0370f54bfe346f5d38640fb9c184ad2c3778fd030e1f09dc83",
+    "argus_cache/csrc/ggml_cuda_attention.h": "536fbf27608212a450aa053ef057248782edcadb5633e5023209ccfe872aa8b9",
+    "argus_cache/csrc/ggml_disk_buffer.cpp": "c1a9c9b138a08d39bf9fb3cc0c7ce1c8a3491891e54d55c94200bf141c11e796",
+    "argus_cache/csrc/ggml_paged_attention.cpp": "a592f4aeef7d0b7690f24f71f615b18c2d30403f7bcde3b3c59451c69a7afc7a",
+    "integrations/llama.cpp/host-kv.patch": "db24e711e701f57e55bd16f30e4d03b3748913f01309e8e11671909f4e78b83b",
+    "integrations/llama.cpp/cuda-kv.patch": "7297a82706da124087c7323c6ba9c2545f044e47dbb3567216211c48a9f242d7"
+  }
+}
