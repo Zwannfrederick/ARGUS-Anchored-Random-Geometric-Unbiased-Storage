@@ -28,6 +28,24 @@ def test_no_second_copy_at_the_repository_root():
         )
 
 
+def test_only_argus_cache_is_packaged():
+    """The stray top-level package shipped in 0.5.0 and 0.5.1 came from here.
+
+    find_packages() walks the repository, so any directory with an __init__.py
+    beside argus_cache/ becomes a top-level package in the user's environment.
+    Verifying the built sdist would be stronger, but building it runs setup.py,
+    and CUDAExtension resolves CUDA library paths as it is constructed, so that
+    check needs CUDA_HOME and stays local.
+    """
+    from setuptools import find_packages
+
+    top_level = {name.split(".")[0] for name in find_packages(where=str(REPO))}
+    assert top_level == {"argus_cache"}, (
+        f"packaging would install {sorted(top_level)}; only argus_cache belongs "
+        "there, and anything else collides with that name in a user's environment"
+    )
+
+
 def test_nothing_imports_the_removed_root_packages():
     offenders = []
     for path in list((REPO / "tests").rglob("*.py")) + list((REPO / "benchmarks").rglob("*.py")):

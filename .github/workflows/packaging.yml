@@ -1,13 +1,20 @@
-# Guards packaging and repository hygiene, not correctness.
+# Guards repository hygiene and the packaging invariants, not correctness.
 #
-# The test suite needs a CUDA device, which hosted runners do not have, so this
-# workflow deliberately does NOT run it: a green badge here means the package
-# ships the right files, not that ARGUS works. The full suite runs locally and
-# its result is recorded in the release notes.
+# What this does NOT do, deliberately:
+#   - It does not run the test suite. Most of it needs a CUDA device and hosted
+#     runners have none, so a green badge here means the repository would ship
+#     the right files, not that ARGUS works. The full suite runs locally and its
+#     result is recorded in the release notes.
+#   - It does not build the sdist. Building runs setup.py, and torch's
+#     CUDAExtension resolves CUDA library paths while it is being constructed,
+#     so even a build that compiles nothing needs CUDA_HOME. Installing a CUDA
+#     torch just to produce a tarball would cost gigabytes per push, so sdist
+#     and twine checks stay local and the packaging rule is asserted directly
+#     instead: test_only_argus_cache_is_packaged fails if any directory beside
+#     argus_cache/ would become a top-level package, which is exactly the defect
+#     that shipped in 0.5.0 and 0.5.1.
 #
-# torch is installed only because setup.py imports it for BuildExtension and
-# CUDAExtension; the CPU wheel is enough to import those classes and build an
-# sdist, and nothing here compiles the extension.
+# Nothing here needs torch, so the job finishes in seconds.
 name: packaging
 
 on:
@@ -27,49 +34,16 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install build tooling
+      - name: Install check tooling
         run: |
           python -m pip install --upgrade pip
-          pip install build twine setuptools wheel pytest pillow
-          pip install torch --index-url https://download.pytorch.org/whl/cpu
-
-      - name: Build sdist
-        run: python -m build --sdist --no-isolation
-
-      - name: Check distribution metadata
-        run: twine check dist/*
-
-      - name: Assert the sdist installs only the intended packages
-        run: |
-          python - <<'PY'
-          import sys, tarfile
-          from pathlib import Path
-
-          sdist = next(Path("dist").glob("*.tar.gz"))
-          with tarfile.open(sdist) as archive:
-              member = next(m for m in archive.getmembers()
-                            if m.name.endswith("egg-info/top_level.txt"))
-              shipped = set(archive.extractfile(member).read().decode().split())
-
-          expected = {"argus_cache", "argus_cpp_backend"}
-          if shipped != expected:
-              sys.exit(f"{sdist.name} would install {sorted(shipped)}; "
-                       f"expected {sorted(expected)}. A stray top-level package "
-                       f"collides with anything else by that name in the user's "
-                       f"environment.")
-          print(f"{sdist.name} installs {sorted(shipped)}")
-          PY
+          pip install pytest pillow setuptools
 
       # One hygiene test imports the attention wrapper, which reaches
       # argus_cpp_backend, and nothing here compiles that extension. It guards a
       # past regression rather than packaging, so it is deselected here and runs
       # in the local suite that gates every release.
-      - name: Repository hygiene and offline checks
+      - name: Packaging invariants and repository hygiene
         run: |
           pytest -q tests/test_import_hygiene.py tests/test_ui_mate_workload.py \
             --deselect tests/test_import_hygiene.py::test_canonical_wrapper_keeps_the_arguments_the_copy_dropped
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: sdist
-          path: dist/*.tar.gz
