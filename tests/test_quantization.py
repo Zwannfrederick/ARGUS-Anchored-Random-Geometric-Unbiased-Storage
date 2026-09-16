@@ -5,7 +5,7 @@ import os
 # Add parent directory to path so we can import core
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from core.quantization import (
+from argus_cache.core.quantization import (
     quantize_to_int8,
     dequantize_from_int8,
     quantize_to_int4_packed,

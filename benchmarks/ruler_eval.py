@@ -15,7 +15,7 @@ import numpy as np
 # Ensure workspace is in path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from core.memory_manager import PagedDynamicKVCache, ArgusConfig
+from argus_cache.core.memory_manager import PagedDynamicKVCache, ArgusConfig
 
 def evaluate_multi_key_retrieval(length, num_keys=5, embed_dim=64, device="cpu"):
     """

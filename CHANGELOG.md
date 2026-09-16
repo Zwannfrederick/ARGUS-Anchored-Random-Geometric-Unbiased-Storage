@@ -1,5 +1,25 @@
 # Changelog
 
+## v0.5.2 — One copy of every module
+
+### Removed
+- **Root `core/` and `models/` re-export shims.** They existed so the tests and
+  benchmarks that still imported `core.memory_manager` and
+  `models.attention_wrapper` would reach the canonical modules instead of a
+  second copy — the root attention wrapper had once drifted 121 lines and
+  silently dropped `pipeline=` and `balloon_driver=`, handing callers a cache
+  that ignored its own tier configuration. All 17 importers now use
+  `argus_cache.core.*` and `argus_cache.models.*` directly, so the shims have no
+  callers and are gone. A package that does not exist cannot drift.
+
+### Changed
+- `tests/test_import_hygiene.py` keeps that guard in a form that matches the new
+  layout: it fails if `core/` or `models/` reappears at the repository root, and
+  if anything under `tests/` or `benchmarks/` imports them again. Both checks
+  were verified to fail when violated, not just to pass when clean.
+
+No runtime behaviour changed, and no module under `argus_cache/` was touched.
+
 ## v0.5.1 — Packaging fixes
 
 ### Fixed

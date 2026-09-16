@@ -8,7 +8,7 @@ import os
 # Add parent directory to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from core.memory_manager import PagedDynamicKVCache
+from argus_cache.core.memory_manager import PagedDynamicKVCache
 
 # =====================================================================
 # 1. ARCHITECTURE DEFINITIONS

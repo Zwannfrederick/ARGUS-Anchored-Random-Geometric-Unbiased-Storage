@@ -22,7 +22,7 @@ try:
     from argus_cache.core.quantization import quantize_to_jl_projection, dequantize_from_jl_projection
 except ImportError:
     # Fallback to direct imports if path structure is flat
-    from core.quantization import quantize_to_jl_projection, dequantize_from_jl_projection
+    from argus_cache.core.quantization import quantize_to_jl_projection, dequantize_from_jl_projection
 
 
 def generate_smooth_sequence(seq_len, num_heads=4, head_dim=64, device="cpu", dtype=torch.float16, seed=42):
