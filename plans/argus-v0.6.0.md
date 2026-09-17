@@ -1,6 +1,6 @@
 # ARGUS v0.6 — heterogeneous KV memory runtime
 
-Tarih: 2026-09-17. Durum: **revision ayrımı ve descriptor sinyalleri uygulandı; policy ve benchmark baseline'ı açık**.
+Tarih: 2026-09-17. Durum: **ilk placement policy ve off/on smoke doğrulandı; 262K benchmark baseline'ı açık**.
 Sürüm ayrımı (kullanıcı onayı): **v0.5 = mechanism, v0.6 = policy**. Bütçeli
 allocation, açık migration ve attention v0.5; hangi sayfanın nereye ve hangi
 codec ile taşınacağını seçen otomatik policy v0.6 sorumluluğudur.
@@ -49,8 +49,36 @@ yerel cuBLAS TLS verisine (~104 KiB) yetmediği görüldü. Worker stack'i 256 K
 + 4 KiB guard oldu; tamamı staging bütçesinde ve attention block hesabında.
 Bu, önceki sürüme göre worker başına 192 KiB ek staging gerektiriyor.
 
-Sıradaki iş ayrı placement policy modülü ve `off` referansıdır. 262K baseline
-kararı hâlâ açık.
+İlk policy ayrı `ggml_kv_policy.cpp` modülünde CUDA attention yoluna bağlandı.
+`ARGUS_KV_POLICY=off` (veya unset) karar üretmiyor; `on` iki okumadan sonra
+sayfaları GPU → pinned → pageable RAM sırasıyla değerlendiriyor. Dolu tier'da
+daha az okunmuş bir sayfa doğrulanmış disk kopyasına indirilebiliyor; eşit
+frekanslı sayfalar yerinde kalıyor. Codec değişmiyor. Her attention öncesinde
+tile/state için gereken GPU/pinned alanı hesaplanıp gerekirse bütün canlı
+store'lardan resident sayfalar indiriliyor. Bütçe enforcement store/tier
+allocator'da kalıyor; allocation kimliği taşıyan token'lar teardown sonrası
+reddediliyor. Registry pointer'ı store metadata bütçesinde; ayrı sınırsız cache
+veya policy kuyruğu yok.
+
+`policy_promotions`, `policy_demotions`, `policy_rejected` sayaçları stats'a
+eklendi. Migration reddi kaynak sayfayı koruyor ve failure sayacını artırıyor.
+Bu ilk algoritma erişim frekansına dayanıyor; topology/predicted-access yok,
+taşımalar senkron, eviction seçimi descriptor tarıyor. Olumsuz eviction kararı
+aynı pass boyunca tekrar kullanılabiliyor; başarılı eviction başına hâlâ tüm
+descriptor'lar taranabiliyor. Uzun context maliyeti ölçülmedi.
+
+[Off/on smoke artefaktı](../docs/measurements/v060-policy-smoke-2026-09-17.json):
+stories15M, 64-token prefill, 1024 context kapasitesi, F16 KV; her iki koşulda
+19 lifecycle adımı ve sıfır greedy mismatch, manuel migration yok. 4 MiB GPU
+bütçesinde disk okuması 20.004.864 → 12.877.824 byte; 256 KiB GPU bütçesinde
+12.939.264 byte, 5 otomatik demotion ve bütçe içinde 262.144 byte peak GPU.
+Bu sayılar küçük işlev/I/O kontrolüdür, throughput kazancı veya gerçekçi uzun
+context çalışma noktası değildir. 3 CPU ve 4 GPU testi geçti; GPU mekanizma
+testi D=48/64/256, tier fallback, admission, eviction, bozuk backing reddi ve
+teardown'u kapsıyor.
+
+Sıradaki iş policy maliyetini uzun context'te ölçmek ve buna göre seçim/taşıma
+stratejisini geliştirmek. 262K baseline ve kalite kabul eşikleri kararı hâlâ açık.
 
 ## Ürün ve mimari sınır
 

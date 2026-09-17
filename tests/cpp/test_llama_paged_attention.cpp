@@ -144,7 +144,7 @@ int main(int argc, char ** argv) try {
     params.cb_eval = capture_first_attention;
     params.cb_eval_user_data = &argus_attention;
 #ifdef ARGUS_TEST_CUDA_TIER
-    argus_attention.move_pages = true;
+    argus_attention.move_pages = std::getenv("ARGUS_TEST_AUTO_POLICY") == nullptr;
 #endif
     auto * argus = llama_init_from_model(model, params);
     require(argus, "argus context");
@@ -229,7 +229,7 @@ int main(int argc, char ** argv) try {
     llama_free(argus);
     llama_free(stock);
 #ifdef ARGUS_TEST_CUDA_TIER
-    require(argus_attention.moved_pages == 2, "native pages were not migrated");
+    require(argus_attention.moved_pages == (argus_attention.move_pages ? 2 : 0), "unexpected explicit page migrations");
     const auto remaining = argus_tier_usage();
     require(!remaining.gpu && !remaining.pinned && !remaining.ram, "native tier allocations leaked");
 #endif

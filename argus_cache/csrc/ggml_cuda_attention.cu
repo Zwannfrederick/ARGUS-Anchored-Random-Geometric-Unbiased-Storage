@@ -1,4 +1,5 @@
 #include "ggml_cuda_attention.h"
+#include "ggml_kv_policy.h"
 #include "ggml-cuda.h"
 #include "ggml-impl.h"
 #include <cuda_runtime.h>
@@ -113,6 +114,7 @@ void compute(ggml_tensor * dst, int device, void * raw_stream) {
     const size_t key_bytes = cells * k->nb[2], value_bytes = cells * v->nb[2];
     const size_t tile_bytes = aligned(key_bytes + value_bytes);
     const size_t state_bytes = aligned(2 * sizeof(float) * q->ne[1] * q->ne[2]);
+    argus_kv_policy_prepare(2 * tile_bytes + state_bytes, 2 * tile_bytes);
     // Includes both double-buffered host/device tiles and the online-softmax state.
     ArgusStagingReservation reservation(4 * tile_bytes + state_bytes);
     std::array<std::unique_ptr<ArgusTierBuffer>, 2> host, gpu;
@@ -148,6 +150,8 @@ void compute(ggml_tensor * dst, int device, void * raw_stream) {
     }
     check(cudaStreamSynchronize(stream));
     if (!(kr == argus_disk_revision(k)) || !(vr == argus_disk_revision(v))) { throw std::runtime_error("ARGUS stale CUDA attention"); }
+    argus_kv_policy_observe(k);
+    argus_kv_policy_observe(v);
     ++calls;
     argus_disk_publish_stats();
 }
@@ -199,6 +203,12 @@ void ArgusTierBuffer::write(const void * source, size_t bytes) {
 ArgusTierUsage argus_tier_usage() {
     std::lock_guard<std::mutex> lock(memory_mutex);
     return {live[3], live[2], live[1], peak[3], peak[2], peak[1], calls.load()};
+}
+ArgusTierBudget argus_tier_budget(ArgusTier tier) {
+    const auto * name = budget_name(tier);
+    const size_t maximum = std::getenv(name) ? setting(name) : 0;
+    std::lock_guard<std::mutex> lock(memory_mutex);
+    return {maximum, live[static_cast<size_t>(tier)]};
 }
 void argus_cuda_copy(void * target, const void * source, size_t bytes, bool device_source, void * stream) {
     check(cudaMemcpyAsync(target, source, bytes, device_source ? cudaMemcpyDeviceToDevice : cudaMemcpyHostToDevice,

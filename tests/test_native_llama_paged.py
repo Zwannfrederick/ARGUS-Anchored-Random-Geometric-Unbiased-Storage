@@ -135,6 +135,7 @@ def test_cuda_tier_migration_and_attention(tmp_path):
     )
     binary = _compile(tmp_path, "tests/cpp/test_ggml_cuda_mechanism.cpp",
                       ["-DARGUS_CUDA", f"-I{cuda}/include", str(ROOT / "argus_cache/csrc/ggml_disk_buffer.cpp"),
+                       str(ROOT / "argus_cache/csrc/ggml_kv_policy.cpp"),
                        str(obj), f"-L{cuda}/lib64", f"-Wl,-rpath,{cuda}/lib64",
                        "-Wl,--wrap=pwrite", "-Wl,--wrap=pread", "-pthread"],
                       ["-lggml-base", "-lggml-cpu", "-lggml", "-lcudart"])
@@ -156,3 +157,35 @@ def test_cuda_attention_native_lifecycle(tmp_path):
     assert report["stats"]["cuda_attention_calls"] > 0
     for key in ("peak_staging_bytes", "peak_gpu_bytes", "peak_pinned_bytes"):
         assert report["stats"][key] <= 4194304
+
+
+@pytest.mark.skipif(os.environ.get("ARGUS_TEST_CUDA") != "1", reason="set ARGUS_TEST_CUDA=1 with CUDA build")
+@pytest.mark.parametrize("gpu_budget", [4194304, 262144])
+def test_cuda_policy_off_on_preserves_outputs_and_budgets(tmp_path, gpu_budget):
+    binary = _compile(tmp_path, "tests/cpp/test_llama_paged_attention.cpp", ["-DARGUS_TEST_CUDA_TIER"],
+                      ["-lllama", "-lggml-base"])
+    env = {**os.environ, "ARGUS_KV_STAGING_BYTES": "4194304", "ARGUS_KV_GPU_BYTES": str(gpu_budget),
+           "ARGUS_KV_PINNED_BYTES": "4194304", "ARGUS_TEST_PROMPT_TOKENS": "64",
+           "ARGUS_TEST_AUTO_POLICY": "1"}
+    env.pop("ARGUS_TEST_REPORT_LOGITS_ONLY", None)
+    env.pop("ARGUS_KV_RAM_BYTES", None)
+    reports = {}
+    for mode in ("off", "on"):
+        result = subprocess.run([binary, MODEL, _storage(), "f16"], env={**env, "ARGUS_KV_POLICY": mode},
+                                capture_output=True, text=True, timeout=600)
+        assert result.returncode == 0, result.stderr[-4000:]
+        report = json.loads(next(line for line in result.stdout.splitlines() if line.startswith('{"kv_type"')))
+        assert report["compared_steps"] == 19 and report["greedy_mismatches"] == 0
+        assert report["migrated_pages"] == 0  # Every migration must come from the runtime policy.
+        for key in ("peak_staging_bytes", "peak_gpu_bytes", "peak_pinned_bytes"):
+            assert report["stats"][key] <= (gpu_budget if key == "peak_gpu_bytes" else 4194304)
+        assert report["stats"]["policy_rejected"] == 0
+        reports[mode] = report
+    (tmp_path / "policy-off-on.json").write_text(json.dumps(reports, indent=2) + "\n")
+    off, on = reports["off"]["stats"], reports["on"]["stats"]
+    assert off["policy_promotions"] == off["policy_demotions"] == 0
+    assert on["policy_promotions"] > 0
+    if gpu_budget == 4194304:
+        assert on["read_bytes"] < off["read_bytes"]
+    else:
+        assert on["policy_demotions"] > 0

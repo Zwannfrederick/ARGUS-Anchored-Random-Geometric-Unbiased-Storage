@@ -112,8 +112,8 @@ runtime dependency.
 **v0.5 provides mechanism; v0.6 chooses policy.** With direct disk mode enabled,
 set positive `ARGUS_KV_GPU_BYTES` and `ARGUS_KV_PINNED_BYTES` to select CUDA
 attention. Both are hard ARGUS allocation limits, including their staging
-buffers. `ARGUS_KV_RAM_BYTES` is required only for explicit pageable-RAM
-placement. These limits exclude llama.cpp weights, graph outputs and workspace;
+buffers. `ARGUS_KV_RAM_BYTES` enables pageable-RAM placement; an unset RAM
+budget disables that tier for policy. These limits exclude llama.cpp weights, graph outputs and workspace;
 they are not limits on total VRAM or process RSS.
 
 `argus_disk_move_page(tensor, offset, tier, expected_revision)` explicitly moves
@@ -124,13 +124,12 @@ reserves its destination, copies and verifies before releasing the source.
 Demotion verifies the retained disk copy before releasing the resident source.
 Failed transfers and stale revisions preserve the published page. Atomicity is
 per physical page, not a multi-page logical KV transaction.
-Explicit migrations currently advance the store revision: commit them between
-completed attention operations. Committing a placement change during attention
-is rejected by its revision check. The overlapped staging pipeline does not
-publish placement changes. The v0.6 plan fixes the contract that lifts this
-restriction: content and placement become separate revision axes, so a prefetch
-checks only content and a migration checks only the page it moves. That split is
-a decided contract, not implemented behaviour — the rule above still holds here.
+On the v0.6 development branch, content and placement revisions are separate.
+Prefetch and attention check store content revisions; migration takes the
+allocation/page/content token returned by `argus_disk_page_revision(tensor, offset)`.
+Byte-preserving migration does not invalidate attention or prefetch. A write to
+another page does not invalidate the migration token; a write to its page or a
+reset does. The released v0.5 mechanism used the shared revision instead.
 
 The first CUDA attention kernel supports FP16 K/V, F32 queries, F16/F32 masks,
 head dimensions up to 256, GQA and one sequence on CUDA device 0. Q8/Q4 attention
@@ -146,9 +145,8 @@ softmax state spans all tiles, including partially or entirely masked rows.
 disk bounce buffers also count against the process-wide staging budget. Do not
 sum staging and tier counters as disjoint physical allocations.
 
-There is no automatic promotion, eviction, hotness prediction or codec conversion.
-The server starts with disk-backed pages and bounded GPU attention staging;
-the native lifecycle test explicitly promotes two pages. The scalar kernel and
+The default (`ARGUS_KV_POLICY` unset or `off`) performs no automatic placement.
+The native mechanism lifecycle test explicitly promotes two pages. The scalar kernel and
 per-invocation staging allocations establish correctness, not throughput targets.
 No 262K performance improvement is claimed.
 
@@ -175,6 +173,31 @@ ARGUS_TEST_GGUF="$PWD/scratch/models/stories15M.gguf" \
 Both patches were reverse/applied in order and all eight affected files matched
 the tested checkout. CPU-only builds can apply both patches; CUDA additions are
 conditional on `GGML_CUDA`.
+
+### Experimental placement policy (v0.6 development)
+
+Set `ARGUS_KV_POLICY=on` to enable the separate `ggml_kv_policy.cpp` module on
+the CUDA attention path. Unknown values fail explicitly. Keep an `off` run from
+the same build as the reference. Existing checkouts must add the policy source
+from the updated `cuda-kv.patch` to the llama target and rebuild.
+
+After attention, written pages with at least two recorded reads are admitted
+to GPU, then pinned RAM, then pageable RAM, subject to available tier budgets.
+If a tier is full, a page with fewer reads can be demoted to its verified disk
+backing. Equal-frequency pages are retained to avoid churning a sequential scan.
+Before attention scratch is allocated, resident pages can be evicted across all
+live stores to make room for the exact double-buffered tiles and softmax state.
+The store still owns budget enforcement, checksum verification and stale-token checks.
+
+Stats include `policy_promotions`, `policy_demotions` and `policy_rejected`.
+Rejected moves preserve the source and increment the failure counter. No codec
+conversion is performed. Selection uses read frequency, not model topology;
+eviction scans descriptors and migrations are synchronous. This is an initial
+policy, not a 262K throughput claim. The `cuda_policy` test compares the same
+stories15M workload with `off/on`, no manual migrations, and both 4 MiB and
+256 KiB GPU budgets.
+The [smoke record](../../docs/measurements/v060-policy-smoke-2026-09-17.json)
+contains both reports and tested source hashes; it does not measure throughput.
 
 The opt-in `benchmarks/check_ui_mate_workload.py` compares Turkish, visual labels,
 coordinate grounding and a tool call on a generated fixture (Python 3.10+ and

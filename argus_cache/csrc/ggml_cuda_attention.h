@@ -23,6 +23,13 @@ struct ArgusTierUsage {
     size_t attention_calls;
 };
 ArgusTierUsage argus_tier_usage();
+struct ArgusTierBudget { size_t limit, live; };
+// An unset tier has zero capacity; allocation still enforces the configured budget.
+ArgusTierBudget argus_tier_budget(ArgusTier tier);
+// Callbacks inspect snapshots only and must not call storage APIs.
+void argus_disk_visit_resident_pages(void (*visit)(const ArgusDiskPageDescriptor &, void *), void * context);
+// Allocation identity is resolved under the store registry lock, including teardown races.
+void argus_disk_move_page(ArgusDiskPageRevision expected, ArgusTier tier);
 // One aligned physical page per transaction. A range may span several transactions.
 void argus_disk_move_page(const ggml_tensor * tensor, size_t offset, ArgusTier tier,
                          ArgusDiskPageRevision expected);
