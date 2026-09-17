@@ -65,9 +65,17 @@ int main(int argc, char ** argv) try {
         for (size_t i = 0; i < payload.size(); ++i) { payload[i] = i % 251; }
         ggml_backend_tensor_set(encoded, payload.data(), 0, payload.size());
         for (auto tier : {ArgusTier::gpu, ArgusTier::pinned, ArgusTier::ram, ArgusTier::disk}) {
-            argus_disk_move_page(encoded, 0, tier, argus_disk_revision(encoded));
+            const auto before_move = argus_disk_page_descriptor(encoded, 0);
+            argus_disk_move_page(encoded, 0, tier, argus_disk_page_revision(encoded, 0));
+            const auto after_move = argus_disk_page_descriptor(encoded, 0);
+            require(after_move.codec == encoded->type && after_move.placement == tier && after_move.written);
+            require(after_move.placement_revision == before_move.placement_revision + 1);
+            require(after_move.revision.content_revision == before_move.revision.content_revision);
+            require(after_move.access_count == before_move.access_count &&
+                    after_move.last_access_step == before_move.last_access_step);
             ggml_backend_tensor_get(encoded, copied.data(), 0, copied.size());
             require(copied == payload);
+            require(argus_disk_page_descriptor(encoded, 0).access_count == before_move.access_count + 1);
         }
     }
     std::mt19937 rng(42);
@@ -77,22 +85,34 @@ int main(int argc, char ** argv) try {
     for (auto & x : values) { x = ggml_fp32_to_fp16(normal(rng)); }
     ggml_backend_tensor_set(k, keys.data(), 0, keys.size() * 2);
     ggml_backend_tensor_set(v, values.data(), 0, values.size() * 2);
-    const auto initial = argus_disk_revision(k);
+    const auto initial = argus_disk_page_revision(k, 0);
+    const auto content = argus_disk_revision(k);
+    // Another page's content write must not invalidate this migration token.
+    ggml_backend_tensor_set(k, reinterpret_cast<const char *>(keys.data()) + 4096, 4096, 4096);
+    refuses([&] { argus_disk_move_page(k, 4096, ArgusTier::ram, initial); });
+    refuses([&] { argus_disk_move_page(v, 0, ArgusTier::ram, initial); });
+    const auto after_write = argus_disk_revision(k);
+    require(!(content == after_write));
     // Same FP16 bytes through every placement. Policy is explicit in this test.
     for (auto tier : {ArgusTier::ram, ArgusTier::pinned, ArgusTier::gpu, ArgusTier::disk}) {
-        argus_disk_move_page(k, 0, tier, argus_disk_revision(k));
+        std::vector<ggml_fp16_t> prefetched_keys(keys.size()), prefetched_values(values.size());
+        ArgusDiskPrefetch prefetch;
+        prefetch.submit(k, v, 0, cells, prefetched_keys.data(), prefetched_values.data());
+        argus_disk_move_page(k, 0, tier, initial);
+        prefetch.take();
+        require(prefetched_keys == keys && prefetched_values == values);
         std::vector<ggml_fp16_t> roundtrip(keys.size());
         ggml_backend_tensor_get(k, roundtrip.data(), 0, roundtrip.size() * 2);
         require(roundtrip == keys);
     }
-    refuses([&] { argus_disk_move_page(k, 0, ArgusTier::gpu, initial); });
-    refuses([&] { argus_disk_move_page(k, 1, ArgusTier::gpu, argus_disk_revision(k)); });
-    argus_disk_move_page(k, 0, ArgusTier::gpu, argus_disk_revision(k));
-    argus_disk_move_page(k, 4096, ArgusTier::pinned, argus_disk_revision(k));
-    argus_disk_move_page(v, 0, ArgusTier::ram, argus_disk_revision(v));
+    require(after_write == argus_disk_revision(k));
+    refuses([&] { argus_disk_move_page(k, 1, ArgusTier::gpu, argus_disk_page_revision(k, 0)); });
+    argus_disk_move_page(k, 0, ArgusTier::gpu, argus_disk_page_revision(k, 0));
+    argus_disk_move_page(k, 4096, ArgusTier::pinned, argus_disk_page_revision(k, 4096));
+    argus_disk_move_page(v, 0, ArgusTier::ram, argus_disk_page_revision(v, 0));
     const auto before = argus_disk_revision(k);
     setenv("ARGUS_KV_GPU_BYTES", "4096", 1);
-    refuses([&] { argus_disk_move_page(k, 8192, ArgusTier::gpu, before); });
+    refuses([&] { argus_disk_move_page(k, 8192, ArgusTier::gpu, argus_disk_page_revision(k, 8192)); });
     require(before == argus_disk_revision(k));
     require(argus_tier_usage().gpu == 4096);
     setenv("ARGUS_KV_GPU_BYTES", "1048576", 1);
@@ -105,7 +125,7 @@ int main(int argc, char ** argv) try {
     ggml_backend_tensor_get(k, preserved.data(), 0, preserved.size() * 2);
     require(preserved == keys);
     corrupt_read = true;
-    refuses([&] { argus_disk_move_page(k, 0, ArgusTier::disk, before); });
+    refuses([&] { argus_disk_move_page(k, 0, ArgusTier::disk, initial); });
     corrupt_read = false;
     require(before == argus_disk_revision(k) && argus_tier_usage().gpu == 4096);
     {
@@ -129,7 +149,12 @@ int main(int argc, char ** argv) try {
         out->data = output_gpu.data();
         require(compute && argus_ggml_is_cuda_attention(out));
         std::vector<float> first(query.size()), second(query.size());
+        const auto before_compute = argus_disk_page_descriptor(k, 0);
         compute(out, 0, nullptr);
+        const auto after_compute = argus_disk_page_descriptor(k, 0);
+        require(after_compute.placement == ArgusTier::gpu && after_compute.codec == GGML_TYPE_F16);
+        require(after_compute.access_count > before_compute.access_count &&
+                after_compute.last_access_step > before_compute.last_access_step);
         output_gpu.read(first.data(), 0, first.size() * sizeof(float));
         setenv("ARGUS_KV_NO_OVERLAP", "1", 1);
         compute(out, 0, nullptr);
@@ -162,15 +187,23 @@ int main(int argc, char ** argv) try {
         require(argus_tier_usage().gpu == usage.gpu && argus_tier_usage().pinned == usage.pinned);
         setenv("ARGUS_KV_PINNED_BYTES", "1048576", 1);
         // A successful write invalidates its resident copy; unrelated pages survive.
+        ArgusDiskPrefetch pending;
+        std::vector<ggml_fp16_t> pending_keys(keys.size()), pending_values(values.size());
+        pending.submit(k, v, 0, cells, pending_keys.data(), pending_values.data());
         ggml_backend_tensor_set(k, keys.data(), 0, 4096);
+        refuses([&] { pending.take(); });
+        refuses([&] { argus_disk_move_page(k, 0, ArgusTier::gpu, initial); });
         compute(out, 0, nullptr);
         output_gpu.read(second.data(), 0, second.size() * sizeof(float));
         require(first == second);
         std::printf("cuda_attention_calls=%zu max_error=%g overlap_parity=true migration_failure_preserved=true\n",
                     argus_tier_usage().attention_calls, error);
     }
-    const auto pre_reset = argus_disk_revision(k);
+    const auto pre_reset = argus_disk_page_revision(k, 0);
     ggml_backend_buffer_clear(store, 0);
+    const auto cleared = argus_disk_page_descriptor(k, 0);
+    require(cleared.codec == GGML_TYPE_F16 && cleared.placement == ArgusTier::disk && !cleared.written);
+    require(cleared.access_count == 0 && cleared.last_access_step == 0);
     refuses([&] { argus_disk_move_page(k, 0, ArgusTier::gpu, pre_reset); });
     require(argus_tier_usage().gpu == 0 && argus_tier_usage().pinned == 0 && argus_tier_usage().ram == 0);
     ggml_backend_buffer_free(store);

@@ -1,14 +1,56 @@
 # ARGUS v0.6 — heterogeneous KV memory runtime
 
-Tarih: 2026-09-16. Durum: **policy sözleşmesi sabitlendi; benchmark baseline'ı açık**.
+Tarih: 2026-09-17. Durum: **revision ayrımı ve descriptor sinyalleri uygulandı; policy ve benchmark baseline'ı açık**.
 Sürüm ayrımı (kullanıcı onayı): **v0.5 = mechanism, v0.6 = policy**. Bütçeli
 allocation, açık migration ve attention v0.5; hangi sayfanın nereye ve hangi
 codec ile taşınacağını seçen otomatik policy v0.6 sorumluluğudur.
 v0.5 M2 ve M6 kapandı. Aşağıdaki policy sözleşmesi de sabitlendi; implementation
-bu sözleşmeye göre başlayabilir. Bu belge yön ve sözleşmedir; uygulanmış özellik
-listesi değildir — sözleşmedeki hiçbir madde çalışan kod iddiası taşımaz.
+bu sözleşmeye göre başlayabilir. Aşağıdaki ilerleme bölümü doğrulanan uygulamayı kaydeder; sözleşmenin geri
+kalanı henüz çalışan özellik iddiası değildir.
 
 > ARGUS treats KV cache as a heterogeneous virtual-memory hierarchy rather than a tensor assigned to one device.
+
+## Uygulama ilerlemesi — 2026-09-17
+
+İlk adım uygulandı: native store ve page descriptor içerik revision'ı ile
+placement revision'ını ayırıyor. Prefetch/CUDA attention store içerik
+revision'ını izliyor; migration token'ı allocation, fiziksel sayfa ve o sayfanın
+içerik revision'ına bağlı. Başka sayfaya yazmak veya byte'ları koruyan migration
+bu token'ı geçersiz kılmıyor; hedef sayfaya yazmak ve reset geçersiz kılıyor.
+Başarısız yazım revision'ları değiştirmiyor.
+
+Descriptor snapshot API'si (`argus_disk_page_descriptor`) placement, codec,
+revision'lar, yazılmışlık, `last_access_step` ve `access_count` döndürüyor.
+Codec tensor allocation'ında kaydediliyor; view, yazım ve migration codec'i
+değiştirmiyor. Precision dönüşümü hâlâ kapalı. Snapshot kısmi son sayfayı ve
+view offset'ini destekliyor; migration'ın tam ve hizalı sayfa şartı korunuyor.
+
+Erişim adımı store içindeki başarılı okuma işleminin sırası; token/decode
+adımı veya store'lar arasında ortak saat değil. CPU get, prefetch ve CUDA
+staging okumaları sayılıyor; migration doğrulaması ve read-modify-write
+okumaları sayılmıyor. Her başarılı okumada dokunulan sayfa başına sayaç bir
+artıyor; sayaçlar taşmak yerine UINT64_MAX'ta kalıyor. Yazımlar erişim geçmişini
+koruyor; `clear(0)` codec'i koruyup erişim geçmişini sıfırlıyor. Ek metadata
+mevcut `sizeof(Page)` tabanlı resident bütçe hesabına dahil.
+
+Doğrulama: `tests/cpp/test_ggml_cuda_mechanism.cpp` gerçek GPU'da 48/64/256
+head dimension için geçti: dört tier arasında taşıma sırasında prefetch,
+ilgisiz sayfaya yazım, yanlış sayfa token'ı, stale içerik/reset reddi ve mevcut
+attention/bütçe/rollback kontrolleri. CPU disk, paged attention referansı ve
+worker koordinasyon testleri de geçti. Yeniden derlenen CUDA llama.cpp ile
+native lifecycle testi de geçti (19 adım, sıfır greedy mismatch, iki sayfa
+taşıması). Bu doğrulama performans ölçümü değildir.
+Descriptor kontrolleri de geçti: F32/F16/Q8/Q4 codec korunumu, view/tail
+snapshot, erişim sayımı, başarısız okumada sayaç korunumu, reset ve saturasyon.
+CUDA-linked disk/prefetch, üç boyutlu migration ve native lifecycle yeniden geçti.
+
+CUDA kütüphaneleriyle bağlı prefetch testinde eski 64 KiB worker stack'inin
+yerel cuBLAS TLS verisine (~104 KiB) yetmediği görüldü. Worker stack'i 256 KiB
++ 4 KiB guard oldu; tamamı staging bütçesinde ve attention block hesabında.
+Bu, önceki sürüme göre worker başına 192 KiB ek staging gerektiriyor.
+
+Sıradaki iş ayrı placement policy modülü ve `off` referansıdır. 262K baseline
+kararı hâlâ açık.
 
 ## Ürün ve mimari sınır
 
