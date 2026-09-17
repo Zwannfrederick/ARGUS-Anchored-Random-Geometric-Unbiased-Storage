@@ -1,6 +1,7 @@
 // Standalone CUDA/storage contract. The scheduler hook is captured here; native
 // llama tests separately exercise the actual GGML CUDA backend dispatch.
 #include "ggml_cuda_attention.h"
+#include "ggml_kv_policy.h"
 #include "ggml-cuda.h"
 #include <cuda_runtime.h>
 #include <algorithm>
@@ -40,8 +41,64 @@ template<class F> void refuses(F f) {
     require(refused);
 }
 
+static void check_policy() {
+    setenv("ARGUS_KV_GPU_BYTES", "4096", 1);
+    setenv("ARGUS_KV_PINNED_BYTES", "4096", 1);
+    setenv("ARGUS_KV_RAM_BYTES", "4096", 1);
+    auto * ctx = ggml_init({1 << 20, nullptr, true});
+    auto * tensor = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 4096);
+    auto * buffer = ggml_backend_alloc_ctx_tensors_from_buft(ctx, argus_ggml_disk_buffer_type());
+    require(buffer);
+    std::vector<unsigned char> payload(16384, 73), copied(payload.size());
+    ggml_backend_tensor_set(tensor, payload.data(), 0, payload.size());
+    const auto revision = argus_disk_revision(tensor);
+    unsetenv("ARGUS_KV_POLICY");
+    require(!argus_kv_policy_enabled());
+    setenv("ARGUS_KV_POLICY", "typo", 1);
+    refuses([] { argus_kv_policy_enabled(); });
+    setenv("ARGUS_KV_POLICY", "off", 1);
+    argus_kv_policy_observe(tensor);
+    require(argus_kv_policy_stats().promotions == 0);
+    setenv("ARGUS_KV_POLICY", "on", 1);
+    argus_kv_policy_observe(tensor); // Written but never read: no promotion.
+    ggml_backend_tensor_get(tensor, copied.data(), 0, copied.size());
+    argus_kv_policy_observe(tensor); // One-shot scan: no promotion.
+    require(argus_kv_policy_stats().promotions == 0);
+    ggml_backend_tensor_get(tensor, copied.data(), 0, copied.size());
+    argus_kv_policy_observe(tensor);
+    require(argus_disk_page_descriptor(tensor, 0).placement == ArgusTier::gpu);
+    require(argus_disk_page_descriptor(tensor, 4096).placement == ArgusTier::pinned);
+    require(argus_disk_page_descriptor(tensor, 8192).placement == ArgusTier::ram);
+    require(argus_disk_page_descriptor(tensor, 12288).placement == ArgusTier::disk);
+    for (int i = 0; i < 3; ++i) { ggml_backend_tensor_get(tensor, copied.data(), 12288, 4096); }
+    argus_kv_policy_observe(tensor); // Hotter page replaces the colder GPU page.
+    require(argus_disk_page_descriptor(tensor, 12288).placement == ArgusTier::gpu);
+    require(argus_disk_page_descriptor(tensor, 0).placement == ArgusTier::disk);
+    require(argus_disk_revision(tensor) == revision);
+    const auto stats = argus_kv_policy_stats();
+    corrupt_read = true;
+    argus_kv_policy_prepare(4096, 0);
+    corrupt_read = false;
+    require(argus_kv_policy_stats().rejected == stats.rejected + 1);
+    require(argus_disk_page_descriptor(tensor, 12288).placement == ArgusTier::gpu);
+    argus_kv_policy_prepare(4096, 4096);
+    require(argus_tier_usage().gpu == 0 && argus_tier_usage().pinned == 0);
+    require(argus_kv_policy_stats().demotions >= 3);
+    ggml_backend_tensor_get(tensor, copied.data(), 0, copied.size());
+    require(copied == payload);
+    require(argus_disk_page_descriptor(tensor, 12288).codec == GGML_TYPE_F32);
+    const auto stale = argus_disk_page_revision(tensor, 0);
+    ggml_backend_buffer_free(buffer);
+    ggml_free(ctx);
+    refuses([&] { argus_disk_move_page(stale, ArgusTier::gpu); });
+    require(argus_tier_usage().gpu == 0 && argus_tier_usage().pinned == 0 && argus_tier_usage().ram == 0);
+    setenv("ARGUS_KV_POLICY", "off", 1);
+    std::puts("policy: off/on, admission, tier budgets, eviction, failure counters and teardown passed");
+}
+
 int main(int argc, char ** argv) try {
     require(argc == 2 || argc == 3);
+    setenv("ARGUS_KV_POLICY", "off", 1);
     setenv("ARGUS_KV_DIR", argv[1], 1);
     setenv("ARGUS_KV_MAX_BYTES", "1048576", 1);
     setenv("ARGUS_KV_RESIDENT_BYTES", "1048576", 1);
@@ -208,6 +265,7 @@ int main(int argc, char ** argv) try {
     require(argus_tier_usage().gpu == 0 && argus_tier_usage().pinned == 0 && argus_tier_usage().ram == 0);
     ggml_backend_buffer_free(store);
     ggml_free(ctx);
+    check_policy();
     return 0;
 } catch (const std::exception & error) {
     std::fprintf(stderr, "FAILED: %s\n", error.what());

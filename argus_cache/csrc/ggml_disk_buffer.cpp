@@ -4,6 +4,7 @@
 #include "ggml-cpu/traits.h"
 #ifdef ARGUS_CUDA
 #include "ggml_cuda_attention.h"
+#include "ggml_kv_policy.h"
 #endif
 
 #include <algorithm>
@@ -44,8 +45,15 @@ struct Store {
     uint64_t id = 0;
     uint64_t content_revision = 0;
     uint64_t access_step = 0;
+#ifdef ARGUS_CUDA
+    Store * next = nullptr; // Intrusive registry: charged with the store metadata.
+#endif
     std::mutex mutex;
 };
+#ifdef ARGUS_CUDA
+std::mutex registry_mutex;
+Store * registry = nullptr;
+#endif
 constexpr size_t descriptor_offset = (sizeof(Store) + alignof(Page) - 1) / alignof(Page) * alignof(Page);
 
 void name_mapping(void * address, size_t bytes, const char * name) {
@@ -298,12 +306,20 @@ void release(ggml_backend_buffer_t buffer) {
     const auto metadata = store->metadata_bytes, charged = store->metadata_charge, physical = store->disk_bytes;
     const auto id = store->id;
 #ifdef ARGUS_CUDA
+    // Registry users finish before this allocation's pages can be destroyed.
+    std::unique_lock<std::mutex> registry_guard(registry_mutex);
+    Store ** link = &registry;
+    while (*link && *link != store) { link = &(*link)->next; }
+    if (*link) { *link = store->next; }
     for (size_t i = 0; i < rounded(store->bytes) / page_size; ++i) { delete store->pages[i].resident; }
 #endif
     munmap(store->address, rounded(store->bytes));
     close(store->fd);
     store->~Store();
     munmap(store, metadata);
+#ifdef ARGUS_CUDA
+    registry_guard.unlock();
+#endif
     std::lock_guard<std::mutex> guard(budget_mutex);
     disk_live -= physical;
     metadata_live -= charged;
@@ -328,7 +344,7 @@ ggml_backend_buffer_t allocate(ggml_backend_buffer_type_t type, size_t bytes) tr
     if (argus_disk_staging_limit() < 2 * page_size) { throw std::runtime_error("ARGUS staging needs at least 8192 bytes"); }
     const char * directory = std::getenv("ARGUS_KV_DIR");
     if (!directory || !*directory) { throw std::runtime_error("ARGUS_KV_DIR is required"); }
-    std::lock_guard<std::mutex> guard(budget_mutex);
+    std::unique_lock<std::mutex> guard(budget_mutex);
     if (physical > max_disk || disk_live > max_disk - physical ||
         metadata_charge > max_resident || metadata_live > max_resident - metadata_charge) {
         throw std::runtime_error("ARGUS disk or resident metadata budget exceeded");
@@ -379,6 +395,12 @@ ggml_backend_buffer_t allocate(ggml_backend_buffer_type_t type, size_t bytes) tr
     ++stores;
     std::fprintf(stderr, "ARGUS_DISK allocate id=%llu logical_bytes=%zu disk_bytes=%zu metadata_bytes=%zu\n",
                  static_cast<unsigned long long>(store->id), bytes, physical, metadata);
+#ifdef ARGUS_CUDA
+    guard.unlock(); // Never acquire the registry while holding the budget lock.
+    std::lock_guard<std::mutex> registry_guard(registry_mutex);
+    store->next = registry;
+    registry = store;
+#endif
     return result;
 } catch (const std::exception & error) {
     std::fprintf(stderr, "ARGUS_DISK allocation refused: %s\n", error.what());
@@ -457,13 +479,7 @@ ArgusDiskPageRevision argus_disk_page_revision(const ggml_tensor * tensor, size_
     return {store.id, index, store.pages[index].content_revision};
 }
 
-ArgusDiskPageDescriptor argus_disk_page_descriptor(const ggml_tensor * tensor, size_t start) {
-    if (!argus_ggml_is_disk_tensor(tensor)) { throw std::invalid_argument("ARGUS descriptor requires disk storage"); }
-    if (start >= ggml_nbytes(tensor)) { throw std::out_of_range("ARGUS descriptor tensor range"); }
-    const auto * storage = tensor->view_src ? tensor->view_src : tensor;
-    auto & store = store_for(storage->buffer);
-    const size_t index = checked_offset(store, tensor, start, 1) / page_size;
-    std::lock_guard<std::mutex> guard(store.mutex);
+static ArgusDiskPageDescriptor page_descriptor(const Store & store, size_t index) {
     const auto & page = store.pages[index];
     auto placement = ArgusTier::disk;
 #ifdef ARGUS_CUDA
@@ -471,6 +487,16 @@ ArgusDiskPageDescriptor argus_disk_page_descriptor(const ggml_tensor * tensor, s
 #endif
     return {{store.id, index, page.content_revision}, page.placement_revision, placement,
             page.codec, page.last_access_step, page.access_count, page.content_revision != 0 && page.active != 2};
+}
+
+ArgusDiskPageDescriptor argus_disk_page_descriptor(const ggml_tensor * tensor, size_t start) {
+    if (!argus_ggml_is_disk_tensor(tensor)) { throw std::invalid_argument("ARGUS descriptor requires disk storage"); }
+    if (start >= ggml_nbytes(tensor)) { throw std::out_of_range("ARGUS descriptor tensor range"); }
+    const auto * storage = tensor->view_src ? tensor->view_src : tensor;
+    auto & store = store_for(storage->buffer);
+    const size_t index = checked_offset(store, tensor, start, 1) / page_size;
+    std::lock_guard<std::mutex> guard(store.mutex);
+    return page_descriptor(store, index);
 }
 
 ArgusDiskPrefetch::ArgusDiskPrefetch() {
@@ -573,12 +599,16 @@ void argus_disk_publish_stats() {
     std::string tier_stats;
 #ifdef ARGUS_CUDA
     const auto usage = argus_tier_usage();
+    const auto policy = argus_kv_policy_stats();
     tier_stats = ",\"gpu_bytes\":" + std::to_string(usage.gpu) +
         ",\"pinned_bytes\":" + std::to_string(usage.pinned) + ",\"ram_bytes\":" + std::to_string(usage.ram) +
         ",\"peak_gpu_bytes\":" + std::to_string(usage.peak_gpu) +
         ",\"peak_pinned_bytes\":" + std::to_string(usage.peak_pinned) +
         ",\"peak_ram_bytes\":" + std::to_string(usage.peak_ram) +
-        ",\"cuda_attention_calls\":" + std::to_string(usage.attention_calls);
+        ",\"cuda_attention_calls\":" + std::to_string(usage.attention_calls) +
+        ",\"policy_promotions\":" + std::to_string(policy.promotions) +
+        ",\"policy_demotions\":" + std::to_string(policy.demotions) +
+        ",\"policy_rejected\":" + std::to_string(policy.rejected);
 #endif
     std::lock_guard<std::mutex> guard(budget_mutex);
     const std::string scratch = std::string(path) + ".tmp";
@@ -597,11 +627,7 @@ void argus_disk_publish_stats() {
 }
 
 #ifdef ARGUS_CUDA
-void argus_disk_move_page(const ggml_tensor * tensor, size_t start, ArgusTier tier, ArgusDiskPageRevision expected) {
-    if (!argus_ggml_is_disk_tensor(tensor)) { throw std::invalid_argument("ARGUS move requires disk-backed tensor"); }
-    const auto * storage = tensor->view_src ? tensor->view_src : tensor;
-    auto & store = store_for(storage->buffer);
-    const size_t index = migration_page(store, tensor, start);
+static void move_page(Store & store, size_t index, ArgusTier tier, ArgusDiskPageRevision expected) {
     std::lock_guard<std::mutex> guard(store.mutex);
     auto & page = store.pages[index];
     if (expected.allocation != store.id || expected.page != index ||
@@ -625,6 +651,34 @@ void argus_disk_move_page(const ggml_tensor * tensor, size_t start, ArgusTier ti
     delete page.resident;
     page.resident = target.release();
     ++page.placement_revision;
+}
+
+void argus_disk_move_page(const ggml_tensor * tensor, size_t start, ArgusTier tier, ArgusDiskPageRevision expected) {
+    if (!argus_ggml_is_disk_tensor(tensor)) { throw std::invalid_argument("ARGUS move requires disk-backed tensor"); }
+    const auto * storage = tensor->view_src ? tensor->view_src : tensor;
+    auto & store = store_for(storage->buffer);
+    move_page(store, migration_page(store, tensor, start), tier, expected);
+}
+
+void argus_disk_move_page(ArgusDiskPageRevision expected, ArgusTier tier) {
+    std::lock_guard<std::mutex> guard(registry_mutex);
+    for (auto * store = registry; store; store = store->next) {
+        if (store->id != expected.allocation) { continue; }
+        if (expected.page >= store->bytes / page_size) { throw std::out_of_range("ARGUS migration page range"); }
+        move_page(*store, expected.page, tier, expected);
+        return;
+    }
+    throw std::runtime_error("ARGUS stale migration allocation");
+}
+
+void argus_disk_visit_resident_pages(void (*visit)(const ArgusDiskPageDescriptor &, void *), void * context) {
+    std::lock_guard<std::mutex> guard(registry_mutex);
+    for (auto * store = registry; store; store = store->next) {
+        std::lock_guard<std::mutex> page_guard(store->mutex);
+        for (size_t i = 0; i < rounded(store->bytes) / page_size; ++i) {
+            if (store->pages[i].resident) { visit(page_descriptor(*store, i), context); }
+        }
+    }
 }
 
 void argus_disk_stage_cuda(const ggml_tensor * tensor, void * host, void * device,
