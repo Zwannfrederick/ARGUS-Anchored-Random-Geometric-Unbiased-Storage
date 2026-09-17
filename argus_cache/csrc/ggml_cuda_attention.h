@@ -1,9 +1,6 @@
 #pragma once
 #include "ggml_disk_buffer.h"
 
-// Placement is independent of the tensor's codec. No automatic eviction policy.
-enum class ArgusTier { disk, ram, pinned, gpu };
-
 class ArgusTierBuffer {
 public:
     ArgusTierBuffer(ArgusTier tier, size_t bytes);
@@ -28,7 +25,7 @@ struct ArgusTierUsage {
 ArgusTierUsage argus_tier_usage();
 // One aligned physical page per transaction. A range may span several transactions.
 void argus_disk_move_page(const ggml_tensor * tensor, size_t offset, ArgusTier tier,
-                         ArgusDiskRevision expected);
+                         ArgusDiskPageRevision expected);
 // Source stays locked until the transfer stream completes. Host staging belongs to caller.
 void argus_disk_stage_cuda(const ggml_tensor * tensor, void * host, void * device,
                            size_t offset, size_t bytes, void * stream);

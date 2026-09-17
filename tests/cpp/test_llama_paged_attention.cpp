@@ -68,7 +68,7 @@ bool capture_first_attention(ggml_tensor * tensor, bool ask, void * user_data) {
         // Explicit test placement, not an eviction or hotness policy in the runtime.
         for (int input : {1, 2}) {
             auto * kv = operation->src[input];
-            argus_disk_move_page(kv, 0, input == 1 ? ArgusTier::gpu : ArgusTier::pinned, argus_disk_revision(kv));
+            argus_disk_move_page(kv, 0, input == 1 ? ArgusTier::gpu : ArgusTier::pinned, argus_disk_page_revision(kv, 0));
             ++captured.moved_pages;
         }
     }

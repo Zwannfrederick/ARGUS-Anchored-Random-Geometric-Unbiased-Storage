@@ -37,17 +37,42 @@ private:
 };
 
 struct ArgusDiskRevision {
-    uint64_t allocation, generation;
+    uint64_t allocation, content_revision;
     bool operator==(const ArgusDiskRevision & other) const {
-        return allocation == other.allocation && generation == other.generation;
+        return allocation == other.allocation && content_revision == other.content_revision;
     }
 };
+// Store-wide content snapshot for attention/prefetch; placement does not invalidate it.
 ArgusDiskRevision argus_disk_revision(const ggml_tensor * tensor);
+
+// Migration tokens are bound to one physical page and ignore unrelated writes.
+struct ArgusDiskPageRevision {
+    uint64_t allocation;
+    size_t page;
+    uint64_t content_revision;
+};
+ArgusDiskPageRevision argus_disk_page_revision(const ggml_tensor * tensor, size_t offset);
+
+enum class ArgusTier { disk, ram, pinned, gpu };
+
+struct ArgusDiskPageDescriptor {
+    ArgusDiskPageRevision revision;
+    uint64_t placement_revision;
+    ArgusTier placement;
+    ggml_type codec; // GGML_TYPE_COUNT until a tensor owns the page; never converted here.
+    uint64_t last_access_step, access_count;
+    bool written;
+};
+// Snapshot of the physical page containing offset, including partial tail pages/views.
+// Access steps are store-local successful read operations (including prefetch), not tokens.
+// Counts saturate at UINT64_MAX; writes/migration preserve them, clear(0) resets them.
+ArgusDiskPageDescriptor argus_disk_page_descriptor(const ggml_tensor * tensor, size_t offset);
 
 // One pending block. The explicitly allocated worker stack is charged to staging too.
 class ArgusDiskPrefetch {
 public:
-    static constexpr size_t stack_bytes = 68 * 1024;
+    // ponytail: 256 KiB stack covers tested CUDA TLS (~104 KiB); raise if linked TLS grows.
+    static constexpr size_t stack_bytes = (256 + 4) * 1024; // includes guard page
     ArgusDiskPrefetch();
     ~ArgusDiskPrefetch();
     void submit(const ggml_tensor * k, const ggml_tensor * v, int64_t first, int64_t count, void * keys, void * values);
