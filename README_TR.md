@@ -10,9 +10,13 @@ altındaki katmandır: her KV sayfasının nerede ve hangi hassasiyette durduğu
 sahibi. En derin entegrasyon llama.cpp'dir; orada KV tahsisi, sayfa yazımları ve
 attention okumaları ARGUS'a aittir.
 
-**Durum: v0.5.2. Mekanizma çalışıyor ve byte düzeyinde birebir kanıtlandı.
-Sayfaların nereye gideceğine karar veren policy henüz yok — o v0.6.** Bu yüzden
-aşağıdaki her performans sayısı bir maliyet ölçümüdür, kazanç değil.
+**Durum: v0.6.0. İsteğe bağlı bir placement policy llama.cpp KV sayfalarının
+nerede duracağına karar veriyor; GPU'da duran sayfaları yerinde okuyan CUDA
+attention yolu staged referansla bit düzeyinde aynı sonucu veriyor.** Şimdiye
+kadar ölçülen tek iş yükünde (4K context, Qwen2.5-0.5B, RTX 3050 Ti Laptop)
+ARGUS hâlâ **stock llama.cpp'den yavaş**: KV tamamen GPU'dayken prefill süresi
+stock'un 2,12 katı, policy sayfaları GPU ile disk arasında yerleştirirken 7,42
+katı. Aşağıdaki her performans sayısı bir maliyet ölçümüdür, kazanç değil.
 
 [![packaging](https://github.com/Zwannfrederick/ARGUS-Anchored-Random-Geometric-Unbiased-Storage/actions/workflows/packaging.yml/badge.svg)](https://github.com/Zwannfrederick/ARGUS-Anchored-Random-Geometric-Unbiased-Storage/actions/workflows/packaging.yml)
 
@@ -30,12 +34,13 @@ her satır açıktır — yayımlanmayı bekleyen bir şey değildir.
 | KV sayfaları GPU ↔ pinned ↔ pageable ↔ disk arasında, kaynağı koruyarak taşınır | Kanıtlandı | [CUDA mechanism](docs/measurements/v050-cuda-mechanism-2026-09-16.json) |
 | HuggingFace yolunda VRAM tasarrufu context ile büyüyor | Kanıtlandı, v0.4 | [downstream](docs/measurements/downstream-2026-08-14.json) |
 | Hassasiyet, belleği gecikmeyle monoton biçimde takas ediyor | Kanıtlandı, motor izole | [fused attention](docs/measurements/v040-fused-attention-benchmark.json) |
-| ARGUS altındaki runtime'dan hızlıdır | **Ölçülmedi** — ve iddia edilmiyor | — |
-| ARGUS'un gerçekçi çalışma noktasındaki davranışı | **Ölçülmedi**, v0.6 öncesi imkânsız | bkz. [Neden hız sonucu yok](#neden-hız-sonucu-yok) |
+| ARGUS altındaki runtime'dan hızlıdır | **Hayır**, ölçülen tek iş yükünde: 4K prefill stock süresinin 2,12 katı (GPU-resident) ve 7,42 katı (policy açık) | [v0.6, 4K](#v06-ilk-çalışma-noktası-4k) |
+| İsteğe bağlı placement policy sayfaları tier bütçeleri içinde terfi ettirir | 4K'da kanıtlandı; policy açıkken staged ve resident yollar aynı policy kararlarını verir | [residency census](docs/measurements/v060-residency-census-2026-09-18.md), [mixed resident](docs/measurements/v060-mixed-resident-2026-09-18.md) |
+| GPU-resident CUDA attention staged referansla bit düzeyinde aynıdır | Kanıtlandı (float-vektör eşitliği, zorlayıcı maskeler, mutation kontrollü) | [lane-per-cell kernel](docs/measurements/v060-kernel-cells-2026-09-18.md) |
 | 262K'da uzun bağlam throughput'u | **Ölçülmedi**, ertelendi | [v0.6 planı](plans/argus-v0.6.0.md) |
 | INT4, INT2, 1-bit veya JL katmanlarında kalite | **Ölçülmedi** | yalnız FP8'e ulaşıldı, bkz. [Kalite](#kalite) |
 
-Geliştirme makinesinde yerel suite: **383 passed, 13 skipped**. Yukarıdaki CI
+Geliştirme makinesinde yerel suite: **401 passed, 3 skipped**. Yukarıdaki CI
 rozeti yalnız paketleme ve depo hijyenini kapsar — barındırılan runner'larda
 CUDA cihazı yoktur, dolayısıyla yeşil rozet "paket doğru dosyaları gönderiyor"
 demektir, "ARGUS çalışıyor" değil.
@@ -176,9 +181,36 @@ kullanmaya karar veren bir şey yok. Ayrıca `ARGUS_KV_RESIDENT_BYTES` bir KV
 
 **Bu, placement policy'sinin yokluğunun maliyetidir.** Ayarlanmış bir
 konfigürasyon değil, kısılmış bir konfigürasyon değil ve bir çalışma noktası
-değil. Bu depoda gerçekçi çalışma noktasında ARGUS ölçümü yoktur ve v0.6'daki
-otomatik yerleşim gelmeden olamaz. Bu açığı kapatmak v0.6'nın bütün amacıdır;
-v0.5'in iddiası değildir.
+değil. v0.6 policy'yi ve resident attention yolunu ekledi; ilk çalışma noktası
+ölçümü aşağıdadır.
+
+## v0.6: ilk çalışma noktası (4K)
+
+Qwen2.5-0.5B-Instruct Q4_K_M, F16 KV, 4096 context, 4016 token prompt, 16 üretilen
+token, ubatch 64, RTX 3050 Ti Laptop (4 GB); her modda llama.cpp KV'si host'ta
+(`-nkvo`). Profiler kapalı, dönüşümlü sırada üç tekrar; median (min–max). Çıktı
+ARGUS modları ve yolları arasında aynıdır.
+
+| mod | prefill | stock'a göre | decode |
+|---|---:|---:|---:|
+| stock llama.cpp, host KV | 1,332 s (1,326–1,335) | 1,00x | 37,3 tok/s |
+| ARGUS, tüm KV GPU'da (tanısal kontrol) | 2,821 s (2,779–2,873) | 2,12x | 8,0 tok/s |
+| ARGUS, policy açık (GPU + disk yerleşimi) | 9,888 s (9,779–9,929) | 7,42x | 6,4 tok/s |
+
+v0.6 boyunca aynı iş yükündeki değişim (GPU-resident kontrol prefill'i): staged
+skaler attention 40,9 s → çağrı başına tek batched launch 12,8 s → D=64
+özelleştirmesi 5,5 s → lane-per-cell exact kernel 3,7 s → dalsız value döngüsü
+2,8 s. Policy açıkken süre, yeni yazılmış tek bir cold sayfanın bütün çağrıyı
+staged yola düşürmesi engellenince 48,3 s'den 9,9 s'ye indi. Her adım staged
+kernel ile float-vektör eşitliğini korudu ve nedeni ölçümle doğrulandı (son iki
+kernel adımı için Nsight Compute).
+
+Bunun göstermedikleri: decode değişmedi (hâlâ staged yol, stock'tan 4,7 kat
+yavaş); policy açıkken kalan farkın çoğu doğrulamalı disk write-through'dan
+geliyor; 4K üstü, başka model veya GPU ölçülmedi. Ayrıntılar:
+[checkpoint](docs/measurements/v060-checkpoint-2026-09-18.md),
+[kernel adımları](docs/measurements/v060-kernel-cells-mlp-2026-09-18.md),
+[Nsight Compute atfı](docs/measurements/v060-ncu-cells-2026-09-18.md).
 
 ## HuggingFace araştırma yolu (v0.4)
 
@@ -320,30 +352,36 @@ attention-backend arayüzlerini kullanmalıdır; bkz.
 
 # Yol haritası
 
-## v0.6 — placement policy
+## v0.6 — placement policy (yayınlandı)
 
-**Bu bölümdeki hiçbir şey uygulanmış değildir.**
-[`plans/argus-v0.6.0.md`](plans/argus-v0.6.0.md) içinde kayıtlı, v0.6'nın
-uygulayacağı karara bağlanmış bir sözleşmedir.
+[`plans/argus-v0.6.0.md`](plans/argus-v0.6.0.md) içindeki sözleşmeye göre
+uygulandı:
 
-- **Policy, store'un üstünde bir modüldür.** Mekanizma store'da kalır;
-  `ARGUS_KV_POLICY=off`, ikinci bir kod yoluyla değil hiç karar üretmeyerek
-  v0.5 davranışını yeniden üretir.
-- **İçerik ve yerleşim ayrı revision eksenleri olur.** Bugün tek bir
-  store-genelinde sayaç hem yazımlarda hem taşımalarda artıyor; bu yüzden
-  byte'ları koruyan, checksum ile doğrulanmış bir taşıma uçuştaki prefetch'i
-  iptal ettiriyor ve store'un herhangi bir yerindeki yazım bir migration'ı
-  düşürüyor.
+- **Policy, store'un üstünde bir modüldür** (`ARGUS_KV_POLICY=on`, varsayılan
+  kapalı). Mekanizma store'da kalır; `off`, ikinci bir kod yoluyla değil hiç
+  karar üretmeyerek v0.5 davranışını yeniden üretir.
+- **İçerik ve yerleşim ayrı revision eksenleridir.** Byte'ları koruyan,
+  checksum ile doğrulanmış bir taşıma artık uçuştaki prefetch'i iptal ettirmez;
+  store'un başka bir yerindeki yazım migration'ı düşürmez.
 - **Bütçelerin sahibi store'dur.** Policy önerir; store doğrular veya açıkça
   reddeder, reddedilenler yutulmak yerine sayılır.
-- **İlk policy yalnız yerleşim seçer.** Precision tanımlıdır ama kapalıdır ve
-  kuralı şudur: hassasiyet düşürme sayfa başına tek yönlüdür — q4 bir sayfayı
-  f16'ya yükseltmek dequantize edilmiş q4 verir, orijinali değil; hiçbir policy
-  bunu geri kazanılmış kalite diye raporlayamaz.
+- **Policy yalnız yerleşim seçer.** Precision tanımlıdır ama kapalıdır ve kuralı
+  şudur: hassasiyet düşürme sayfa başına tek yönlüdür — q4 bir sayfayı f16'ya
+  yükseltmek dequantize edilmiş q4 verir, orijinali değil; hiçbir policy bunu
+  geri kazanılmış kalite diye raporlayamaz.
+- **Attention yerleştirmez, yalnız kopyalar.** GPU'da olmayan sayfalar tek bir
+  okuma için çağrıya özel scratch'e kopyalanır; bu yerleşimi, revision'ları ve
+  erişim geçmişini hiç değiştirmez.
 
-262K benchmark baseline'ı, kalite toleransı ve başarı metriği bilerek açık
-bırakılmıştır. Ölçüm policy'den sonra gelir, çünkü terfi olmadan ölçülecek bir
-yerleşim davranışı yoktur.
+v0.6 ayrıca yukarıda ölçülen GPU-resident attention yolunu ekledi. 262K benchmark
+baseline'ı, kalite toleransı ve başarı metriği hâlâ açık; çalıştırılmadı.
+
+## v0.7 — ölçülen farkı kapatmak
+
+Deneysel optimizasyon, her seferinde ölçülmüş tek bir nedensel faktör,
+varsayılan olarak exact: önce GPU-resident 4K prefill'in stock'a olan farkı
+(attention ve çevresindeki her şey), sonra policy açıkken çalışma zamanı
+maliyeti, sonra decode.
 
 ## Bilinen sınırlar
 
@@ -354,8 +392,9 @@ yerleşim davranışı yoktur.
   yüzden sayfa başına launch maliyeti taşımaya devam eder.
 - `DirectPagedAttentionEngine` yalnız izole ölçülmüştür ve HuggingFace decode
   yoluna bağlı değildir.
-- Python `PageStore` ile native store ayrıdır; yalnız v0.6 sözleşmesi
-  gerektirirse birleştirilir.
+- Python `PageStore` ile native store ayrıdır.
+- llama.cpp resident attention hızlı yolu F16 KV ile prefill'i (Q>1) kapsar; en
+  hızlı kernel head dimension 64 ister. Decode staged yolu kullanır.
 - Gerçek bellek baskısı altında CPU-spill gecikmesi ve çok kullanıcılı
   throughput ölçülmemiştir.
 - Öngörücü sayfalama deneyseldir ve varsayılan olarak kapalıdır.

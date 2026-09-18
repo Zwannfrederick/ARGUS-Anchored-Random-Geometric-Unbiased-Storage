@@ -1,5 +1,42 @@
 # Changelog
 
+## v0.6.0 — Placement policy and an exact GPU-resident attention path
+
+The pip-installed runtime (`argus_cache` and the `argus_cpp_backend` extension) is
+unchanged from 0.5.2. Everything below lives in the llama.cpp integration sources
+shipped under `argus_cache/csrc/` (`ggml_*`, `ggml_kv_policy.*`, `ggml_profile.h`)
+and is built into llama.cpp by the integration in `integrations/llama.cpp/`.
+
+### Added
+- **Opt-in KV placement policy** (`ARGUS_KV_POLICY=on`, default off). Pages
+  promote to GPU, pinned or pageable RAM within the store-owned tier budgets and
+  demote under pressure; refusals are counted. Content and placement are separate
+  revision axes.
+- **GPU-resident CUDA attention for prefill.** GPU pages are read in place
+  through a locked pointer table in one kernel launch per attention invocation.
+  Written pages on other tiers are checksum-verified and copied into bounded
+  per-invocation scratch, which never changes placement, revisions or access
+  history. If the scratch does not fit, the invocation falls back to the staged
+  path.
+- **Exact kernels.** A D=64 specialization, one page lookup per K/V row, and a
+  lane-per-cell kernel that scores 32 cells in parallel. Its cell-order
+  `sum`/`acc` FFMA chains and branch-free value loop keep float-vector equality
+  with the staged reference. The reference kernels stay selectable through
+  `ARGUS_KV_ATTENTION_PATH=staged|direct|batched|cells`.
+- **Eligibility counters and a residency census** (census under
+  `ARGUS_KV_PROFILE`) explaining why an invocation does or does not take the
+  resident path.
+
+### Measured (one workload only)
+Qwen2.5-0.5B-Instruct Q4_K_M, F16 KV, 4K context, RTX 3050 Ti Laptop, profiler off,
+three repeats. Prefill: stock-host 1.332 s, ARGUS with all KV GPU-resident 2.821 s
+(2.12x stock), ARGUS policy on 9.888 s (7.42x stock). Same workload before these
+changes: 12.760 s and 48.319 s. ARGUS remains slower than stock llama.cpp.
+Decode is unchanged. Nothing beyond 4K was run, and 262K remains open.
+See `docs/measurements/v060-*`.
+
+Local suite with CUDA and native llama.cpp checks: 401 passed, 3 skipped.
+
 ## v0.5.2 — One copy of every module
 
 ### Removed

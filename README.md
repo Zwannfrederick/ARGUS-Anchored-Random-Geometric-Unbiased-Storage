@@ -10,9 +10,13 @@ underneath one, owning where each KV page lives and at what precision. The
 deepest integration is llama.cpp, where ARGUS owns the KV allocation, the page
 writes and the attention reads.
 
-**Status: v0.5.2. The mechanism works and is proven byte-exact. The policy that
-decides where pages should go does not exist yet — that is v0.6.** Every
-performance number below is therefore a cost measurement, not a win.
+**Status: v0.6.0. An opt-in placement policy decides where llama.cpp KV pages
+live, and a GPU-resident CUDA attention path reads them in place, bit-exact with
+the staged reference.** On the one workload measured so far (4K context,
+Qwen2.5-0.5B, RTX 3050 Ti Laptop) ARGUS is still **slower than stock llama.cpp**:
+2.12x stock prefill time with GPU-resident KV, 7.42x with the policy placing
+pages across GPU and disk. Every performance number below is a cost measurement,
+not a win.
 
 [![packaging](https://github.com/Zwannfrederick/ARGUS-Anchored-Random-Geometric-Unbiased-Storage/actions/workflows/packaging.yml/badge.svg)](https://github.com/Zwannfrederick/ARGUS-Anchored-Random-Geometric-Unbiased-Storage/actions/workflows/packaging.yml)
 
@@ -30,12 +34,13 @@ row is open, not pending publication.
 | KV pages migrate GPU ↔ pinned ↔ pageable ↔ disk, source-preserving | Proven | [CUDA mechanism](docs/measurements/v050-cuda-mechanism-2026-09-16.json) |
 | VRAM saving on the HuggingFace path grows with context | Proven, v0.4 | [downstream](docs/measurements/downstream-2026-08-14.json) |
 | Precision trades memory for latency, monotonically | Proven, engine in isolation | [fused attention](docs/measurements/v040-fused-attention-benchmark.json) |
-| ARGUS is faster than the runtime it sits under | **Not measured** — and not claimed | — |
-| ARGUS at a realistic operating point | **Not measured**, and impossible before v0.6 | see [Why there is no speed result](#why-there-is-no-speed-result) |
+| ARGUS is faster than the runtime it sits under | **No**, on the only measured workload: 4K prefill 2.12x (GPU-resident) and 7.42x (policy on) stock time | [v0.6 at 4K](#v06-the-first-operating-point-4k) |
+| Opt-in placement policy promotes pages within tier budgets | Proven at 4K; policy-on and staged paths make identical policy decisions | [residency census](docs/measurements/v060-residency-census-2026-09-18.md), [mixed resident](docs/measurements/v060-mixed-resident-2026-09-18.md) |
+| GPU-resident CUDA attention is bit-exact with the staged reference | Proven (float-vector equality, adversarial masks, mutation-checked) | [lane-per-cell kernel](docs/measurements/v060-kernel-cells-2026-09-18.md) |
 | Long-context throughput at 262K | **Not measured**, deferred | [v0.6 plan](plans/argus-v0.6.0.md) |
 | Quality under INT4, INT2, 1-bit or JL tiers | **Not measured** | only FP8 was reached, see [Quality](#quality) |
 
-Local suite on the development machine: **383 passed, 13 skipped**. The CI badge
+Local suite on the development machine: **401 passed, 3 skipped**. The CI badge
 above covers packaging and repository hygiene only — hosted runners have no CUDA
 device, so a green badge means the package ships the right files, not that ARGUS
 works.
@@ -174,10 +179,37 @@ ever used, because nothing decides to use them. Note also that
 for 256 MiB of KV — not a KV working set.
 
 **This is the cost of having no placement policy.** It is not a tuned
-configuration, not a starved one, and not an operating point. This repository
-holds no ARGUS measurement at a realistic operating point, and none can exist
-before automatic placement lands in v0.6. Closing this gap is the entire purpose
-of v0.6; it is not a v0.5 claim.
+configuration, not a starved one, and not an operating point. v0.6 added the
+policy and a resident attention path; its first operating-point measurement
+follows.
+
+## v0.6: the first operating point (4K)
+
+Qwen2.5-0.5B-Instruct Q4_K_M, F16 KV, 4096 context, 4016-token prompt, 16
+generated tokens, ubatch 64, RTX 3050 Ti Laptop (4 GB), llama.cpp with KV on the
+host (`-nkvo`) for every mode. Profiler off, three repeats in alternating order;
+median (min–max). Output is identical across ARGUS modes and paths.
+
+| mode | prefill | vs stock | decode |
+|---|---:|---:|---:|
+| stock llama.cpp, host KV | 1.332 s (1.326–1.335) | 1.00x | 37.3 tok/s |
+| ARGUS, all KV GPU-resident (diagnostic control) | 2.821 s (2.779–2.873) | 2.12x | 8.0 tok/s |
+| ARGUS, policy on (GPU + disk placement) | 9.888 s (9.779–9.929) | 7.42x | 6.4 tok/s |
+
+How that moved during v0.6, same workload (GPU-resident control prefill): staged
+scalar attention 40.9 s → one batched launch per invocation 12.8 s → D=64
+specialization 5.5 s → lane-per-cell exact kernel 3.7 s → branch-free value loop
+2.8 s. Policy-on went from 48.3 s to 9.9 s once one freshly written cold page no
+longer forced a whole invocation onto the staged path. Every step kept exact
+float-vector parity with the staged kernel, and its cause was confirmed by
+measurement (Nsight Compute for the last two kernel steps).
+
+What this does not show: decode is unchanged (still the staged path, 4.7x slower
+than stock), the policy-on gap is dominated by verified disk write-through, and
+nothing above 4K or on another model or GPU has been measured. Details:
+[checkpoint](docs/measurements/v060-checkpoint-2026-09-18.md),
+[kernel steps](docs/measurements/v060-kernel-cells-mlp-2026-09-18.md),
+[Nsight Compute attribution](docs/measurements/v060-ncu-cells-2026-09-18.md).
 
 ## The HuggingFace research path (v0.4)
 
@@ -318,28 +350,35 @@ see [`docs/vllm-verification.md`](docs/vllm-verification.md).
 
 # Roadmap
 
-## v0.6 — the placement policy
+## v0.6 — the placement policy (released)
 
-**Nothing in this section is implemented.** It is a decided contract, recorded
-in [`plans/argus-v0.6.0.md`](plans/argus-v0.6.0.md), that v0.6 implements.
+Implemented as recorded in [`plans/argus-v0.6.0.md`](plans/argus-v0.6.0.md):
 
-- **The policy is a module above the store.** The store keeps the mechanism;
-  `ARGUS_KV_POLICY=off` reproduces v0.5 by deciding nothing, not through a
-  second code path.
-- **Content and placement become separate revision axes.** Today one store-wide
-  counter is bumped by both writes and migrations, so a byte-preserving,
-  checksum-verified move cancels an in-flight prefetch, and a write anywhere in
-  the store drops a migration.
+- **The policy is a module above the store** (`ARGUS_KV_POLICY=on`, off by
+  default). The store keeps the mechanism; `off` reproduces v0.5 by deciding
+  nothing, not through a second code path.
+- **Content and placement are separate revision axes.** A byte-preserving,
+  checksum-verified move no longer cancels an in-flight prefetch, and a write
+  elsewhere in the store no longer drops a migration.
 - **The store owns budgets.** Policy proposes; the store verifies or refuses
   explicitly, and refusals are counted rather than swallowed.
-- **The first policy selects placement only.** Precision is defined but off,
-  under the rule that precision reduction is one-way per page: promoting a q4
-  page to f16 yields dequantized q4, never the original, and no policy may
-  report that as recovered quality.
+- **The policy selects placement only.** Precision is defined but off, under the
+  rule that precision reduction is one-way per page: promoting a q4 page to f16
+  yields dequantized q4, never the original, and no policy may report that as
+  recovered quality.
+- **Attention stages, it does not place.** Pages that are not GPU-resident are
+  copied into per-invocation scratch for one read; that never changes placement,
+  revisions or access history.
 
-The 262K benchmark baseline, quality tolerance and success metric are
-deliberately still open. Measurement follows the policy, because without
-promotion there is no placement behaviour to measure.
+v0.6 also added the GPU-resident attention datapath measured above. The 262K
+benchmark baseline, quality tolerance and success metric are still open and were
+not run.
+
+## v0.7 — closing the measured gap
+
+Experimental optimization, one measured causal factor at a time, exact by
+default: first the GPU-resident 4K prefill gap to stock (attention and
+everything around it), then the policy-on runtime cost, then decode.
 
 ## Known limits
 
@@ -349,8 +388,9 @@ promotion there is no placement behaviour to measure.
   still carries per-page launch overhead.
 - `DirectPagedAttentionEngine` is measured in isolation and is not wired into
   the HuggingFace decode path.
-- The Python `PageStore` and the native store are separate; they are unified
-  only if the v0.6 contract requires it.
+- The Python `PageStore` and the native store are separate.
+- The llama.cpp resident attention fast path covers prefill (Q>1) with F16 KV;
+  its fastest kernel requires head dimension 64. Decode uses the staged path.
 - CPU-spill latency under real memory pressure and multi-user throughput are
   unmeasured.
 - Predictive paging is experimental and disabled by default.
