@@ -11,6 +11,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <future>
 #include <random>
 #include <stdexcept>
 #include <string>
@@ -143,7 +144,7 @@ int main(int argc, char ** argv) try {
     setenv("ARGUS_KV_RAM_BYTES", "1048576", 1);
     const int d = argc == 3 ? std::stoi(argv[2]) : 64;
     require(d == 48 || d == 64 || d == 256);
-    const int heads = 4, kv_heads = 2, cells = 97, tokens = 3;
+    const int heads = d == 64 ? 6 : 4, kv_heads = 2, cells = 97, tokens = 3;
     auto * ctx = ggml_init({1 << 20, nullptr, true});
     auto * k = ggml_new_tensor_3d(ctx, GGML_TYPE_F16, d, kv_heads, cells);
     auto * v = ggml_new_tensor_3d(ctx, GGML_TYPE_F16, d, kv_heads, cells);
@@ -258,14 +259,14 @@ int main(int argc, char ** argv) try {
             double maximum = -INFINITY, sum = 0;
             for (int c = 0; c < cells; ++c) {
                 double dot = 0;
-                for (int i = 0; i < d; ++i) { dot += query[(t * heads + h) * d + i] * double(ggml_fp16_to_fp32(keys[(c * kv_heads + h / 2) * d + i])); }
+                for (int i = 0; i < d; ++i) { dot += query[(t * heads + h) * d + i] * double(ggml_fp16_to_fp32(keys[(c * kv_heads + h / (heads / kv_heads)) * d + i])); }
                 scores[c] = dot / std::sqrt(double(d)) + ggml_fp16_to_fp32(bias[t * cells + c]);
                 maximum = std::max(maximum, scores[c]);
             }
             if (t) { for (auto score : scores) { sum += std::exp(score - maximum); } }
             for (int i = 0; i < d; ++i) {
                 double expected = 0;
-                if (t) { for (int c = 0; c < cells; ++c) { expected += std::exp(scores[c] - maximum) / sum * ggml_fp16_to_fp32(values[(c * kv_heads + h / 2) * d + i]); } }
+                if (t) { for (int c = 0; c < cells; ++c) { expected += std::exp(scores[c] - maximum) / sum * ggml_fp16_to_fp32(values[(c * kv_heads + h / (heads / kv_heads)) * d + i]); } }
                 const float actual = first[(t * heads + h) * d + i];
                 require(std::isfinite(actual));
                 error = std::max(error, std::abs(actual - expected));
@@ -305,7 +306,10 @@ int main(int argc, char ** argv) try {
         auto * shifted_v = ggml_view_3d(resident_ctx, rv, d, kv_heads, cells - 1, rv->nb[1], rv->nb[2], 2);
         auto * float_mask = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, cells, tokens);
         std::vector<float> float_bias(bias.size());
-        for (size_t i = 0; i < bias.size(); ++i) { float_bias[i] = ggml_fp16_to_fp32(bias[i]); }
+        for (size_t i = 0; i < bias.size(); ++i) {
+            float_bias[i] = ggml_fp16_to_fp32(bias[i]);
+            if (std::isfinite(float_bias[i])) { float_bias[i] += float(i % 7) * 0.125f; }
+        }
         ArgusTierBuffer float_mask_gpu(ArgusTier::gpu, float_bias.size() * sizeof(float));
         float_mask_gpu.write(float_bias.data(), float_bias.size() * sizeof(float));
         float_mask->data = float_mask_gpu.data();
@@ -319,20 +323,73 @@ int main(int argc, char ** argv) try {
             compute(result, 0, nullptr);
             output_gpu.read(second.data(), 0, second.size() * sizeof(float));
             const auto after_staged = argus_disk_page_descriptor(test_k, 0).access_count;
-            setenv("ARGUS_KV_ATTENTION_PATH", "direct", 1);
-            const auto copies = argus_profile::d2d_bytes[argus_profile::prefill].load();
+            for (const auto * path : {"direct", "batched"}) {
+                setenv("ARGUS_KV_ATTENTION_PATH", path, 1);
+                const auto before_direct = argus_disk_page_descriptor(test_k, 0).access_count;
+                const auto copies = argus_profile::d2d_bytes[argus_profile::prefill].load();
+                compute(result, 0, nullptr);
+                std::vector<float> direct(second.size());
+                output_gpu.read(direct.data(), 0, direct.size() * sizeof(float));
+                if (direct != second) {
+                    for (size_t i = 0; i < direct.size(); ++i) if (direct[i] != second[i]) {
+                        std::fprintf(stderr, "resident mismatch D=%d path=%s shifted=%d mask=%d index=%zu actual=%a expected=%a\n",
+                            d, path, shifted, int(test_mask->type), i, direct[i], second[i]);
+                        break;
+                    }
+                }
+                require(direct == second); // No relaxation of the original stored-value reference gate.
+                require(argus_profile::d2d_bytes[argus_profile::prefill] == copies);
+                require(argus_disk_page_descriptor(test_k, 0).access_count - before_direct == after_staged - before_staged);
+            }
+        }
+        if (d == 64) {
+            // Distinct K/V stores and Dk != Dv exercise both lock and address paths.
+            auto * value_ctx = ggml_init({1 << 20, nullptr, true});
+            auto * narrow_v = ggml_new_tensor_3d(value_ctx, GGML_TYPE_F16, 48, kv_heads, cells);
+            setenv("ARGUS_KV_GPU_CONTROL", "1", 1);
+            auto * value_store = ggml_backend_alloc_ctx_tensors_from_buft(value_ctx, argus_ggml_disk_buffer_type());
+            unsetenv("ARGUS_KV_GPU_CONTROL");
+            require(value_store);
+            ggml_backend_tensor_set(narrow_v, values.data(), 0, ggml_nbytes(narrow_v));
+            auto * result = argus_ggml_cuda_attention(ctx, q, rk, narrow_v, float_mask, 0.125f);
+            result->data = output_gpu.data();
+            std::vector<float> expected(48 * heads * tokens), actual(expected.size());
+            setenv("ARGUS_KV_ATTENTION_PATH", "staged", 1);
             compute(result, 0, nullptr);
-            std::vector<float> direct(second.size());
-            output_gpu.read(direct.data(), 0, direct.size() * sizeof(float));
-            require(direct == second); // No relaxation of the original stored-value reference gate.
-            require(argus_profile::d2d_bytes[argus_profile::prefill] == copies);
-            require(argus_disk_page_descriptor(test_k, 0).access_count - after_staged == after_staged - before_staged);
+            output_gpu.read(expected.data(), 0, expected.size() * sizeof(float));
+            setenv("ARGUS_KV_ATTENTION_PATH", "batched", 1);
+            compute(result, 0, nullptr);
+            output_gpu.read(actual.data(), 0, actual.size() * sizeof(float));
+            require(actual == expected);
+            ggml_backend_buffer_free(value_store);
+            ggml_free(value_ctx);
         }
         std::vector<const void *> pointers(2 * ((keys.size() * 2 + 4095) / 4096));
         const auto accesses = argus_disk_page_descriptor(rk, 0).access_count;
         refuses([&] { argus_disk_read_resident(rk, rv, pointers.data(), pointers.size(),
             [](size_t, size_t, void *) { throw std::runtime_error("consumer failed"); }, nullptr); });
         require(argus_disk_page_descriptor(rk, 0).access_count == accesses);
+        // A concurrent writer cannot replace/free borrowed GPU pages.
+        std::promise<void> entered, attempted;
+        auto started = entered.get_future();
+        auto attempting = attempted.get_future();
+        auto writer = std::async(std::launch::async, [&] {
+            started.wait(); attempted.set_value();
+            ggml_backend_tensor_set(rk, keys.data(), 0, sizeof(ggml_fp16_t));
+        });
+        struct Race { std::promise<void> & entered; std::future<void> & attempting, & writer; } race{entered, attempting, writer};
+        require(argus_disk_read_resident(rk, rv, pointers.data(), pointers.size(), [](size_t, size_t, void * context) {
+            auto & race = *static_cast<Race *>(context);
+            race.entered.set_value(); race.attempting.wait();
+            require(race.writer.wait_for(std::chrono::milliseconds(20)) == std::future_status::timeout);
+        }, &race));
+        writer.get();
+        auto * one_query = ggml_view_3d(ctx, q, d, heads, 1, q->nb[1], q->nb[2], q->nb[2]);
+        auto * decode = argus_ggml_cuda_attention(ctx, one_query, rk, rv, float_mask, 0.125f);
+        decode->data = output_gpu.data();
+        const auto resident_decodes = argus_profile::resident_calls[argus_profile::decode].load();
+        compute(decode, 0, nullptr);
+        require(argus_profile::resident_calls[argus_profile::decode] == resident_decodes);
         ggml_backend_buffer_clear(resident_store, 0);
         auto * zeros = argus_ggml_cuda_attention(ctx, q, rk, rv, mask, 1.0f);
         zeros->data = output_gpu.data();

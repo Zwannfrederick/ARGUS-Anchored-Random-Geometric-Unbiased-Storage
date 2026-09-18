@@ -235,9 +235,10 @@ publication; the request residual is reported separately, not labelled GPU time.
 GPU-authoritative store with policy off. Written KV pages have no backing file
 and cannot migrate away from GPU; payload disk read/write counters must remain
 zero. Writes still use the same CPU set_rows conversion and separately budgeted,
-verified GPU page replacement. Attention still traverses the same page lookup,
-double-buffered staging, 32-cell kernel and synchronization path. Masked unwritten
-padding may stage zeros from the host. This isolates disk placement; it is not a
+verified GPU page replacement. At the 89eaf06 attribution baseline, attention traverses the same page lookup,
+double-buffered staging, 32-cell kernel and synchronization path. The resident
+prefill optimization below now bypasses staging; decode retains that reference
+path. Masked unwritten padding retains logical-zero semantics. This isolates disk placement; it is not a
 durability feature or a proposed optimized production path. Stats/model/log I/O
 are outside the zero-KV-payload-I/O claim. The full KV plus scratch and replacement
 page must fit the GPU budget or the run fails. Use 64 MiB GPU/pinned for the 4K
@@ -248,12 +249,14 @@ records paired profiler-disabled/event runs, CPU-only scopes, the original
 2 MiB pressure point, and the GPU-only control. It separates overlapping timers
 and observed measurement overhead; it does not claim 262K validation.
 
-Resident prefill now has a direct pointer-table path (`ARGUS_KV_ATTENTION_PATH=direct`,
-or `--attention-path direct` in the ladder); `staged` retains the reference path.
+Resident prefill defaults to a batched pointer-table path
+(`ARGUS_KV_ATTENTION_PATH=batched`, or `--attention-path batched` in the ladder).
+`direct` retains the intermediate 32-cell resident kernel; `staged` retains the
+reference path for controlled comparisons.
 Only Q>1 F16 attention with every written K/V page on GPU is eligible. Unwritten
 pages retain logical-zero semantics. The registry and both source stores stay
 locked until the compute stream completes, protecting against writes, migration
-and teardown. Pointer tables and state are charged to staging/GPU budgets. Read
+and teardown. Pointer tables and optional scalar-path state are charged to staging/GPU budgets. Read
 history is recorded with the same 32-cell access granularity as staged attention;
 placement-policy decisions are unchanged. Decode and non-resident K/V fall back.
 
@@ -264,6 +267,15 @@ the fresh [89eaf06 reference](../../docs/measurements/v060-datapath-before-2026-
 This single profiled pair is not evidence of a material speedup; it exposes the
 remaining scalar-kernel bottleneck. Decode still uses the staged path and this
 sample is slower (3.49 versus 5.02 tok/s), so no decode improvement is claimed.
+
+The [batched-path report](../../docs/measurements/v060-datapath-2026-09-18.md)
+records the next optimization: four query/head warps per block process the full
+context in one invocation per attention call, preserving the staged FP32
+reduction and FMA order. Profiled prefill drops to 12.51 seconds with 1512 kernel
+launches and zero payload D2D. One completion wait protects the page lease and
+pointer table. Decode and non-resident inputs retain staged attention; the
+redundant transfer-stream teardown wait is removed because each staging read
+already drains its copies. This is a 4K datapath improvement, not 262K acceptance.
 
 Contiguous `set_rows` writes now share the existing page-rounded encoding
 buffer. A gap, repeated index, full buffer or strided target flushes the batch.
