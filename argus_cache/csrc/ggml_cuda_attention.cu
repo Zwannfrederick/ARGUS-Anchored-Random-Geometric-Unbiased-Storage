@@ -265,21 +265,27 @@ bool try_resident(ggml_tensor * dst, cudaStream_t stream, size_t state_bytes) {
     if (path && std::strcmp(path, "staged") != 0 && std::strcmp(path, "direct") != 0 && std::strcmp(path, "batched") != 0) {
         throw std::invalid_argument("ARGUS_KV_ATTENTION_PATH must be staged, direct or batched");
     }
-    if (dst->src[0]->ne[2] <= 1 || (path && std::strcmp(path, "staged") == 0)) { return false; }
+    using namespace argus_profile;
+    if (dst->src[0]->ne[2] <= 1) { reject(reject_q1); return false; }
+    if (path && std::strcmp(path, "staged") == 0) { reject(reject_forced_staged); return false; }
     const bool batched = !path || std::strcmp(path, "batched") == 0;
     if (batched) { state_bytes = 0; }
     size_t count = 0;
     for (auto * tensor : {dst->src[1], dst->src[2]}) {
-        if (reinterpret_cast<uintptr_t>(tensor->data) % sizeof(half)) { return false; }
+        if (reinterpret_cast<uintptr_t>(tensor->data) % sizeof(half)) { reject(reject_alignment); return false; }
         count += (reinterpret_cast<uintptr_t>(tensor->data) % 4096 + ggml_nbytes(tensor) + 4095) / 4096;
     }
     const size_t bytes = aligned(count * sizeof(void *));
     const auto budget = argus_tier_budget(ArgusTier::gpu);
-    if (bytes + state_bytes > budget.limit || budget.live > budget.limit - bytes - state_bytes ||
-        2 * bytes + state_bytes > argus_disk_staging_limit()) { return false; }
+    if (bytes + state_bytes > budget.limit || budget.live > budget.limit - bytes - state_bytes) {
+        reject(reject_gpu_table_budget); return false;
+    }
+    if (2 * bytes + state_bytes > argus_disk_staging_limit()) { reject(reject_staging_budget); return false; }
     ArgusStagingBuffer table(bytes);
     ResidentRequest request{dst, stream, static_cast<const void **>(table.data()), state_bytes, batched};
-    return argus_disk_read_resident(dst->src[1], dst->src[2], request.table, count, resident_compute, &request);
+    if (!argus_disk_read_resident(dst->src[1], dst->src[2], request.table, count, resident_compute, &request)) { return false; }
+    ++resident_accepted[phase];
+    return true;
 }
 
 void compute_impl(ggml_tensor * dst, int device, void * raw_stream) {

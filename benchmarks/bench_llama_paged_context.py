@@ -195,7 +195,8 @@ def run_one(args, mode, context):
             result["argus"] = json.loads(stats_path.read_text())
             counters = ("read_bytes", "written_bytes", "committed_pages", "cuda_attention_calls",
                         "policy_promotions", "policy_demotions", "policy_rejected", "policy_nanoseconds")
-            counters += tuple(k for k in result["argus"] if k.startswith("profile_"))
+            counters += tuple(k for k in result["argus"] if k.startswith(("profile_", "resident_", "census_"))
+                               and not k.endswith("max_cold_pages"))
             result["argus_delta"] = {k: result["argus"][k] - before.get(k, 0)
                                      for k in counters if k in result["argus"]}
         if result["prompt_tokens"] != len(prompt) or result["truncated"]:
