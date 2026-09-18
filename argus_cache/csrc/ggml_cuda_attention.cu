@@ -229,12 +229,121 @@ __global__ void attention_resident_batch(const char * query, const char * mask, 
     }
 }
 
+// Lane-per-cell variant of attention_resident_batch<64, true>, bit-exact with it and
+// the default for eligible views (D=64, rows aligned to their size).
+// One warp still owns one query row; each 32-cell tile is split into
+//  1. parallel scores: lane c computes cell c's dot product with the identical
+//     tree (p_i + p_{i+32}, then strides 16, 8, 4, 2, 1 — the former lane/shuffle
+//     tree run inside one thread; IEEE addition is commutative, so operand order
+//     inside each addition is irrelevant) and the same fmaf(dot, scale, bias);
+//  2. running maximum as a warp prefix scan: the value of an fmaxf fold does not
+//     depend on its order (NaN operands are ignored either way; only the sign of
+//     a zero may differ, and maxima are only ever subtracted, where +0/-0 give
+//     equal differences), then each lane's alpha/beta with the same expf inputs;
+//  3. the only order-dependent arithmetic, unchanged: sum and acc[d] advance
+//     cell by cell through the same __fmaf_rn chains, skipping masked cells.
+__global__ void attention_resident_cells(const char * query, const char * mask, bool half_mask,
+        float * output, int heads, int kv_heads, int tokens, int cells,
+        size_t q_head, size_t q_token, size_t mask_cell, size_t mask_token, float scale, ResidentKV pages) {
+    constexpr int D = 64;
+    __shared__ float query_tile[4][D];
+    __shared__ float2 weights[4][32];
+    __shared__ const half * value_rows[4][32];
+    const int warp = threadIdx.x / 32, lane = threadIdx.x % 32, row = blockIdx.x * 4 + warp;
+    if (row >= heads * tokens) { return; }
+    const int head = row % heads, token = row / heads, kv_head = head / (heads / kv_heads);
+    const auto * q = reinterpret_cast<const float *>(query + head * q_head + token * q_token);
+    query_tile[warp][lane] = q[lane];
+    query_tile[warp][lane + 32] = q[lane + 32];
+    __syncwarp();
+    const float * qs = query_tile[warp];
+    float acc[2]{}, maximum = -INFINITY, sum = 0.0f;
+    for (int base = 0; base < cells; base += 32) {
+        const int cell = base + lane;
+        float bias = -INFINITY;
+        if (cell < cells) {
+            const char * entry = mask + size_t(cell) * mask_cell + token * mask_token;
+            bias = half_mask ? __half2float(*reinterpret_cast<const half *>(entry)) : *reinterpret_cast<const float *>(entry);
+        }
+        const bool live = bias != -INFINITY;
+        const unsigned active = __ballot_sync(0xffffffff, live);
+        if (!active) { continue; }
+        float score = -INFINITY;
+        if (live) {
+            const size_t at = (size_t(cell) * kv_heads + kv_head) * D * sizeof(half);
+            const half * key_row = page_row(pages.keys, pages.key_offset + at);
+            value_rows[warp][lane] = page_row(pages.values, pages.value_offset + at);
+            // Rows are 128-byte aligned inside their page (host check), so 16-byte loads are safe.
+            const auto * chunks = reinterpret_cast<const uint4 *>(key_row);
+            float half_sums[16];
+            #pragma unroll
+            for (int m = 0; m < 2; ++m) {
+                // k[8m..8m+7], k[+16], k[+32], k[+48]: enough for half_sums[8m..8m+7].
+                uint4 packed[4]{};
+                if (key_row) { for (int r = 0; r < 4; ++r) { packed[r] = __ldg(chunks + m + 2 * r); } }
+                #pragma unroll
+                for (int e = 0; e < 8; ++e) {
+                    const int i = 8 * m + e;
+                    float k[4];
+                    #pragma unroll
+                    for (int r = 0; r < 4; ++r) {
+                        const half2 pair = reinterpret_cast<const half2 *>(&packed[r])[e / 2];
+                        k[r] = e % 2 ? __high2float(pair) : __low2float(pair);
+                    }
+                    // Former lane i: t_i = p_i + p_{i+32}; former lane i+16: t_{i+16}; then stride 16.
+                    const float low = __fadd_rn(__fmul_rn(qs[i], k[0]), __fmul_rn(qs[i + 32], k[2]));
+                    const float high = __fadd_rn(__fmul_rn(qs[i + 16], k[1]), __fmul_rn(qs[i + 48], k[3]));
+                    half_sums[i] = __fadd_rn(low, high);
+                }
+            }
+            #pragma unroll
+            for (int width = 8; width; width /= 2) {
+                #pragma unroll
+                for (int i = 0; i < width; ++i) { half_sums[i] = __fadd_rn(half_sums[i], half_sums[i + width]); }
+            }
+            score = __fmaf_rn(half_sums[0], scale, bias);
+        }
+        // Inclusive fmaxf scan; masked lanes contribute -inf, the fmaxf identity here
+        // (the running maximum is never NaN: fmaxf only returns NaN for two NaNs).
+        float scan = score;
+        #pragma unroll
+        for (int offset = 1; offset < 32; offset *= 2) {
+            const float other = __shfl_up_sync(0xffffffff, scan, offset);
+            if (lane >= offset) { scan = fmaxf(scan, other); }
+        }
+        const float before = __shfl_up_sync(0xffffffff, scan, 1);
+        if (live) {
+            const float previous = lane ? fmaxf(maximum, before) : maximum;
+            const float next = fmaxf(previous, score);
+            weights[warp][lane] = make_float2(expf(previous - next), expf(score - next));
+        }
+        maximum = fmaxf(maximum, __shfl_sync(0xffffffff, scan, 31));
+        __syncwarp();
+        #pragma unroll 4
+        for (int c = 0; c < 32; ++c) {
+            if (!(active >> c & 1)) { continue; }
+            const float2 weight = weights[warp][c];
+            const half * value_row = value_rows[warp][c];
+            sum = __fmaf_rn(weight.x, sum, weight.y);
+            #pragma unroll
+            for (int j = 0; j < 2; ++j) {
+                const float value = value_row ? __half2float(__ldg(value_row + lane + j * 32)) : 0.0f;
+                acc[j] = __fmaf_rn(weight.x, acc[j], __fmul_rn(weight.y, value));
+            }
+        }
+        __syncwarp();
+    }
+    #pragma unroll
+    for (int j = 0; j < 2; ++j) { output[row * D + lane + j * 32] = sum > 0 ? acc[j] / sum : 0.0f; }
+}
+
 struct ResidentRequest {
     ggml_tensor * dst;
     cudaStream_t stream;
     const void ** table;
     size_t state_bytes;
     bool batched;
+    bool cells = false;
     size_t table_bytes = 0;
     // Written non-GPU pages copied for this invocation only (see ArgusColdStaging).
     std::unique_ptr<ArgusStagingBuffer> cold_host;
@@ -289,11 +398,19 @@ void resident_compute(size_t k_pages, size_t v_pages, void * raw) {
     if (request.batched) {
         const bool d64 = q->ne[0] == 64 && v->ne[0] == 64;
         const bool rows = pages.key_offset % (64 * sizeof(half)) == 0 && pages.value_offset % (64 * sizeof(half)) == 0;
+        if (request.cells && d64 && rows) {
+            attention_resident_cells<<<(q->ne[1] * q->ne[2] + 3) / 4, 128, 0, request.stream>>>(
+                static_cast<const char *>(q->data), static_cast<const char *>(mask->data), mask->type == GGML_TYPE_F16,
+                static_cast<float *>(dst->data), q->ne[1], k->ne[1], q->ne[2], k->ne[2],
+                q->nb[1], q->nb[2], mask->nb[0], mask->nb[1], scale, pages);
+            ++argus_profile::resident_cell_kernel[argus_profile::phase];
+        } else {
         const auto kernel = !d64 ? attention_resident_batch<0> : rows ? attention_resident_batch<64, true> : attention_resident_batch<64>;
         kernel<<<(q->ne[1] * q->ne[2] + 3) / 4, 128, 0, request.stream>>>(
             static_cast<const char *>(q->data), static_cast<const char *>(mask->data), mask->type == GGML_TYPE_F16,
             static_cast<float *>(dst->data), q->ne[0], v->ne[0], q->ne[1], k->ne[1], q->ne[2], k->ne[2],
             q->nb[1], q->nb[2], mask->nb[0], mask->nb[1], scale, pages);
+        }
         check(cudaGetLastError());
         if (argus_profile::enabled()) { ++argus_profile::kernel_launches[argus_profile::phase]; }
     } else for (int64_t first = 0; first < k->ne[2]; first += 32) {
@@ -319,13 +436,16 @@ void resident_compute(size_t k_pages, size_t v_pages, void * raw) {
 
 bool try_resident(ggml_tensor * dst, cudaStream_t stream, size_t state_bytes) {
     const char * path = std::getenv("ARGUS_KV_ATTENTION_PATH");
-    if (path && std::strcmp(path, "staged") != 0 && std::strcmp(path, "direct") != 0 && std::strcmp(path, "batched") != 0) {
-        throw std::invalid_argument("ARGUS_KV_ATTENTION_PATH must be staged, direct or batched");
+    // Default (and "cells"): batched, with the lane-per-cell D=64 kernel where it applies.
+    // "batched" keeps the warp-per-cell kernel as the control/reference.
+    const bool cells = !path || std::strcmp(path, "cells") == 0;
+    if (path && !cells && std::strcmp(path, "staged") != 0 && std::strcmp(path, "direct") != 0 && std::strcmp(path, "batched") != 0) {
+        throw std::invalid_argument("ARGUS_KV_ATTENTION_PATH must be staged, direct, batched or cells");
     }
     using namespace argus_profile;
     if (dst->src[0]->ne[2] <= 1) { reject(reject_q1); return false; }
     if (path && std::strcmp(path, "staged") == 0) { reject(reject_forced_staged); return false; }
-    const bool batched = !path || std::strcmp(path, "batched") == 0;
+    const bool batched = !path || cells || std::strcmp(path, "batched") == 0;
     if (batched) { state_bytes = 0; }
     size_t count = 0;
     for (auto * tensor : {dst->src[1], dst->src[2]}) {
@@ -341,6 +461,7 @@ bool try_resident(ggml_tensor * dst, cudaStream_t stream, size_t state_bytes) {
     ArgusStagingBuffer table(bytes);
     ResidentRequest request{dst, stream, static_cast<const void **>(table.data()), state_bytes, batched};
     request.table_bytes = bytes;
+    request.cells = cells;
     static constexpr ArgusColdStaging cold{reserve_cold, upload_cold};
     if (!argus_disk_read_resident(dst->src[1], dst->src[2], request.table, count, resident_compute, &request, &cold)) { return false; }
     request.cold_drain.pending = false; // resident_compute drained the stream.

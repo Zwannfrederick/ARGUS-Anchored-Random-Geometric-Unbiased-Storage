@@ -249,16 +249,20 @@ records paired profiler-disabled/event runs, CPU-only scopes, the original
 2 MiB pressure point, and the GPU-only control. It separates overlapping timers
 and observed measurement overhead; it does not claim 262K validation.
 
-Resident prefill defaults to a batched pointer-table path
-(`ARGUS_KV_ATTENTION_PATH=batched`, or `--attention-path batched` in the ladder).
-`direct` retains the intermediate 32-cell resident kernel; `staged` retains the
-reference path for controlled comparisons.
-Only Q>1 F16 attention with every written K/V page on GPU is eligible. Unwritten
-pages retain logical-zero semantics. The registry and both source stores stay
-locked until the compute stream completes, protecting against writes, migration
-and teardown. Pointer tables and optional scalar-path state are charged to staging/GPU budgets. Read
-history is recorded with the same 32-cell access granularity as staged attention;
-placement-policy decisions are unchanged. Decode and non-resident K/V fall back.
+Resident prefill defaults to a single-launch pointer-table path; for D=64 views whose
+rows are aligned to their size it uses the lane-per-cell kernel (`cells`). Controlled
+comparisons (`ARGUS_KV_ATTENTION_PATH`, or `--attention-path` in the ladder):
+`batched` keeps the warp-per-cell kernel, `direct` the intermediate 32-cell resident
+kernel and `staged` the reference path. All are bit-exact with `staged`.
+Q>1 F16 attention is eligible. GPU pages are read in place; written pages on other
+tiers are checksum-verified and copied into bounded per-invocation scratch (not a
+placement change); if that scratch does not fit, the invocation falls back to staged.
+Unwritten pages retain logical-zero semantics. The registry and both source stores
+stay locked until the compute stream completes, protecting against writes, migration
+and teardown. Pointer tables, cold-page scratch and optional scalar-path state are
+charged to staging/GPU budgets. Read history is recorded with the same 32-cell access
+granularity as staged attention; placement-policy decisions are unchanged. Decode
+falls back to staged.
 
 The first [direct-path measurement](../../docs/measurements/v060-datapath-direct-2026-09-18.json)
 eliminates prefill payload D2D (0 bytes) and cuts explicit waits to 1512, but still

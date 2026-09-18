@@ -37,6 +37,8 @@ inline constexpr const char * reject_names[] = {"q1", "forced_staged", "alignmen
     "staging_budget", "codec", "nonresident_key_page", "nonresident_value_page", "cold_scratch_budget"};
 // cold_pages: written non-GPU pages staged into scratch for accepted invocations.
 inline std::atomic<uint64_t> resident_accepted[3]{}, resident_rejected[3][reject_count]{}, resident_cold_pages[3]{};
+// Accepted invocations that ran the lane-per-cell kernel (default; not with ARGUS_KV_ATTENTION_PATH=batched).
+inline std::atomic<uint64_t> resident_cell_kernel[3]{};
 inline void reject(Reject reason) { ++resident_rejected[phase][reason]; }
 
 // Residency census at eligibility time (profiling only; walks every K/V view page).
@@ -126,6 +128,7 @@ inline std::string residency_json() {
         const std::string prefix = std::string("resident_") + phases[p] + "_";
         field(prefix + "accepted", resident_accepted[p]);
         field(prefix + "cold_pages", resident_cold_pages[p]);
+        field(prefix + "cell_kernel", resident_cell_kernel[p]);
         for (int r = 0; r < reject_count; ++r) { field(prefix + "reject_" + reject_names[r], resident_rejected[p][r]); }
         if (!enabled()) { continue; }
         const auto & c = census[p];

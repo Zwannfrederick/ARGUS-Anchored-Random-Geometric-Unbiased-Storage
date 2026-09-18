@@ -258,7 +258,7 @@ def main():
                                  "argus-cuda-off", "argus-cuda-on", "argus-cuda-control"])
     parser.add_argument("--profile", nargs="?", const="cuda", choices=["cpu", "cuda"],
                         help="diagnostic CPU scopes, optionally CUDA events; measure overhead separately")
-    parser.add_argument("--attention-path", choices=["staged", "direct", "batched"], help="controlled CUDA datapath A/B")
+    parser.add_argument("--attention-path", choices=["staged", "direct", "batched", "cells"], help="controlled CUDA datapath A/B")
     parser.add_argument("--resident-bytes", type=int, required=True, help="ARGUS_KV_RESIDENT_BYTES for argus-paged")
     parser.add_argument("--max-kv-bytes", type=int, default=64 << 30)
     parser.add_argument("--staging-bytes", type=int, default=4 << 20)

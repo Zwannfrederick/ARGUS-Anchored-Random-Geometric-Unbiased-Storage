@@ -1,6 +1,6 @@
 # ARGUS v0.6 — heterogeneous KV memory runtime
 
-Tarih: 2026-09-18. Durum: **4K resident + partial-resident prefill checkpoint'i ölçüldü (control 3,9×, policy-on 9,2× stock); decode ve 262K beklemede**.
+Tarih: 2026-09-18. Durum: **4K exact lane-per-cell kernel default (control 2,8×, policy-on 8,3× stock); decode ve 262K beklemede**.
 Sürüm ayrımı (kullanıcı onayı): **v0.5 = mechanism, v0.6 = policy**. Bütçeli
 allocation, açık migration ve attention v0.5; hangi sayfanın nereye ve hangi
 codec ile taşınacağını seçen otomatik policy v0.6 sorumluluğudur.
@@ -39,6 +39,11 @@ sonrası profiler kapalı üç tekrarda medyan prefill: stock-host **1,33 s**, G
 eşdeğerliği korunuyor. Decode (Q=1 staged) değişmedi. Sonraki kernel adımı önerisi
 (başlatılmadı): lane-per-cell exact tile kernel.
 [Checkpoint raporu](../docs/measurements/v060-checkpoint-2026-09-18.md).
+
+Lane-per-cell exact kernel (bit-exact, default; warp-per-cell `batched` kontrol olarak
+kaldı): profiler kapalı üç tekrarda medyan prefill stock-host **1,33 s**, GPU-control
+**3,69 s**, policy-on **10,99 s**.
+[Kernel raporu](../docs/measurements/v060-kernel-cells-2026-09-18.md).
 
 ## Uygulama ilerlemesi — 2026-09-17
 
