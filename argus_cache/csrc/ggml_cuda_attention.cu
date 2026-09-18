@@ -90,6 +90,11 @@ __device__ float resident_value(const void * const * pages, size_t offset, size_
     const auto * page = static_cast<const char *>(pages[position / 4096]);
     return page ? __half2float(*reinterpret_cast<const half *>(page + position % 4096)) : 0.0f;
 }
+// Start of a row inside one resident page, or null for a logical-zero page.
+__device__ const half * page_row(const void * const * pages, size_t position) {
+    const auto * page = static_cast<const char *>(pages[position / 4096]);
+    return page ? reinterpret_cast<const half *>(page + position % 4096) : nullptr;
+}
 
 // One block per query/head. Online softmax state survives tile boundaries.
 // ponytail: scalar FP16 tiles first; replace with tiled MMA after mechanism parity.
@@ -148,7 +153,9 @@ void cpu_refused(ggml_tensor *, int, int, void *) { GGML_ABORT("ARGUS CUDA atten
 // D > 0 fixes Dk = Dv = D (a multiple of 32) at compile time; D = 0 is the generic
 // Dk/Dv <= 256 kernel. Slots at or beyond D/32 hold the staged tree's structural
 // +0 lanes; skipping those additions changes at most the sign of a zero sum.
-template<int D>
+// rows: every Dk-half K row and Dv-half V row starts at a multiple of its own size
+// (a divisor of 4096), so it lies inside one page: resolve its page once per row.
+template<int D, bool rows = false>
 __global__ void attention_resident_batch(const char * query, const char * mask, bool half_mask,
         float * output, int dk, int dv, int heads, int kv_heads, int tokens, int cells,
         size_t q_head, size_t q_token, size_t mask_cell, size_t mask_token, float scale, ResidentKV pages) {
@@ -167,10 +174,18 @@ __global__ void attention_resident_batch(const char * query, const char * mask, 
         const float bias = half_mask ? __half2float(*reinterpret_cast<const half *>(entry)) : *reinterpret_cast<const float *>(entry);
         if (bias == -INFINITY) { continue; }
         float product[8]{};
-        #pragma unroll
-        for (int j = 0; j < slots; ++j) {
-            const int d = lane + j * 32;
-            if (d < dk) { product[j] = __fmul_rn(query_values[j], resident_value(pages.keys, pages.key_offset, (size_t(cell) * kv_heads + kv_head) * dk + d)); }
+        if constexpr (rows) {
+            const half * key_row = page_row(pages.keys, pages.key_offset + (size_t(cell) * kv_heads + kv_head) * D * sizeof(half));
+            #pragma unroll
+            for (int j = 0; j < slots; ++j) {
+                product[j] = __fmul_rn(query_values[j], key_row ? __half2float(__ldg(key_row + lane + j * 32)) : 0.0f);
+            }
+        } else {
+            #pragma unroll
+            for (int j = 0; j < slots; ++j) {
+                const int d = lane + j * 32;
+                if (d < dk) { product[j] = __fmul_rn(query_values[j], resident_value(pages.keys, pages.key_offset, (size_t(cell) * kv_heads + kv_head) * dk + d)); }
+            }
         }
         #pragma unroll
         for (int j = 0; j < 4; ++j) { if (j + 4 < slots) { product[j] = __fadd_rn(product[j], product[j + 4]); } }
@@ -192,11 +207,14 @@ __global__ void attention_resident_batch(const char * query, const char * mask, 
         }
         alpha = __shfl_sync(0xffffffff, alpha, 0);
         beta = __shfl_sync(0xffffffff, beta, 0);
+        const half * value_row = nullptr;
+        if constexpr (rows) { value_row = page_row(pages.values, pages.value_offset + (size_t(cell) * kv_heads + kv_head) * D * sizeof(half)); }
         #pragma unroll
         for (int j = 0; j < slots; ++j) {
             const int d = lane + j * 32;
             if (d < dv) {
-                const float value = resident_value(pages.values, pages.value_offset, (size_t(cell) * kv_heads + kv_head) * dv + d);
+                const float value = rows ? (value_row ? __half2float(__ldg(value_row + d)) : 0.0f)
+                    : resident_value(pages.values, pages.value_offset, (size_t(cell) * kv_heads + kv_head) * dv + d);
                 // NVCC otherwise contracts beta*value in the final unrolled lane,
                 // unlike the staged kernel's alpha*acc FMA (D=256 exact-parity gate).
                 acc[j] = __fmaf_rn(alpha, acc[j], __fmul_rn(beta, value));
@@ -240,7 +258,9 @@ void resident_compute(size_t k_pages, size_t v_pages, void * raw) {
         check(cudaEventRecord(begin->value, request.stream));
     }
     if (request.batched) {
-        const auto kernel = q->ne[0] == 64 && v->ne[0] == 64 ? attention_resident_batch<64> : attention_resident_batch<0>;
+        const bool d64 = q->ne[0] == 64 && v->ne[0] == 64;
+        const bool rows = pages.key_offset % (64 * sizeof(half)) == 0 && pages.value_offset % (64 * sizeof(half)) == 0;
+        const auto kernel = !d64 ? attention_resident_batch<0> : rows ? attention_resident_batch<64, true> : attention_resident_batch<64>;
         kernel<<<(q->ne[1] * q->ne[2] + 3) / 4, 128, 0, request.stream>>>(
             static_cast<const char *>(q->data), static_cast<const char *>(mask->data), mask->type == GGML_TYPE_F16,
             static_cast<float *>(dst->data), q->ne[0], v->ne[0], q->ne[1], k->ne[1], q->ne[2], k->ne[2],
