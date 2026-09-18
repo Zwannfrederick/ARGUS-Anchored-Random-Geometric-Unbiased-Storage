@@ -98,7 +98,8 @@ Conclusions:
 ## Pending measurements (need the user: installs and root)
 
 1. ~~Nsight Systems~~: installed and captured (above).
-2. **Experiment 0: memory-pressure discrimination (Nsight Compute, root).** Same late
+2. ~~Experiment 0~~: captured and analysed below. Original request:
+   **memory-pressure discrimination (Nsight Compute, root).** Same late
    launch (measured request, ubatch 60, layer 0, `--launch-skip 3000`), for
    `cells-mlp` (default) and `cells`. Use the `MemoryWorkloadAnalysis_Chart` and
    `breakdown:` metrics. The goal is to learn which unit the 76% "memory access
@@ -129,3 +130,145 @@ v0.6 physical counters stay the semantic reference: 1512/1512 fast path, 12,048 
 pages, D2D 0, H2D 52.59 MB, disk 148.0/49.3 MB, 1512 syncs, 12,768/0 promotions and
 demotions. Decode is untouched until the prefill campaign reaches a measured stopping
 point.
+
+## Experiment 0 result (Nsight Compute, same late launch; `cells` vs `cells-mlp`)
+
+Reports: [`v070-e0-2026-09-18/`](../docs/measurements/v070-e0-2026-09-18/). The ncu
+durations are profiler-only and serve as ratios.
+
+| metric | `cells` | `cells-mlp` |
+|---|---:|---:|
+| duration | 3.557 ms | 2.065 ms |
+| memory-access throughput (% peak) | 43.7 | **76.3** |
+| = `l1tex__data_pipe_lsu_wavefronts` (% peak, avg / busiest SM) | 43.7 / 50.7 | **76.3 / 81.9** |
+| global load requests / sectors | 8.14 M / 42.09 M | 8.14 M / 42.09 M (identical) |
+| L1 lookup hit / miss sectors | 39.57 M / 2.52 M | 29.92 M / **12.17 M** |
+| L1 → L2 read sectors (xbar / lts) | 2.52 M / 2.46 M | **12.23 M / 12.50 M** |
+| L2 hit rate / DRAM read | 95.1% / 4.85 MB | 96.9% / 4.74 MB |
+| LSU instructions (= lsuin requests) | 17.93 M | 14.72 M |
+| shared wavefronts / bank conflicts | 11.73 M / 0 | 12.01 M / 0 |
+| issue active, eligible warps | 0.32, 0.59 | 0.57, 1.63 |
+
+**Where the 76% comes from (measured).** The high-level metric is exactly the L1TEX
+data pipe's LSU wavefronts. No other unit is close: the LSU instruction pipe peaks at
+55% on the busiest SM, and L2/DRAM traffic is small.
+
+**Which instructions fill that pipe (inferred from measured totals and per-PC
+execution counts; there is no per-PC wavefront counter).**
+
+| source | requests | wavefronts |
+|---|---|---:|
+| K rows: 8 `LDG.E.128` per lane per tile; lanes 256 B apart, so every lane hits its own line | ~0.87 M, 32 wavefronts each | ≈27.9 M |
+| q, weight and pointer `LDS` | — | 12.0 M |
+| V row loads (64 B per warp, one line) | ~6.9 M, 1 wavefront each | ≈6.9 M |
+| **sum** | | **≈46.8 M** |
+
+The sum matches the ≈46.6 M wavefronts implied by 76.3% of one wavefront per SM per
+cycle over the kernel. **K loads are ~60% of the saturating unit's work.** Sectors
+agree: K ≈27.9 M + V ≈13.9 M ≈ 41.8 M of the measured 42.09 M.
+
+**Why L1 hit fell 94% → 70% (measured).** Requested traffic is byte-identical
+(8.14 M requests, 42.09 M sectors), and DRAM is unchanged. What changed is that
+9.7 M more sectors miss L1 and are fetched from L2, where they hit.
+- With the branch-free loop, many warps issue value loads for the same KV lines
+  (7 query heads × 64 tokens share each KV head) before the first fill arrives.
+- Those loads count as L1 misses and are each fetched from L2 again.
+
+These are duplicated in-flight misses, not capacity evictions. They cost L2 bandwidth
+(still far from limiting) and put L2 latency on the first consumer of each 4-cell
+group, where the remaining long-scoreboard stall sits.
+
+### Hypothesis verdicts
+
+| hypothesis | verdict | evidence |
+|---|---|---|
+| V MLP depth too aggressive | **UNRESOLVED**, secondary | Depth-4 bursts create the duplicate L1 misses (+9.7 M sectors to L2), but L2 is not limiting. The time cost would be L2 latency on the group's first value, not throughput. Needs the depth sweep to quantify. |
+| L1/TEX data/tag/request pressure | **ACCEPT (data pipe)** | Data-pipe wavefronts 76–82% of peak = the whole memory-access metric; about 60% of it is the lane-scattered K-row loads |
+| LSU pressure | REJECT as primary | LSU instructions fell 18%; LSU pipe ≤55%. `lg_throttle` 0.36 and `mio_throttle` 1.56 cycles/issue follow the data-pipe backlog. |
+| MIO pressure | secondary symptom | mio_throttle rose 0.61 → 1.56; shared wavefronts unchanged (12.0 M), no bank conflicts |
+| L2/DRAM pressure | REJECT | DRAM 4.7 MB; L2 hit 97%; L2 read sectors ×5 but L2 utilization stays far below L1's |
+| GQA-induced redundant V traffic | **ACCEPT as L1→L2 duplication, REJECT as bandwidth limit** | In-flight duplicate misses of shared KV lines; L2 absorbs them |
+| shared pointer path | REJECT | shared wavefronts equal before and after, 0 conflicts; its stall share did not grow |
+
+## Next experiment (exactly one): coalesced K-row loads through a per-warp shared transpose
+
+- **Measured evidence.**
+  - L1TEX data-pipe wavefronts are the most utilized resource (76% avg, 82% busiest SM).
+  - About 60% of them (≈27.9 M) come from the score phase's lane-scattered 16-byte K
+    loads: 32 wavefronts per request, ncu's "21.4 of 32 bytes per sector used,
+    33% excessive sectors".
+  - `mio_throttle`/`lg_throttle` rose with that backlog.
+- **Causal hypothesis.** Loading each 32-cell K tile with coalesced requests cuts K
+  data-pipe wavefronts ~8x. That frees the L1 data pipe, which lowers queueing
+  throttles and memory latency for the value path, and raises issue rate.
+- **Single factor.** How the K rows of a tile reach the lane that scores them.
+  Nothing else changes: the tree, the values, the V loop, the unroll depth and the
+  mask handling all stay as they are.
+- **Minimal code change** (new variant, e.g. `ARGUS_KV_ATTENTION_PATH=cells-kc`, and a
+  template flag on `attention_resident_cells`; default unchanged):
+  1. Load the tile's K rows with lanes 0–7 covering one 128-byte row, so 4 rows per
+     `LDG.E.128` warp instruction, all lines fully used. Null pages load as zero, as
+     today.
+  2. Store them to a per-warp shared buffer padded to avoid bank conflicts.
+  3. `__syncwarp()`.
+  4. Each lane reads its own row back with `LDS.128`.
+  5. The existing per-lane tree runs unchanged.
+
+  Process the tile in chunks whose buffer keeps the block at the current 8 resident
+  blocks/SM (register-limited). An 8-cell chunk is ~1.2 KiB per warp; a 16-cell chunk
+  (~2.3 KiB per warp) only if the measured occupancy stays 8.
+- **Invariants.**
+  - Every product is `__fmul_rn(q[i], k[i])` on the same `k` values.
+  - The same addition tree runs in the same lane, and the same score `__fmaf_rn`.
+  - The prefix max, alpha/beta, and `sum`/`acc` chains are untouched.
+  - Mask, null-page and unwritten semantics are unchanged.
+  - No extra barrier beyond `__syncwarp`. No policy or placement change.
+- **Exactness category 1.** Only the path of the K bytes changes; the arithmetic
+  and its order are identical.
+- **Expected SASS.**
+  - The score phase shows 8 coalesced `LDG.E.128`, `STS.128` and `LDS.128` in place
+    of today's 8 per-lane scattered `LDG.E.128`.
+  - The value loop is identical to `cells-mlp`.
+  - Registers ≤ 58 (target), no spill, static shared ≤ what keeps 8 blocks/SM.
+- **Expected NCU signature** (same launch, `--launch-skip 3000`):
+  - `l1tex__data_pipe_lsu_wavefronts` falls from ≈46.6 M to roughly 25–30 M
+    (K 27.9 M → ~3.5 M global + ~7 M shared);
+  - L1 memory-access throughput falls below ~55%;
+  - K sector efficiency 32/32 bytes;
+  - `mio_throttle` and `lg_throttle` decrease;
+  - issue active above 0.57;
+  - duration below 2.07 ms.
+- **Expected effect (estimate).** Kernel −10% to −25%, about 0.13–0.32 s of the
+  1.29 s attention time. GPU-control prefill ≈2.78 s → 2.5–2.65 s (−5% to −10%).
+- **Benchmark methodology.**
+  - Same binary, `cells-mlp` vs `cells-kc`, 4K GPU-control, profiler off.
+  - 3 repeats each; 5–7 alternating repeats if the difference is 3–8%.
+  - Then policy-on 3 repeats, as a regression check only.
+- **Acceptance.**
+  - Bit-exact everywhere, with the output hash unchanged.
+  - GPU-control prefill median ≥5% faster, with non-overlapping ranges.
+  - The NCU signature above observed.
+  - Registers ≤ 64, no spill.
+- **Rejection / rollback.** Any of the following rejects the variant; it is documented
+  as a negative result and `cells-mlp` stays the default.
+  - Parity failure.
+  - Spill, or occupancy below 8 blocks/SM without a measured net win.
+  - Data-pipe wavefronts not reduced.
+  - Prefill gain < 5% (3–5%: inconclusive, re-measure with 7 repeats).
+- **Correctness tests.**
+  - Add `cells-kc` to every existing path list: the resident and mixed-residency
+    loops at D = 48/64/256, shifted views, cold pages.
+  - Run all Qwen cases: causal, scattered −∞, fully masked tile and rows, live null
+    pages, F32 bias, ×24 scores, ±0 with ties.
+  - Mutation checks: permute the K row assignment (must fail) and skip `__syncwarp`
+    (review only).
+  - Suites: 7/7 GPU, 5/5 CPU/context.
+- **Profiler validation.** One `sudo ncu` capture of the same launch with
+  `MemoryWorkloadAnalysis`, `WarpStateStats`, `SchedulerStats`, `LaunchStats`,
+  `Occupancy`, `SourceCounters` and
+  `breakdown:gpu__compute_memory_access_throughput.avg.pct_of_peak_sustained_elapsed`,
+  compared against `v070-e0-2026-09-18/e0-cells-mlp-late`.
+
+Deferred behind this experiment: the V MLP depth sweep (candidate A; revisit if long
+scoreboard on the first group value dominates after K is relieved), GQA cooperative V
+reuse and explicit V staging (V is ~15% of the data pipe), pointer delivery.
