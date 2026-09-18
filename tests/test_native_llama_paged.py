@@ -195,6 +195,39 @@ def test_cuda_policy_off_on_preserves_outputs_and_budgets(tmp_path, gpu_budget):
         assert on["policy_demotions"] > 0
 
 
+@pytest.mark.skipif(os.environ.get("ARGUS_TEST_CUDA") != "1", reason="set ARGUS_TEST_CUDA=1 with CUDA build")
+@pytest.mark.parametrize("gpu_budget", [4194304, 262144])
+def test_cuda_mixed_resident_path_preserves_policy_semantics(tmp_path, gpu_budget):
+    """Staging cold pages for one read must look to the policy exactly like the staged path."""
+    binary = _compile(tmp_path, "tests/cpp/test_llama_paged_attention.cpp", ["-DARGUS_TEST_CUDA_TIER"],
+                      ["-lllama", "-lggml-base"])
+    env = {**os.environ, "ARGUS_KV_STAGING_BYTES": "4194304", "ARGUS_KV_GPU_BYTES": str(gpu_budget),
+           "ARGUS_KV_PINNED_BYTES": "4194304", "ARGUS_TEST_PROMPT_TOKENS": "600",
+           "ARGUS_TEST_AUTO_POLICY": "1", "ARGUS_KV_POLICY": "on"}
+    env.pop("ARGUS_TEST_REPORT_LOGITS_ONLY", None)
+    env.pop("ARGUS_KV_RAM_BYTES", None)
+    stats = {}
+    for path in ("staged", "batched"):
+        result = subprocess.run([binary, MODEL, _storage(), "f16"], env={**env, "ARGUS_KV_ATTENTION_PATH": path},
+                                capture_output=True, text=True, timeout=600)
+        assert result.returncode == 0, result.stderr[-4000:]
+        report = json.loads(next(line for line in result.stdout.splitlines() if line.startswith('{"kv_type"')))
+        assert report["greedy_mismatches"] == 0
+        stats[path] = report["stats"]
+    staged, mixed = stats["staged"], stats["batched"]
+    for key in ("policy_promotions", "policy_demotions", "policy_rejected", "written_bytes", "committed_pages",
+                "cuda_attention_calls"):
+        assert staged[key] == mixed[key], key
+    # Staged 32-cell tiles re-read pages that straddle tiles (576-byte cells); mixed reads each once.
+    assert mixed["read_bytes"] <= staged["read_bytes"]
+    assert staged["resident_prefill_accepted"] == 0
+    details = {k: v for k, v in mixed.items() if k.startswith("resident_") and v}
+    if gpu_budget == 4194304:
+        assert mixed["resident_prefill_accepted"] > 0 and mixed["resident_prefill_cold_pages"] > 0, details
+    else:  # The policy keeps the GPU tier full: cold scratch declines to the staged path.
+        assert mixed["resident_prefill_accepted"] == 0 and mixed["resident_prefill_reject_cold_scratch_budget"] > 0, details
+
+
 @pytest.mark.skipif(os.environ.get("ARGUS_TEST_CUDA") != "1", reason="requires real CUDA")
 def test_cuda_gpu_control_has_no_disk_io_and_preserves_lifecycle(tmp_path):
     binary = _compile(tmp_path, "tests/cpp/test_llama_paged_attention.cpp", ["-DARGUS_TEST_CUDA_TIER"],

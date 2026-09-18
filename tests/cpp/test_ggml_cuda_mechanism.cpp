@@ -132,6 +132,151 @@ static void check_policy() {
     std::puts("policy: off/on, admission, tier budgets, eviction, failure counters and teardown passed");
 }
 
+static std::vector<ArgusDiskPageDescriptor> descriptors(const ggml_tensor * k, const ggml_tensor * v) {
+    std::vector<ArgusDiskPageDescriptor> all;
+    for (const auto * tensor : {k, v}) {
+        for (size_t offset = 0; offset < ggml_nbytes(tensor); offset += 4096) { all.push_back(argus_disk_page_descriptor(tensor, offset)); }
+    }
+    return all;
+}
+static void move_pages(const ggml_tensor * tensor, ArgusTier tier) {
+    for (size_t offset = 0; offset + 4096 <= ggml_nbytes(tensor); offset += 4096) {
+        argus_disk_move_page(tensor, offset, tier, argus_disk_page_revision(tensor, offset));
+    }
+}
+
+// GPU pages are borrowed and written non-GPU pages are staged for one invocation only:
+// exact against the staged path, with placement, revisions and access history unchanged.
+static void check_mixed_residency(ggml_tensor * k, ggml_tensor * v, ggml_tensor * out,
+                                  const ArgusTierBuffer & output, size_t elements) {
+    using namespace argus_profile;
+    std::vector<float> expected(elements), actual(elements);
+    const auto run = [&](const char * label, uint64_t cold_pages) {
+        setenv("ARGUS_KV_ATTENTION_PATH", "staged", 1);
+        const auto before = descriptors(k, v);
+        compute(out, 0, nullptr);
+        const auto staged = descriptors(k, v);
+        output.read(expected.data(), 0, elements * sizeof(float));
+        for (const auto * path : {"direct", "batched"}) {
+            setenv("ARGUS_KV_ATTENTION_PATH", path, 1);
+            const auto accepted = resident_accepted[prefill].load(), cold = resident_cold_pages[prefill].load();
+            const auto start = descriptors(k, v);
+            compute(out, 0, nullptr);
+            const auto end = descriptors(k, v);
+            output.read(actual.data(), 0, elements * sizeof(float));
+            if (actual != expected || resident_cold_pages[prefill] - cold != cold_pages) {
+                std::fprintf(stderr, "mixed %s path=%s cold=%llu expected_cold=%llu\n", label, path,
+                             (unsigned long long) (resident_cold_pages[prefill] - cold), (unsigned long long) cold_pages);
+            }
+            require(actual == expected && resident_accepted[prefill] == accepted + 1);
+            require(resident_cold_pages[prefill] - cold == cold_pages);
+            for (size_t i = 0; i < end.size(); ++i) {
+                require(end[i].placement == start[i].placement && end[i].placement_revision == start[i].placement_revision &&
+                        end[i].revision.content_revision == start[i].revision.content_revision);
+                require(end[i].access_count - start[i].access_count == staged[i].access_count - before[i].access_count);
+            }
+        }
+    };
+    // 97 cells never fill whole pages: each tensor has a partial tail page, which
+    // cannot migrate, so it stays on disk and is always cold.
+    require(ggml_nbytes(k) % 4096 && ggml_nbytes(v) % 4096);
+    move_pages(k, ArgusTier::gpu);
+    move_pages(v, ArgusTier::gpu);
+    run("tails", 2);
+    argus_disk_move_page(k, 8192, ArgusTier::disk, argus_disk_page_revision(k, 8192));
+    run("cold key", 3);
+    argus_disk_move_page(k, 8192, ArgusTier::gpu, argus_disk_page_revision(k, 8192));
+    argus_disk_move_page(v, 4096, ArgusTier::pinned, argus_disk_page_revision(v, 4096));
+    run("cold value pinned", 3);
+    argus_disk_move_page(v, 0, ArgusTier::ram, argus_disk_page_revision(v, 0));
+    run("gpu pinned ram disk", 4);
+    // A rewrite drops residency: the write frontier is cold.
+    std::vector<unsigned char> page(4096);
+    const size_t frontier = (ggml_nbytes(k) / 4096 - 1) * 4096;
+    ggml_backend_tensor_get(k, page.data(), frontier, 4096);
+    ggml_backend_tensor_set(k, page.data(), frontier, 4096);
+    run("write frontier", 5);
+
+    move_pages(k, ArgusTier::disk);
+    move_pages(v, ArgusTier::disk);
+    const size_t cold = (ggml_nbytes(k) + 4095) / 4096 + (ggml_nbytes(v) + 4095) / 4096;
+    run("all cold", cold);
+
+    // Batched scratch at the exact limit: host copy + device charge + resident table,
+    // on top of the live pointer table. One page less declines to the staged path.
+    setenv("ARGUS_KV_ATTENTION_PATH", "staged", 1);
+    compute(out, 0, nullptr);
+    output.read(expected.data(), 0, elements * sizeof(float));
+    setenv("ARGUS_KV_ATTENTION_PATH", "batched", 1);
+    const size_t live = argus_disk_staging_limit() - argus_disk_staging_free();
+    const size_t exact = live + 4096 + 2 * cold * 4096 + 4096;
+    const std::string saved = std::getenv("ARGUS_KV_STAGING_BYTES");
+    for (size_t limit : {exact, exact - 4096}) {
+        setenv("ARGUS_KV_STAGING_BYTES", std::to_string(limit).c_str(), 1);
+        const auto declined = resident_rejected[prefill][reject_cold_budget].load(), accepted = resident_accepted[prefill].load();
+        compute(out, 0, nullptr);
+        output.read(actual.data(), 0, elements * sizeof(float));
+        require(actual == expected);
+        require(limit == exact ? resident_accepted[prefill] == accepted + 1 && resident_rejected[prefill][reject_cold_budget] == declined
+                               : resident_accepted[prefill] == accepted && resident_rejected[prefill][reject_cold_budget] == declined + 1);
+    }
+    setenv("ARGUS_KV_STAGING_BYTES", saved.c_str(), 1);
+
+    // A failed cold read changes nothing and queues nothing; the next read succeeds.
+    const auto before = descriptors(k, v);
+    const auto usage = argus_tier_usage();
+    const auto free_staging = argus_disk_staging_free();
+    corrupt_read = true;
+    refuses([&] { compute(out, 0, nullptr); });
+    corrupt_read = false;
+    const auto after = descriptors(k, v);
+    for (size_t i = 0; i < after.size(); ++i) {
+        require(after[i].placement == before[i].placement && after[i].access_count == before[i].access_count);
+    }
+    require(argus_tier_usage().gpu == usage.gpu && argus_disk_staging_free() == free_staging);
+    compute(out, 0, nullptr);
+    output.read(actual.data(), 0, elements * sizeof(float));
+    require(actual == expected);
+
+    // A concurrent writer waits for the borrowed and staged pages to be released.
+    struct Race {
+        std::vector<char> host;
+        std::unique_ptr<ArgusTierBuffer> device;
+        std::promise<void> entered;
+        std::future<void> attempting;
+        std::future<void> * writer;
+    } race;
+    std::promise<void> attempted;
+    race.attempting = attempted.get_future();
+    auto started = race.entered.get_future();
+    auto writer = std::async(std::launch::async, [&] {
+        started.wait(); attempted.set_value();
+        ggml_backend_tensor_set(k, page.data(), 0, 2);
+    });
+    race.writer = &writer;
+    static constexpr ArgusColdStaging staging{
+        [](size_t pages, void * context) -> void * {
+            auto & r = *static_cast<Race *>(context);
+            r.host.resize(pages * 4096);
+            r.device = std::make_unique<ArgusTierBuffer>(ArgusTier::gpu, pages * 4096);
+            return r.host.data();
+        },
+        [](size_t pages, void * context) -> const char * {
+            auto & r = *static_cast<Race *>(context);
+            r.device->write(r.host.data(), pages * 4096);
+            return static_cast<const char *>(r.device->data());
+        }};
+    std::vector<const void *> pointers(64);
+    require(argus_disk_read_resident(k, v, pointers.data(), pointers.size(), [](size_t, size_t, void * context) {
+        auto & r = *static_cast<Race *>(context);
+        r.entered.set_value(); r.attempting.wait();
+        require(r.writer->wait_for(std::chrono::milliseconds(20)) == std::future_status::timeout);
+    }, &race, &staging));
+    writer.get();
+    unsetenv("ARGUS_KV_ATTENTION_PATH");
+    std::puts("mixed residency: exact parity, no placement change, scratch limit, failure and writer passed");
+}
+
 int main(int argc, char ** argv) try {
     require(argc == 2 || argc == 3);
     setenv("ARGUS_KV_POLICY", "off", 1);
@@ -245,11 +390,11 @@ int main(int argc, char ** argv) try {
         const auto before_compute = argus_disk_page_descriptor(k, 0);
         using argus_profile::resident_rejected;
         using argus_profile::prefill;
-        const auto key_rejects = resident_rejected[prefill][argus_profile::reject_key_page].load();
+        const auto mixed_accepts = argus_profile::resident_accepted[prefill].load();
         const auto censused = argus_profile::census[prefill].invocations.load();
         compute(out, 0, nullptr);
-        // K page 0 is GPU, page 1 pinned: the first failing check is a nonresident K page.
-        require(resident_rejected[prefill][argus_profile::reject_key_page] == key_rejects + 1);
+        // GPU, pinned, RAM and disk pages together: the resident path stages the cold ones.
+        require(argus_profile::resident_accepted[prefill] == mixed_accepts + 1);
         if (argus_profile::enabled()) {
             const auto & c = argus_profile::census[prefill];
             require(c.invocations == censused + 1 && c.cold_key_invocations > 0 && c.cold_value_invocations > 0);
@@ -261,10 +406,12 @@ int main(int argc, char ** argv) try {
         require(after_compute.access_count > before_compute.access_count &&
                 after_compute.last_access_step > before_compute.last_access_step);
         output_gpu.read(first.data(), 0, first.size() * sizeof(float));
+        // The staged checks below keep exercising the tiled path and its pinned budget.
+        setenv("ARGUS_KV_ATTENTION_PATH", "staged", 1);
         setenv("ARGUS_KV_NO_OVERLAP", "1", 1);
         compute(out, 0, nullptr);
         output_gpu.read(second.data(), 0, second.size() * sizeof(float));
-        require(first == second);
+        require(first == second); // Mixed resident == staged, exactly.
         double error = 0;
         for (int t = 0; t < tokens; ++t) for (int h = 0; h < heads; ++h) {
             std::vector<double> scores(cells);
@@ -303,6 +450,7 @@ int main(int argc, char ** argv) try {
         require(first == second);
         std::printf("cuda_attention_calls=%zu max_error=%g overlap_parity=true migration_failure_preserved=true\n",
                     argus_tier_usage().attention_calls, error);
+        check_mixed_residency(k, v, out, output_gpu, first.size());
 
         // Fully resident, partial physical pages, unaligned views, F16/F32 masks.
         setenv("ARGUS_KV_GPU_CONTROL", "1", 1);

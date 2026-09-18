@@ -235,7 +235,36 @@ struct ResidentRequest {
     const void ** table;
     size_t state_bytes;
     bool batched;
+    size_t table_bytes = 0;
+    // Written non-GPU pages copied for this invocation only (see ArgusColdStaging).
+    std::unique_ptr<ArgusStagingBuffer> cold_host;
+    std::unique_ptr<ArgusStagingReservation> cold_charge;
+    std::unique_ptr<ArgusTierBuffer> cold_device;
+    // Last member, destroyed first: an upload left queued by a failure drains before its buffers go.
+    Drain cold_drain{nullptr, false};
 };
+void * reserve_cold(size_t pages, void * raw) {
+    auto & request = *static_cast<ResidentRequest *>(raw);
+    const size_t bytes = pages * 4096;
+    // Host bounce and device copy, plus the table/state scratch resident_compute takes next.
+    // Decline rather than evict: attention never acts as placement policy.
+    const auto gpu = argus_tier_budget(ArgusTier::gpu);
+    const size_t device = bytes + request.table_bytes + request.state_bytes;
+    if (argus_disk_staging_free() < 2 * bytes + request.table_bytes + request.state_bytes ||
+        gpu.live > gpu.limit || gpu.limit - gpu.live < device) { return nullptr; }
+    request.cold_host = std::make_unique<ArgusStagingBuffer>(bytes);
+    request.cold_charge = std::make_unique<ArgusStagingReservation>(bytes);
+    request.cold_device = std::make_unique<ArgusTierBuffer>(ArgusTier::gpu, bytes);
+    return request.cold_host->data();
+}
+const char * upload_cold(size_t pages, void * raw) {
+    auto & request = *static_cast<ResidentRequest *>(raw);
+    // Arm in place: a temporary Drain would synchronize when it is destroyed.
+    request.cold_drain.value = request.stream;
+    request.cold_drain.pending = true;
+    argus_cuda_copy(request.cold_device->data(), request.cold_host->data(), pages * 4096, false, request.stream);
+    return static_cast<const char *>(request.cold_device->data());
+}
 void resident_compute(size_t k_pages, size_t v_pages, void * raw) {
     auto & request = *static_cast<ResidentRequest *>(raw);
     auto * dst = request.dst;
@@ -311,7 +340,10 @@ bool try_resident(ggml_tensor * dst, cudaStream_t stream, size_t state_bytes) {
     if (2 * bytes + state_bytes > argus_disk_staging_limit()) { reject(reject_staging_budget); return false; }
     ArgusStagingBuffer table(bytes);
     ResidentRequest request{dst, stream, static_cast<const void **>(table.data()), state_bytes, batched};
-    if (!argus_disk_read_resident(dst->src[1], dst->src[2], request.table, count, resident_compute, &request)) { return false; }
+    request.table_bytes = bytes;
+    static constexpr ArgusColdStaging cold{reserve_cold, upload_cold};
+    if (!argus_disk_read_resident(dst->src[1], dst->src[2], request.table, count, resident_compute, &request, &cold)) { return false; }
+    request.cold_drain.pending = false; // resident_compute drained the stream.
     ++resident_accepted[phase];
     return true;
 }
