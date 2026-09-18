@@ -39,12 +39,23 @@ void argus_disk_stage_cuda(const ggml_tensor * tensor, void * host, void * devic
 void argus_cuda_copy(void * device, const void * source, size_t bytes, bool device_source, void * stream);
 void argus_cuda_wait(void * stream);
 
+// Written pages that are not GPU-resident, copied for this one read only. Under the
+// locks, reserve() receives their count and returns host space (4096 bytes each) or
+// null to decline; upload() enqueues the checksum-verified host pages on the
+// consumer's stream and returns their device copy. Placement, revisions and access
+// history are untouched: temporary staging is not a promotion.
+struct ArgusColdStaging {
+    void * (*reserve)(size_t pages, void * context);
+    const char * (*upload)(size_t pages, void * context);
+};
 // Callback borrows GPU pages under registry + both store locks. Null means logical
 // zero, never a missing written page. It must drain GPU work before returning or
 // throwing and must not call storage/policy APIs. False leaves access counts intact.
+// Without cold staging any written non-GPU page declines the read.
 bool argus_disk_read_resident(const ggml_tensor * k, const ggml_tensor * v,
     const void ** pages, size_t capacity,
-    void (*consume)(size_t k_pages, size_t v_pages, void * context), void * context);
+    void (*consume)(size_t k_pages, size_t v_pages, void * context), void * context,
+    const ArgusColdStaging * cold = nullptr);
 
 ggml_tensor * argus_ggml_cuda_attention(ggml_context * ctx, ggml_tensor * q, ggml_tensor * k,
                                        ggml_tensor * v, ggml_tensor * mask, float scale);

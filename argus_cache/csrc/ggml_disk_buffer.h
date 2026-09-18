@@ -94,6 +94,7 @@ private:
 };
 
 size_t argus_disk_staging_limit();
+size_t argus_disk_staging_free();
 void argus_disk_publish_stats();
 ggml_tensor * argus_ggml_disk_set_rows(
     ggml_context * ctx, ggml_tensor * target, ggml_tensor * source, ggml_tensor * indices);

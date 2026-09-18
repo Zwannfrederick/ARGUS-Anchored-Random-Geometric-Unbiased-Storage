@@ -513,6 +513,11 @@ void set_rows(ggml_tensor * dst, int ith, int, void *) try {
 
 bool argus_ggml_disk_enabled() { return std::getenv("ARGUS_KV_STAGING_BYTES") != nullptr; }
 size_t argus_disk_staging_limit() { return limit("ARGUS_KV_STAGING_BYTES"); }
+size_t argus_disk_staging_free() {
+    const size_t maximum = argus_disk_staging_limit();
+    std::lock_guard<std::mutex> guard(budget_mutex);
+    return staging_live < maximum ? maximum - staging_live : 0;
+}
 
 ArgusStagingReservation::ArgusStagingReservation(size_t bytes) : bytes_(rounded(bytes)) {
     const size_t maximum = argus_disk_staging_limit();
@@ -842,7 +847,7 @@ static void residency_census(Store * const stores[2], const size_t starts[2], co
 
 bool argus_disk_read_resident(const ggml_tensor * k, const ggml_tensor * v,
         const void ** pages, size_t capacity,
-        void (*consume)(size_t, size_t, void *), void * context) {
+        void (*consume)(size_t, size_t, void *), void * context, const ArgusColdStaging * cold) {
     if (!pages || !consume || !argus_ggml_is_disk_tensor(k) || !argus_ggml_is_disk_tensor(v) ||
         k->type != GGML_TYPE_F16 || v->type != GGML_TYPE_F16 || k->ne[2] <= 0 || k->ne[2] != v->ne[2] ||
         ggml_nbytes(k) != size_t(k->ne[2]) * k->nb[2] || ggml_nbytes(v) != size_t(v->ne[2]) * v->nb[2]) {
@@ -864,20 +869,47 @@ bool argus_disk_read_resident(const ggml_tensor * k, const ggml_tensor * v,
         used += counts[t];
     }
     if (argus_profile::enabled()) { residency_census(stores, starts, counts); }
-    used = 0;
+    const auto page = [&](int t, size_t i) -> const Page & { return stores[t]->pages[starts[t] / page_size + i]; };
+    const auto written = [](const Page & p) { return p.content_revision && p.active != 2; };
+    const auto on_gpu = [](const Page & p) { return p.resident && p.resident->tier() == ArgusTier::gpu; };
+    size_t cold_pages = 0;
     {
         argus_profile::Scope timer(argus_profile::page_lookup);
         for (int t = 0; t < 2; ++t) {
             for (size_t i = 0; i < counts[t]; ++i) {
-                const auto & page = stores[t]->pages[starts[t] / page_size + i];
-                if (page.codec != GGML_TYPE_F16) { argus_profile::reject(argus_profile::reject_codec); return false; }
-                if (!page.content_revision || page.active == 2) { pages[used++] = nullptr; }
-                else if (page.resident && page.resident->tier() == ArgusTier::gpu) { pages[used++] = page.resident->data(); }
-                else { argus_profile::reject(t ? argus_profile::reject_value_page : argus_profile::reject_key_page); return false; }
+                if (page(t, i).codec != GGML_TYPE_F16) { argus_profile::reject(argus_profile::reject_codec); return false; }
+                if (!written(page(t, i)) || on_gpu(page(t, i))) { continue; }
+                if (!cold) { argus_profile::reject(t ? argus_profile::reject_value_page : argus_profile::reject_key_page); return false; }
+                ++cold_pages;
             }
         }
     }
+    char * host = nullptr;
+    if (cold_pages && !(host = static_cast<char *>(cold->reserve(cold_pages, context)))) {
+        argus_profile::reject(argus_profile::reject_cold_budget);
+        return false;
+    }
+    // Verification failures throw here, before anything is queued on the GPU.
+    std::vector<size_t> cold_entries;
+    cold_entries.reserve(cold_pages);
+    used = 0;
+    for (int t = 0; t < 2; ++t) {
+        for (size_t i = 0; i < counts[t]; ++i, ++used) {
+            const auto & descriptor = page(t, i);
+            if (!written(descriptor)) { pages[used] = nullptr; }
+            else if (on_gpu(descriptor)) { pages[used] = descriptor.resident->data(); }
+            else {
+                read_page(*stores[t], starts[t] / page_size + i, host + cold_entries.size() * page_size);
+                cold_entries.push_back(used);
+            }
+        }
+    }
+    if (cold_pages) {
+        const char * device = cold->upload(cold_pages, context);
+        for (size_t slot = 0; slot < cold_pages; ++slot) { pages[cold_entries[slot]] = device + slot * page_size; }
+    }
     consume(counts[0], counts[1], context);
+    argus_profile::resident_cold_pages[argus_profile::phase] += cold_pages;
     // Preserve the staged path's successful 32-cell read history for policy.
     for (int64_t first = 0; first < k->ne[2]; first += 32) {
         const size_t count = std::min<int64_t>(32, k->ne[2] - first);
