@@ -248,6 +248,23 @@ records paired profiler-disabled/event runs, CPU-only scopes, the original
 2 MiB pressure point, and the GPU-only control. It separates overlapping timers
 and observed measurement overhead; it does not claim 262K validation.
 
+Resident prefill now has a direct pointer-table path (`ARGUS_KV_ATTENTION_PATH=direct`,
+or `--attention-path direct` in the ladder); `staged` retains the reference path.
+Only Q>1 F16 attention with every written K/V page on GPU is eligible. Unwritten
+pages retain logical-zero semantics. The registry and both source stores stay
+locked until the compute stream completes, protecting against writes, migration
+and teardown. Pointer tables and state are charged to staging/GPU budgets. Read
+history is recorded with the same 32-cell access granularity as staged attention;
+placement-policy decisions are unchanged. Decode and non-resident K/V fall back.
+
+The first [direct-path measurement](../../docs/measurements/v060-datapath-direct-2026-09-18.json)
+eliminates prefill payload D2D (0 bytes) and cuts explicit waits to 1512, but still
+launches 101376 scalar kernels and takes 40.05 seconds prefill versus 41.24 in
+the fresh [89eaf06 reference](../../docs/measurements/v060-datapath-before-2026-09-18.json).
+This single profiled pair is not evidence of a material speedup; it exposes the
+remaining scalar-kernel bottleneck. Decode still uses the staged path and this
+sample is slower (3.49 versus 5.02 tok/s), so no decode improvement is claimed.
+
 Contiguous `set_rows` writes now share the existing page-rounded encoding
 buffer. A gap, repeated index, full buffer or strided target flushes the batch.
 This reduces repeated disk writes to the same physical page without increasing

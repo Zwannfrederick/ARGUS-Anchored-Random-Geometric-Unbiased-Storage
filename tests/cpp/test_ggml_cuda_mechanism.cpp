@@ -290,6 +290,58 @@ int main(int argc, char ** argv) try {
         require(first == second);
         std::printf("cuda_attention_calls=%zu max_error=%g overlap_parity=true migration_failure_preserved=true\n",
                     argus_tier_usage().attention_calls, error);
+
+        // Fully resident, partial physical pages, unaligned views, F16/F32 masks.
+        setenv("ARGUS_KV_GPU_CONTROL", "1", 1);
+        auto * resident_ctx = ggml_init({1 << 20, nullptr, true});
+        auto * rk = ggml_new_tensor_3d(resident_ctx, GGML_TYPE_F16, d, kv_heads, cells);
+        auto * rv = ggml_new_tensor_3d(resident_ctx, GGML_TYPE_F16, d, kv_heads, cells);
+        auto * resident_store = ggml_backend_alloc_ctx_tensors_from_buft(resident_ctx, argus_ggml_disk_buffer_type());
+        require(resident_store);
+        unsetenv("ARGUS_KV_GPU_CONTROL");
+        ggml_backend_tensor_set(rk, keys.data(), 0, keys.size() * 2);
+        ggml_backend_tensor_set(rv, values.data(), 0, values.size() * 2);
+        auto * shifted_k = ggml_view_3d(resident_ctx, rk, d, kv_heads, cells - 1, rk->nb[1], rk->nb[2], 2);
+        auto * shifted_v = ggml_view_3d(resident_ctx, rv, d, kv_heads, cells - 1, rv->nb[1], rv->nb[2], 2);
+        auto * float_mask = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, cells, tokens);
+        std::vector<float> float_bias(bias.size());
+        for (size_t i = 0; i < bias.size(); ++i) { float_bias[i] = ggml_fp16_to_fp32(bias[i]); }
+        ArgusTierBuffer float_mask_gpu(ArgusTier::gpu, float_bias.size() * sizeof(float));
+        float_mask_gpu.write(float_bias.data(), float_bias.size() * sizeof(float));
+        float_mask->data = float_mask_gpu.data();
+        for (bool shifted : {false, true}) for (auto * test_mask : {mask, float_mask}) {
+            auto * test_k = shifted ? shifted_k : rk;
+            auto * test_v = shifted ? shifted_v : rv;
+            auto * result = argus_ggml_cuda_attention(ctx, q, test_k, test_v, test_mask, 1.0f / std::sqrt(float(d)));
+            result->data = output_gpu.data();
+            setenv("ARGUS_KV_ATTENTION_PATH", "staged", 1);
+            const auto before_staged = argus_disk_page_descriptor(test_k, 0).access_count;
+            compute(result, 0, nullptr);
+            output_gpu.read(second.data(), 0, second.size() * sizeof(float));
+            const auto after_staged = argus_disk_page_descriptor(test_k, 0).access_count;
+            setenv("ARGUS_KV_ATTENTION_PATH", "direct", 1);
+            const auto copies = argus_profile::d2d_bytes[argus_profile::prefill].load();
+            compute(result, 0, nullptr);
+            std::vector<float> direct(second.size());
+            output_gpu.read(direct.data(), 0, direct.size() * sizeof(float));
+            require(direct == second); // No relaxation of the original stored-value reference gate.
+            require(argus_profile::d2d_bytes[argus_profile::prefill] == copies);
+            require(argus_disk_page_descriptor(test_k, 0).access_count - after_staged == after_staged - before_staged);
+        }
+        std::vector<const void *> pointers(2 * ((keys.size() * 2 + 4095) / 4096));
+        const auto accesses = argus_disk_page_descriptor(rk, 0).access_count;
+        refuses([&] { argus_disk_read_resident(rk, rv, pointers.data(), pointers.size(),
+            [](size_t, size_t, void *) { throw std::runtime_error("consumer failed"); }, nullptr); });
+        require(argus_disk_page_descriptor(rk, 0).access_count == accesses);
+        ggml_backend_buffer_clear(resident_store, 0);
+        auto * zeros = argus_ggml_cuda_attention(ctx, q, rk, rv, mask, 1.0f);
+        zeros->data = output_gpu.data();
+        compute(zeros, 0, nullptr);
+        output_gpu.read(second.data(), 0, second.size() * sizeof(float));
+        require(std::all_of(second.begin(), second.end(), [](float x) { return x == 0.0f; }));
+        unsetenv("ARGUS_KV_ATTENTION_PATH");
+        ggml_backend_buffer_free(resident_store);
+        ggml_free(resident_ctx);
     }
     const auto pre_reset = argus_disk_page_revision(k, 0);
     ggml_backend_buffer_clear(store, 0);

@@ -64,7 +64,8 @@ struct Event {
 };
 struct Drain {
     cudaStream_t value;
-    ~Drain() { argus_profile::Scope timer(argus_profile::synchronization); if (cudaStreamSynchronize(value) != cudaSuccess) { GGML_ABORT("ARGUS CUDA stream failed"); } }
+    bool pending = true;
+    ~Drain() { if (pending) { argus_profile::Scope timer(argus_profile::synchronization); if (cudaStreamSynchronize(value) != cudaSuccess) { GGML_ABORT("ARGUS CUDA stream failed"); } } }
 };
 
 void elapsed(argus_profile::Metric metric, const Event & start, const Event & end) {
@@ -77,12 +78,24 @@ struct CopyEvents { Event start, end; bool device_source = false; };
 thread_local std::vector<std::unique_ptr<CopyEvents>> copy_events;
 thread_local size_t pending_copies = 0;
 
+struct ResidentKV {
+    const void * const * keys;
+    const void * const * values;
+    size_t key_offset, value_offset;
+};
+__device__ float resident_value(const void * const * pages, size_t offset, size_t index) {
+    const size_t position = offset + index * sizeof(half);
+    const auto * page = static_cast<const char *>(pages[position / 4096]);
+    return page ? __half2float(*reinterpret_cast<const half *>(page + position % 4096)) : 0.0f;
+}
+
 // One block per query/head. Online softmax state survives tile boundaries.
 // ponytail: scalar FP16 tiles first; replace with tiled MMA after mechanism parity.
+template<bool resident>
 __global__ void attention_tile(const char * query, const half * keys, const half * values,
         const char * mask, bool half_mask, float * output, float * state,
         int dk, int dv, int heads, int kv_heads, int tokens, int first, int count, bool last,
-        size_t q_head, size_t q_token, size_t mask_cell, size_t mask_token, float scale) {
+        size_t q_head, size_t q_token, size_t mask_cell, size_t mask_token, float scale, ResidentKV pages) {
     const int row = blockIdx.x, head = row % heads, token = row / heads, d = threadIdx.x;
     if (token >= tokens) { return; }
     const int kv_head = head / (heads / kv_heads);
@@ -96,7 +109,12 @@ __global__ void attention_tile(const char * query, const half * keys, const half
         const char * entry = mask + (first + cell) * mask_cell + token * mask_token;
         const float bias = half_mask ? __half2float(*reinterpret_cast<const half *>(entry)) : *reinterpret_cast<const float *>(entry);
         if (bias == -INFINITY) { continue; }
-        reduction[d] = d < dk ? q[d] * __half2float(keys[(cell * kv_heads + kv_head) * dk + d]) : 0.0f;
+        float key = 0.0f;
+        if (d < dk) {
+            if constexpr (resident) { key = resident_value(pages.keys, pages.key_offset, (size_t(first + cell) * kv_heads + kv_head) * dk + d); }
+            else { key = __half2float(keys[(cell * kv_heads + kv_head) * dk + d]); }
+        }
+        reduction[d] = d < dk ? q[d] * key : 0.0f;
         __syncthreads();
         for (int width = 128; width; width /= 2) {
             if (d < width) { reduction[d] += reduction[d + width]; }
@@ -109,13 +127,83 @@ __global__ void attention_tile(const char * query, const half * keys, const half
             sum = alpha * sum + beta; maximum = next;
         }
         __syncthreads();
-        if (d < dv) { acc = alpha * acc + beta * __half2float(values[(cell * kv_heads + kv_head) * dv + d]); }
+        if (d < dv) {
+            float value;
+            if constexpr (resident) { value = resident_value(pages.values, pages.value_offset, (size_t(first + cell) * kv_heads + kv_head) * dv + d); }
+            else { value = __half2float(values[(cell * kv_heads + kv_head) * dv + d]); }
+            acc = alpha * acc + beta * value;
+        }
         __syncthreads();
     }
     if (d < dv) { output[row * dv + d] = last ? (sum > 0 ? acc / sum : 0.0f) : acc; }
     if (d == 0) { state[2 * row] = maximum; state[2 * row + 1] = sum; }
 }
 void cpu_refused(ggml_tensor *, int, int, void *) { GGML_ABORT("ARGUS CUDA attention assigned to CPU"); }
+
+struct ResidentRequest {
+    ggml_tensor * dst;
+    cudaStream_t stream;
+    const void ** table;
+    size_t state_bytes;
+};
+void resident_compute(size_t k_pages, size_t v_pages, void * raw) {
+    auto & request = *static_cast<ResidentRequest *>(raw);
+    auto * dst = request.dst;
+    const auto * q = dst->src[0], * k = dst->src[1], * v = dst->src[2], * mask = dst->src[3];
+    const size_t bytes = (k_pages + v_pages) * sizeof(void *);
+    ArgusStagingReservation scratch(aligned(bytes) + request.state_bytes);
+    ArgusTierBuffer table(ArgusTier::gpu, bytes), state(ArgusTier::gpu, request.state_bytes);
+    Drain drain{request.stream};
+    argus_cuda_copy(table.data(), request.table, bytes, false, request.stream);
+    const auto * pointers = static_cast<const void * const *>(table.data());
+    const ResidentKV pages{pointers, pointers + k_pages,
+        reinterpret_cast<uintptr_t>(k->data) % 4096, reinterpret_cast<uintptr_t>(v->data) % 4096};
+    float scale;
+    std::memcpy(&scale, reinterpret_cast<const char *>(dst->op_params) + sizeof(ggml_custom_op_params), sizeof scale);
+    std::unique_ptr<Event> begin, end;
+    if (argus_profile::cuda_events()) {
+        begin = std::make_unique<Event>(); end = std::make_unique<Event>();
+        check(cudaEventRecord(begin->value, request.stream));
+    }
+    for (int64_t first = 0; first < k->ne[2]; first += 32) {
+        const size_t count = std::min<int64_t>(32, k->ne[2] - first);
+        attention_tile<true><<<q->ne[1] * q->ne[2], 256, 0, request.stream>>>(
+            static_cast<const char *>(q->data), nullptr, nullptr, static_cast<const char *>(mask->data),
+            mask->type == GGML_TYPE_F16, static_cast<float *>(dst->data), static_cast<float *>(state.data()),
+            q->ne[0], v->ne[0], q->ne[1], k->ne[1], q->ne[2], first, count, first + count == size_t(k->ne[2]),
+            q->nb[1], q->nb[2], mask->nb[0], mask->nb[1], scale, pages);
+        check(cudaGetLastError());
+        if (argus_profile::enabled()) { ++argus_profile::kernel_launches[argus_profile::phase]; }
+    }
+    if (end) { check(cudaEventRecord(end->value, request.stream)); }
+    // The sole wait protects borrowed pages and the pointer table/state lifetime.
+    argus_cuda_wait(request.stream);
+    drain.pending = false;
+    if (end) { elapsed(argus_profile::kernel_gpu, *begin, *end); }
+    if (argus_profile::enabled()) {
+        ++argus_profile::resident_calls[argus_profile::phase];
+        argus_profile::resident_table_bytes[argus_profile::phase] += bytes;
+    }
+}
+
+bool try_resident(ggml_tensor * dst, cudaStream_t stream, size_t state_bytes) {
+    const char * path = std::getenv("ARGUS_KV_ATTENTION_PATH");
+    if (path && std::strcmp(path, "staged") != 0 && std::strcmp(path, "direct") != 0) {
+        throw std::invalid_argument("ARGUS_KV_ATTENTION_PATH must be staged or direct");
+    }
+    if (dst->src[0]->ne[2] <= 1 || (path && std::strcmp(path, "staged") == 0)) { return false; }
+    size_t count = 0;
+    for (auto * tensor : {dst->src[1], dst->src[2]}) {
+        count += (reinterpret_cast<uintptr_t>(tensor->data) % 4096 + ggml_nbytes(tensor) + 4095) / 4096;
+    }
+    const size_t bytes = aligned(count * sizeof(void *));
+    const auto budget = argus_tier_budget(ArgusTier::gpu);
+    if (bytes + state_bytes > budget.limit || budget.live > budget.limit - bytes - state_bytes ||
+        2 * bytes + state_bytes > argus_disk_staging_limit()) { return false; }
+    ArgusStagingBuffer table(bytes);
+    ResidentRequest request{dst, stream, static_cast<const void **>(table.data()), state_bytes};
+    return argus_disk_read_resident(dst->src[1], dst->src[2], request.table, count, resident_compute, &request);
+}
 
 void compute_impl(ggml_tensor * dst, int device, void * raw_stream) {
     argus_profile::Scope total(argus_profile::attention);
@@ -128,6 +216,13 @@ void compute_impl(ggml_tensor * dst, int device, void * raw_stream) {
     const size_t tile_bytes = aligned(key_bytes + value_bytes);
     const size_t state_bytes = aligned(2 * sizeof(float) * q->ne[1] * q->ne[2]);
     argus_kv_policy_prepare(2 * tile_bytes + state_bytes, 2 * tile_bytes);
+    if (try_resident(dst, stream, state_bytes)) {
+        if (!(kr == argus_disk_revision(k)) || !(vr == argus_disk_revision(v))) { throw std::runtime_error("ARGUS stale CUDA attention"); }
+        argus_kv_policy_observe(k);
+        argus_kv_policy_observe(v);
+        ++calls;
+        return;
+    }
     // Includes both double-buffered host/device tiles and the online-softmax state.
     ArgusStagingReservation reservation(4 * tile_bytes + state_bytes);
     std::array<std::unique_ptr<ArgusTierBuffer>, 2> host, gpu;
@@ -158,18 +253,20 @@ void compute_impl(ggml_tensor * dst, int device, void * raw_stream) {
         argus_disk_stage_cuda(v, static_cast<char *>(host[slot]->data()) + key_bytes,
             static_cast<char *>(gpu[slot]->data()) + key_bytes, first * v->nb[2], count * v->nb[2], transfer.value);
         if (start_events) { check(cudaEventRecord(start_events[slot].value, stream)); }
-        attention_tile<<<q->ne[1] * q->ne[2], 256, 0, stream>>>(
+        attention_tile<false><<<q->ne[1] * q->ne[2], 256, 0, stream>>>(
             static_cast<const char *>(q->data), static_cast<const half *>(gpu[slot]->data()),
             reinterpret_cast<const half *>(static_cast<char *>(gpu[slot]->data()) + key_bytes),
             static_cast<const char *>(mask->data), mask->type == GGML_TYPE_F16,
             static_cast<float *>(dst->data), static_cast<float *>(state.data()),
             q->ne[0], v->ne[0], q->ne[1], k->ne[1], q->ne[2], first, count, first + count == size_t(k->ne[2]),
-            q->nb[1], q->nb[2], mask->nb[0], mask->nb[1], scale);
+            q->nb[1], q->nb[2], mask->nb[0], mask->nb[1], scale, {});
+        if (argus_profile::enabled()) { ++argus_profile::kernel_launches[argus_profile::phase]; }
         check(cudaGetLastError());
         check(cudaEventRecord(done[slot].value, stream));
         pending_kernel[slot] = true;
     }
     { argus_profile::Scope timer(argus_profile::synchronization); check(cudaStreamSynchronize(stream)); }
+    drain.pending = false;
     if (start_events) {
         for (int slot = 0; slot < 2; ++slot) {
             if (pending_kernel[slot]) { elapsed(argus_profile::kernel_gpu, start_events[slot], done[slot]); }

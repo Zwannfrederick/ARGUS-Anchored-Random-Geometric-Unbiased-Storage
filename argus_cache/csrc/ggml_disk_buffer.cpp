@@ -795,4 +795,44 @@ void argus_disk_stage_cuda(const ggml_tensor * tensor, void * host, void * devic
         throw;
     }
 }
+
+bool argus_disk_read_resident(const ggml_tensor * k, const ggml_tensor * v,
+        const void ** pages, size_t capacity,
+        void (*consume)(size_t, size_t, void *), void * context) {
+    if (!pages || !consume || !argus_ggml_is_disk_tensor(k) || !argus_ggml_is_disk_tensor(v) ||
+        k->type != GGML_TYPE_F16 || v->type != GGML_TYPE_F16) {
+        throw std::invalid_argument("ARGUS resident read requires F16 disk tensors and a callback");
+    }
+    std::lock_guard<std::mutex> registry_guard(registry_mutex);
+    auto & ks = store_for((k->view_src ? k->view_src : k)->buffer);
+    auto & vs = store_for((v->view_src ? v->view_src : v)->buffer);
+    std::unique_lock<std::mutex> kl(ks.mutex, std::defer_lock), vl(vs.mutex, std::defer_lock);
+    if (&ks == &vs) { kl.lock(); } else { std::lock(kl, vl); }
+    const size_t starts[] = {checked_offset(ks, k, 0, ggml_nbytes(k)), checked_offset(vs, v, 0, ggml_nbytes(v))};
+    const ggml_tensor * tensors[] = {k, v};
+    Store * stores[] = {&ks, &vs};
+    size_t counts[2]{}, used = 0;
+    {
+        argus_profile::Scope timer(argus_profile::page_lookup);
+        for (int t = 0; t < 2; ++t) {
+            counts[t] = (starts[t] % page_size + ggml_nbytes(tensors[t]) + page_size - 1) / page_size;
+            if (counts[t] > capacity - used) { throw std::out_of_range("ARGUS resident pointer table capacity"); }
+            for (size_t i = 0; i < counts[t]; ++i) {
+                const auto & page = stores[t]->pages[starts[t] / page_size + i];
+                if (page.codec != GGML_TYPE_F16) { return false; }
+                if (!page.content_revision || page.active == 2) { pages[used++] = nullptr; }
+                else if (page.resident && page.resident->tier() == ArgusTier::gpu) { pages[used++] = page.resident->data(); }
+                else { return false; }
+            }
+        }
+    }
+    consume(counts[0], counts[1], context);
+    // Preserve the staged path's successful 32-cell read history for policy.
+    for (int64_t first = 0; first < k->ne[2]; first += 32) {
+        const size_t count = std::min<int64_t>(32, k->ne[2] - first);
+        record_access(ks, starts[0] + first * k->nb[2], count * k->nb[2]);
+        record_access(vs, starts[1] + first * v->nb[2], count * v->nb[2]);
+    }
+    return true;
+}
 #endif
