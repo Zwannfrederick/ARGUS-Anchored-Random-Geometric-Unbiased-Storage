@@ -229,8 +229,8 @@ __global__ void attention_resident_batch(const char * query, const char * mask, 
     }
 }
 
-// Lane-per-cell variant of attention_resident_batch<64, true>, bit-exact with it and
-// the default for eligible views (D=64, rows aligned to their size).
+// Lane-per-cell variant of attention_resident_batch<64, true>, bit-exact with it; the
+// mlp instantiation is the default for eligible views (D=64, rows aligned to their size).
 // One warp still owns one query row; each 32-cell tile is split into
 //  1. parallel scores: lane c computes cell c's dot product with the identical
 //     tree (p_i + p_{i+32}, then strides 16, 8, 4, 2, 1 — the former lane/shuffle
@@ -242,6 +242,11 @@ __global__ void attention_resident_batch(const char * query, const char * mask, 
 //     equal differences), then each lane's alpha/beta with the same expf inputs;
 //  3. the only order-dependent arithmetic, unchanged: sum and acc[d] advance
 //     cell by cell through the same __fmaf_rn chains, skipping masked cells.
+// mlp (default): the sequential loop is branch-free. Masked cells get a null V row and (0, 0)
+// weights, their step runs and is discarded by a select, so sum/acc keep their exact
+// bits; live cells run the identical operations. Without a per-cell branch, NVCC can
+// issue the V loads of several unrolled cells before the first one is consumed.
+template<bool mlp>
 __global__ void attention_resident_cells(const char * query, const char * mask, bool half_mask,
         float * output, int heads, int kv_heads, int tokens, int cells,
         size_t q_head, size_t q_token, size_t mask_cell, size_t mask_token, float scale, ResidentKV pages) {
@@ -302,6 +307,9 @@ __global__ void attention_resident_cells(const char * query, const char * mask, 
                 for (int i = 0; i < width; ++i) { half_sums[i] = __fadd_rn(half_sums[i], half_sums[i + width]); }
             }
             score = __fmaf_rn(half_sums[0], scale, bias);
+        } else if constexpr (mlp) {
+            value_rows[warp][lane] = nullptr;
+            weights[warp][lane] = make_float2(0.0f, 0.0f);
         }
         // Inclusive fmaxf scan; masked lanes contribute -inf, the fmaxf identity here
         // (the running maximum is never NaN: fmaxf only returns NaN for two NaNs).
@@ -319,6 +327,22 @@ __global__ void attention_resident_cells(const char * query, const char * mask, 
         }
         maximum = fmaxf(maximum, __shfl_sync(0xffffffff, scan, 31));
         __syncwarp();
+        if constexpr (mlp) {
+            #pragma unroll 4
+            for (int c = 0; c < 32; ++c) {
+                const bool live_cell = active >> c & 1;
+                const float2 weight = weights[warp][c];
+                const half * value_row = value_rows[warp][c];
+                const float next_sum = __fmaf_rn(weight.x, sum, weight.y);
+                sum = live_cell ? next_sum : sum;
+                #pragma unroll
+                for (int j = 0; j < 2; ++j) {
+                    const float value = value_row ? __half2float(__ldg(value_row + lane + j * 32)) : 0.0f;
+                    const float next = __fmaf_rn(weight.x, acc[j], __fmul_rn(weight.y, value));
+                    acc[j] = live_cell ? next : acc[j];
+                }
+            }
+        } else {
         #pragma unroll 4
         for (int c = 0; c < 32; ++c) {
             if (!(active >> c & 1)) { continue; }
@@ -330,6 +354,7 @@ __global__ void attention_resident_cells(const char * query, const char * mask, 
                 const float value = value_row ? __half2float(__ldg(value_row + lane + j * 32)) : 0.0f;
                 acc[j] = __fmaf_rn(weight.x, acc[j], __fmul_rn(weight.y, value));
             }
+        }
         }
         __syncwarp();
     }
@@ -344,6 +369,7 @@ struct ResidentRequest {
     size_t state_bytes;
     bool batched;
     bool cells = false;
+    bool cells_mlp = false;
     size_t table_bytes = 0;
     // Written non-GPU pages copied for this invocation only (see ArgusColdStaging).
     std::unique_ptr<ArgusStagingBuffer> cold_host;
@@ -399,7 +425,8 @@ void resident_compute(size_t k_pages, size_t v_pages, void * raw) {
         const bool d64 = q->ne[0] == 64 && v->ne[0] == 64;
         const bool rows = pages.key_offset % (64 * sizeof(half)) == 0 && pages.value_offset % (64 * sizeof(half)) == 0;
         if (request.cells && d64 && rows) {
-            attention_resident_cells<<<(q->ne[1] * q->ne[2] + 3) / 4, 128, 0, request.stream>>>(
+            const auto cells_kernel = request.cells_mlp ? attention_resident_cells<true> : attention_resident_cells<false>;
+            cells_kernel<<<(q->ne[1] * q->ne[2] + 3) / 4, 128, 0, request.stream>>>(
                 static_cast<const char *>(q->data), static_cast<const char *>(mask->data), mask->type == GGML_TYPE_F16,
                 static_cast<float *>(dst->data), q->ne[1], k->ne[1], q->ne[2], k->ne[2],
                 q->nb[1], q->nb[2], mask->nb[0], mask->nb[1], scale, pages);
@@ -436,11 +463,13 @@ void resident_compute(size_t k_pages, size_t v_pages, void * raw) {
 
 bool try_resident(ggml_tensor * dst, cudaStream_t stream, size_t state_bytes) {
     const char * path = std::getenv("ARGUS_KV_ATTENTION_PATH");
-    // Default (and "cells"): batched, with the lane-per-cell D=64 kernel where it applies.
-    // "batched" keeps the warp-per-cell kernel as the control/reference.
-    const bool cells = !path || std::strcmp(path, "cells") == 0;
+    // Default (and "cells-mlp"): batched with the lane-per-cell D=64 kernel and its
+    // branch-free sequential V loop where it applies. References: "cells" keeps the
+    // per-cell-branch loop, "batched" the warp-per-cell kernel.
+    const bool cells_mlp = !path || std::strcmp(path, "cells-mlp") == 0;
+    const bool cells = !path || cells_mlp || std::strcmp(path, "cells") == 0;
     if (path && !cells && std::strcmp(path, "staged") != 0 && std::strcmp(path, "direct") != 0 && std::strcmp(path, "batched") != 0) {
-        throw std::invalid_argument("ARGUS_KV_ATTENTION_PATH must be staged, direct, batched or cells");
+        throw std::invalid_argument("ARGUS_KV_ATTENTION_PATH must be staged, direct, batched, cells or cells-mlp");
     }
     using namespace argus_profile;
     if (dst->src[0]->ne[2] <= 1) { reject(reject_q1); return false; }
@@ -462,6 +491,7 @@ bool try_resident(ggml_tensor * dst, cudaStream_t stream, size_t state_bytes) {
     ResidentRequest request{dst, stream, static_cast<const void **>(table.data()), state_bytes, batched};
     request.table_bytes = bytes;
     request.cells = cells;
+    request.cells_mlp = cells_mlp;
     static constexpr ArgusColdStaging cold{reserve_cold, upload_cold};
     if (!argus_disk_read_resident(dst->src[1], dst->src[2], request.table, count, resident_compute, &request, &cold)) { return false; }
     request.cold_drain.pending = false; // resident_compute drained the stream.

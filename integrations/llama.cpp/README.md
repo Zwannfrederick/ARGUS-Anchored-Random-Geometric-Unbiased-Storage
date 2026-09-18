@@ -250,10 +250,11 @@ records paired profiler-disabled/event runs, CPU-only scopes, the original
 and observed measurement overhead; it does not claim 262K validation.
 
 Resident prefill defaults to a single-launch pointer-table path; for D=64 views whose
-rows are aligned to their size it uses the lane-per-cell kernel (`cells`). Controlled
-comparisons (`ARGUS_KV_ATTENTION_PATH`, or `--attention-path` in the ladder):
-`batched` keeps the warp-per-cell kernel, `direct` the intermediate 32-cell resident
-kernel and `staged` the reference path. All are bit-exact with `staged`.
+rows are aligned to their size it uses the lane-per-cell kernel with a branch-free
+value loop (`cells-mlp`). Controlled comparisons (`ARGUS_KV_ATTENTION_PATH`, or
+`--attention-path` in the ladder): `cells` keeps the per-cell-branch loop, `batched`
+the warp-per-cell kernel, `direct` the intermediate 32-cell resident kernel and
+`staged` the reference path. All are bit-exact with `staged`.
 Q>1 F16 attention is eligible. GPU pages are read in place; written pages on other
 tiers are checksum-verified and copied into bounded per-invocation scratch (not a
 placement change); if that scratch does not fit, the invocation falls back to staged.

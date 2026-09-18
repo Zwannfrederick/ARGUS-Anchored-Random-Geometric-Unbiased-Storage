@@ -167,7 +167,7 @@ static void check_qwen_geometry(std::mt19937 & rng) {
         setenv("ARGUS_KV_ATTENTION_PATH", "staged", 1);
         compute(out, 0, nullptr);
         out_gpu.read(expected.data(), 0, expected.size() * sizeof(float));
-        for (const auto * path : {"direct", "batched", "cells"}) {
+        for (const auto * path : {"direct", "batched", "cells", "cells-mlp"}) {
             setenv("ARGUS_KV_ATTENTION_PATH", path, 1);
             const auto accepted = resident_accepted[prefill].load(), lanes = resident_cell_kernel[prefill].load();
             compute(out, 0, nullptr);
@@ -177,7 +177,7 @@ static void check_qwen_geometry(std::mt19937 & rng) {
                 require(false);
             }
             require(resident_accepted[prefill] == accepted + 1);
-            require(resident_cell_kernel[prefill] == lanes + (std::strcmp(path, "cells") == 0));
+            require(resident_cell_kernel[prefill] == lanes + (std::strncmp(path, "cells", 5) == 0));
         }
     };
     const auto fill_kv = [&](bool constant_keys) {
@@ -245,7 +245,7 @@ static void check_mixed_residency(ggml_tensor * k, ggml_tensor * v, ggml_tensor 
         compute(out, 0, nullptr);
         const auto staged = descriptors(k, v);
         output.read(expected.data(), 0, elements * sizeof(float));
-        for (const auto * path : {"direct", "batched", "cells"}) {
+        for (const auto * path : {"direct", "batched", "cells", "cells-mlp"}) {
             setenv("ARGUS_KV_ATTENTION_PATH", path, 1);
             const auto accepted = resident_accepted[prefill].load(), cold = resident_cold_pages[prefill].load();
             const auto start = descriptors(k, v);
@@ -573,7 +573,7 @@ int main(int argc, char ** argv) try {
             require(resident_rejected[prefill][argus_profile::reject_forced_staged] == forced + 1);
             output_gpu.read(second.data(), 0, second.size() * sizeof(float));
             const auto after_staged = argus_disk_page_descriptor(test_k, 0).access_count;
-            for (const auto * path : {"direct", "batched", "cells"}) {
+            for (const auto * path : {"direct", "batched", "cells", "cells-mlp"}) {
                 setenv("ARGUS_KV_ATTENTION_PATH", path, 1);
                 const auto before_direct = argus_disk_page_descriptor(test_k, 0).access_count;
                 const auto copies = argus_profile::d2d_bytes[argus_profile::prefill].load();
