@@ -60,12 +60,44 @@ Working conclusion, to be confirmed by nsys: attention is still the largest ARGU
 component of the gap. The GPU-control write-verification path (B) is the second, and
 it is a durability/diagnostic-semantics path, not free to change.
 
+## Macro timeline (Nsight Systems, 2026-09-18)
+
+`nsys profile -t cuda --cuda-graph-trace=node`, one warmup + one measured request per
+mode. Window = the measured request's prefill: from the first GPU activity after the
+previous request's last decode attention to the first decode attention of the measured
+request. Measured prefill attention launches are ARGUS cells #1560–3071 and stock
+FlashAttention #1920–3431, after 48 start-up launches per mode. Windows match the server's
+reported prefill: ARGUS 2.798 s vs 2.800 s, stock 1.506 s vs 1.507 s. Tracing inflates
+stock by ~13% and ARGUS by ~1% against profiler-off medians; use the rows for
+attribution only. Script: [`v070-nsys-window.py`](../docs/measurements/v070-nsys-window.py).
+
+| component (measured prefill) | ARGUS GPU-control | stock-host | ARGUS − stock |
+|---|---:|---:|---:|
+| attention kernels | **1.292 s** (cells, 1512) | **0.073 s** (FA 0.054 + fixup 0.019) | **+1.219 s** |
+| model kernels (mmq 0.25, fixup 0.04, quantize 0.03, glu/bcast/norm/rope ~0.06) | ≈0.39 s | ≈0.38 s | ≈0 |
+| H2D copies | 0.017 s (84 MB: page writes, tables) | **0.558 s** (1.69 GB: host KV to GPU per split) | **−0.54 s** |
+| D2H copies | 0.049 s (149 MB: page-write verification, logits) | 0.030 s (99 MB) | +0.02 s |
+| GPU idle inside the window | **1.049 s** | 0.470 s | **+0.58 s** |
+| total | 2.798 s | 1.506 s | +1.29 s |
+
+GPU idle in ARGUS is the CPU critical path between GPU work, dominated by `set_rows`
+page writes. Runtime API inside the window: `cudaMemcpy` 0.237 s (24k synchronous page
+writes/reads), `cudaMalloc` + `cudaFree` 0.077 s (13.6k each), launches 0.213 s. Syncs
+(1.57 s) mostly wait for attention.
+
+Conclusions:
+- Attention alone exceeds the whole gap. Candidate F does not trigger; the attention
+  campaign is the right first target.
+- ARGUS already avoids stock's 0.54 s of per-split KV H2D, and gives about that back
+  in its CPU-side page-write/verification path. That path is the second target, a
+  separate campaign because it touches write verification semantics.
+- Stock's attention uses tensor-core FlashAttention (arithmetic category 3) and is 17.7x
+  faster than the exact kernel. Exact-order work closes part of this; the remainder is
+  the price of the exactness contract, to be measured, not assumed.
+
 ## Pending measurements (need the user: installs and root)
 
-1. **Nsight Systems** (not installed). Install with `sudo pacman -S nsight-systems`.
-   CUDA/OS-runtime tracing needs no root. Then run one GPU-control and one stock-host
-   capture of the same workload. Goal: split H/I and stock's 1.33 s into GPU kernels,
-   copies, CPU ops, split boundaries and idle gaps.
+1. ~~Nsight Systems~~: installed and captured (above).
 2. **Experiment 0: memory-pressure discrimination (Nsight Compute, root).** Same late
    launch (measured request, ubatch 60, layer 0, `--launch-skip 3000`), for
    `cells-mlp` (default) and `cells`. Use the `MemoryWorkloadAnalysis_Chart` and
