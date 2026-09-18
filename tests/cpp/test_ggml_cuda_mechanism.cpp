@@ -2,6 +2,7 @@
 // llama tests separately exercise the actual GGML CUDA backend dispatch.
 #include "ggml_cuda_attention.h"
 #include "ggml_kv_policy.h"
+#include "ggml_profile.h"
 #include "ggml-cuda.h"
 #include <cuda_runtime.h>
 #include <algorithm>
@@ -18,12 +19,15 @@
 
 static bool short_write = false;
 static bool corrupt_read = false;
+static size_t io_reads = 0, io_writes = 0;
 extern "C" ssize_t __real_pwrite(int, const void *, size_t, off_t);
 extern "C" ssize_t __real_pread(int, void *, size_t, off_t);
 extern "C" ssize_t __wrap_pwrite(int fd, const void * data, size_t count, off_t offset) {
+    ++io_writes;
     return __real_pwrite(fd, data, short_write ? count / 2 : count, offset);
 }
 extern "C" ssize_t __wrap_pread(int fd, void * data, size_t count, off_t offset) {
+    ++io_reads;
     const auto result = __real_pread(fd, data, count, offset);
     if (corrupt_read && result > 0) { static_cast<unsigned char *>(data)[0] ^= 1; }
     return result;
@@ -39,6 +43,37 @@ template<class F> void refuses(F f) {
     bool refused = false;
     try { f(); } catch (const std::exception &) { refused = true; }
     require(refused);
+}
+
+static void check_gpu_control() {
+    setenv("ARGUS_KV_GPU_CONTROL", "1", 1);
+    setenv("ARGUS_KV_GPU_BYTES", "16384", 1);
+    auto * ctx = ggml_init({1 << 20, nullptr, true});
+    auto * tensor = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 2048);
+    auto * buffer = ggml_backend_alloc_ctx_tensors_from_buft(ctx, argus_ggml_disk_buffer_type());
+    require(buffer);
+    const auto reads = io_reads, writes = io_writes;
+    std::vector<float> payload(2048, 1.25f), copied(2048);
+    ggml_backend_tensor_set(tensor, payload.data(), 0, 8192);
+    require(argus_disk_page_descriptor(tensor, 0).placement == ArgusTier::gpu);
+    const auto revision = argus_disk_page_revision(tensor, 0);
+    refuses([&] { argus_disk_move_page(tensor, 0, ArgusTier::disk, revision); });
+    setenv("ARGUS_KV_GPU_BYTES", "8192", 1);
+    const float updated = 7.0f;
+    refuses([&] { ggml_backend_tensor_set(tensor, &updated, 0, sizeof(updated)); });
+    require(argus_disk_page_revision(tensor, 0).content_revision == revision.content_revision);
+    ggml_backend_tensor_get(tensor, copied.data(), 0, 8192);
+    require(copied == payload);
+    setenv("ARGUS_KV_GPU_BYTES", "16384", 1);
+    ggml_backend_tensor_set(tensor, &updated, 0, sizeof(updated));
+    payload[0] = updated;
+    ggml_backend_tensor_get(tensor, copied.data(), 0, 8192);
+    require(copied == payload && io_reads == reads && io_writes == writes);
+    ggml_backend_buffer_clear(buffer, 0);
+    require(argus_tier_usage().gpu == 0);
+    ggml_backend_buffer_free(buffer);
+    ggml_free(ctx);
+    unsetenv("ARGUS_KV_GPU_CONTROL");
 }
 
 static void check_policy() {
@@ -266,6 +301,19 @@ int main(int argc, char ** argv) try {
     ggml_backend_buffer_free(store);
     ggml_free(ctx);
     check_policy();
+    check_gpu_control();
+    if (argus_profile::enabled()) {
+        using namespace argus_profile;
+        require(nanoseconds[prefill][attention] > 0);
+        require((nanoseconds[prefill][kernel_gpu] > 0) == cuda_events());
+        require((nanoseconds[prefill][h2d_gpu] > 0) == cuda_events());
+        require((nanoseconds[prefill][d2d_gpu] > 0) == cuda_events());
+        require(h2d_bytes[prefill] > 0 && d2d_bytes[prefill] > 0);
+        require(nanoseconds[prefill][synchronization] > 0 && nanoseconds[other][disk_read] > 0);
+        uint64_t exclusive = 0;
+        for (int m = 0; m < metric_count; ++m) { exclusive += exclusive_nanoseconds[prefill][m].load(); }
+        require(exclusive == nanoseconds[prefill][attention].load());
+    }
     return 0;
 } catch (const std::exception & error) {
     std::fprintf(stderr, "FAILED: %s\n", error.what());

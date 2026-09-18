@@ -1,5 +1,6 @@
 #include "ggml_cuda_attention.h"
 #include "ggml_kv_policy.h"
+#include "ggml_profile.h"
 #include "ggml-cuda.h"
 #include "ggml-impl.h"
 #include <cuda_runtime.h>
@@ -17,6 +18,7 @@
 #include <mutex>
 #include <stdexcept>
 #include <string>
+#include <vector>
 #include <sys/mman.h>
 
 namespace {
@@ -49,21 +51,31 @@ const char * budget_name(ArgusTier tier) {
 struct Stream {
     cudaStream_t value = nullptr;
     Stream() { check(cudaStreamCreateWithFlags(&value, cudaStreamNonBlocking)); }
-    ~Stream() { if (value) { cudaStreamSynchronize(value); cudaStreamDestroy(value); } }
+    ~Stream() { argus_profile::Scope timer(argus_profile::synchronization); if (value) { cudaStreamSynchronize(value); cudaStreamDestroy(value); } }
     Stream(const Stream &) = delete;
     Stream & operator=(const Stream &) = delete;
 };
 struct Event {
     cudaEvent_t value = nullptr;
-    Event() { check(cudaEventCreateWithFlags(&value, cudaEventDisableTiming)); }
+    Event() { check(cudaEventCreateWithFlags(&value, argus_profile::cuda_events() ? cudaEventDefault : cudaEventDisableTiming)); }
     ~Event() { if (value) { cudaEventDestroy(value); } }
     Event(const Event &) = delete;
     Event & operator=(const Event &) = delete;
 };
 struct Drain {
     cudaStream_t value;
-    ~Drain() { if (cudaStreamSynchronize(value) != cudaSuccess) { GGML_ABORT("ARGUS CUDA stream failed"); } }
+    ~Drain() { argus_profile::Scope timer(argus_profile::synchronization); if (cudaStreamSynchronize(value) != cudaSuccess) { GGML_ABORT("ARGUS CUDA stream failed"); } }
 };
+
+void elapsed(argus_profile::Metric metric, const Event & start, const Event & end) {
+    float ms = 0;
+    check(cudaEventElapsedTime(&ms, start.value, end.value));
+    argus_profile::add(metric, static_cast<uint64_t>(ms * 1000000.0));
+}
+struct CopyEvents { Event start, end; bool device_source = false; };
+// Profiling metadata only: reusable events bounded by copies in one existing staging wait.
+thread_local std::vector<std::unique_ptr<CopyEvents>> copy_events;
+thread_local size_t pending_copies = 0;
 
 // One block per query/head. Online softmax state survives tile boundaries.
 // ponytail: scalar FP16 tiles first; replace with tiled MMA after mechanism parity.
@@ -105,7 +117,8 @@ __global__ void attention_tile(const char * query, const half * keys, const half
 }
 void cpu_refused(ggml_tensor *, int, int, void *) { GGML_ABORT("ARGUS CUDA attention assigned to CPU"); }
 
-void compute(ggml_tensor * dst, int device, void * raw_stream) {
+void compute_impl(ggml_tensor * dst, int device, void * raw_stream) {
+    argus_profile::Scope total(argus_profile::attention);
     if (device != 0) { throw std::runtime_error("ARGUS v0.5 CUDA supports device 0 only"); }
     const auto stream = static_cast<cudaStream_t>(raw_stream);
     const auto * q = dst->src[0], * k = dst->src[1], * v = dst->src[2], * mask = dst->src[3];
@@ -125,6 +138,9 @@ void compute(ggml_tensor * dst, int device, void * raw_stream) {
     ArgusTierBuffer state(ArgusTier::gpu, state_bytes);
     Stream transfer;
     Event done[2];
+    std::unique_ptr<Event[]> start_events;
+    if (argus_profile::cuda_events()) { start_events = std::make_unique<Event[]>(2); }
+    bool pending_kernel[2]{};
     // Construct after buffers: all queued work drains before their destructors.
     Drain drain{stream};
     float scale;
@@ -132,12 +148,16 @@ void compute(ggml_tensor * dst, int device, void * raw_stream) {
     const bool overlap = std::getenv("ARGUS_KV_NO_OVERLAP") == nullptr;
     for (int64_t first = 0, step = 0; first < k->ne[2]; first += cells, ++step) {
         const int slot = step % 2;
-        if (step >= 2) { check(cudaEventSynchronize(done[slot].value)); }
-        if (!overlap) { check(cudaStreamSynchronize(stream)); }
+        if (step >= 2) {
+            { argus_profile::Scope timer(argus_profile::synchronization); check(cudaEventSynchronize(done[slot].value)); }
+            if (start_events) { elapsed(argus_profile::kernel_gpu, start_events[slot], done[slot]); pending_kernel[slot] = false; }
+        }
+        if (!overlap) { argus_profile::Scope timer(argus_profile::synchronization); check(cudaStreamSynchronize(stream)); }
         const size_t count = std::min<int64_t>(cells, k->ne[2] - first);
         argus_disk_stage_cuda(k, host[slot]->data(), gpu[slot]->data(), first * k->nb[2], count * k->nb[2], transfer.value);
         argus_disk_stage_cuda(v, static_cast<char *>(host[slot]->data()) + key_bytes,
             static_cast<char *>(gpu[slot]->data()) + key_bytes, first * v->nb[2], count * v->nb[2], transfer.value);
+        if (start_events) { check(cudaEventRecord(start_events[slot].value, stream)); }
         attention_tile<<<q->ne[1] * q->ne[2], 256, 0, stream>>>(
             static_cast<const char *>(q->data), static_cast<const half *>(gpu[slot]->data()),
             reinterpret_cast<const half *>(static_cast<char *>(gpu[slot]->data()) + key_bytes),
@@ -147,17 +167,29 @@ void compute(ggml_tensor * dst, int device, void * raw_stream) {
             q->nb[1], q->nb[2], mask->nb[0], mask->nb[1], scale);
         check(cudaGetLastError());
         check(cudaEventRecord(done[slot].value, stream));
+        pending_kernel[slot] = true;
     }
-    check(cudaStreamSynchronize(stream));
+    { argus_profile::Scope timer(argus_profile::synchronization); check(cudaStreamSynchronize(stream)); }
+    if (start_events) {
+        for (int slot = 0; slot < 2; ++slot) {
+            if (pending_kernel[slot]) { elapsed(argus_profile::kernel_gpu, start_events[slot], done[slot]); }
+        }
+    }
     if (!(kr == argus_disk_revision(k)) || !(vr == argus_disk_revision(v))) { throw std::runtime_error("ARGUS stale CUDA attention"); }
     argus_kv_policy_observe(k);
     argus_kv_policy_observe(v);
     ++calls;
+}
+void compute(ggml_tensor * dst, int device, void * raw_stream) {
+    argus_profile::InPhase phase(dst->src[0]->ne[2] > 1);
+    compute_impl(dst, device, raw_stream);
+    // Publish after timers and scratch destructors, including the final attention call.
     argus_disk_publish_stats();
 }
 } // namespace
 
 ArgusTierBuffer::ArgusTierBuffer(ArgusTier tier, size_t bytes) : tier_(tier), bytes_(aligned(bytes)) {
+    argus_profile::Scope timer(argus_profile::allocation);
     const size_t maximum = setting(budget_name(tier));
     const auto index = static_cast<size_t>(tier);
     {
@@ -181,6 +213,7 @@ ArgusTierBuffer::ArgusTierBuffer(ArgusTier tier, size_t bytes) : tier_(tier), by
     }
 }
 ArgusTierBuffer::~ArgusTierBuffer() {
+    argus_profile::Scope timer(argus_profile::release);
     if (tier_ == ArgusTier::gpu) {
         if (cudaSetDevice(0) != cudaSuccess || cudaFree(data_) != cudaSuccess) { GGML_ABORT("ARGUS CUDA free failed"); }
     } else if (tier_ == ArgusTier::pinned) {
@@ -190,12 +223,14 @@ ArgusTierBuffer::~ArgusTierBuffer() {
     live[static_cast<size_t>(tier_)] -= bytes_;
 }
 void ArgusTierBuffer::read(void * target, size_t offset, size_t bytes) const {
+    argus_profile::Scope timer(argus_profile::tier_read);
     if (offset > bytes_ || bytes > bytes_ - offset) { throw std::out_of_range("ARGUS tier read"); }
     const char * source = static_cast<const char *>(data_) + offset;
     if (tier_ == ArgusTier::gpu) { check(cudaSetDevice(0)); check(cudaMemcpy(target, source, bytes, cudaMemcpyDeviceToHost)); }
     else { std::memcpy(target, source, bytes); }
 }
 void ArgusTierBuffer::write(const void * source, size_t bytes) {
+    argus_profile::Scope timer(argus_profile::tier_write);
     if (bytes > bytes_) { throw std::out_of_range("ARGUS tier write"); }
     if (tier_ == ArgusTier::gpu) { check(cudaSetDevice(0)); check(cudaMemcpy(data_, source, bytes, cudaMemcpyHostToDevice)); }
     else { std::memcpy(data_, source, bytes); }
@@ -211,10 +246,29 @@ ArgusTierBudget argus_tier_budget(ArgusTier tier) {
     return {maximum, live[static_cast<size_t>(tier)]};
 }
 void argus_cuda_copy(void * target, const void * source, size_t bytes, bool device_source, void * stream) {
+    argus_profile::Scope timer(argus_profile::copy_enqueue);
+    CopyEvents * events = nullptr;
+    if (argus_profile::enabled()) {
+        (device_source ? argus_profile::d2d_bytes : argus_profile::h2d_bytes)[argus_profile::phase] += bytes;
+    }
+    if (argus_profile::cuda_events()) {
+        if (pending_copies == copy_events.size()) { copy_events.push_back(std::make_unique<CopyEvents>()); }
+        events = copy_events[pending_copies].get();
+        events->device_source = device_source;
+        check(cudaEventRecord(events->start.value, static_cast<cudaStream_t>(stream)));
+    }
     check(cudaMemcpyAsync(target, source, bytes, device_source ? cudaMemcpyDeviceToDevice : cudaMemcpyHostToDevice,
                           static_cast<cudaStream_t>(stream)));
+    if (events) { check(cudaEventRecord(events->end.value, static_cast<cudaStream_t>(stream))); ++pending_copies; }
 }
-void argus_cuda_wait(void * stream) { check(cudaStreamSynchronize(static_cast<cudaStream_t>(stream))); }
+void argus_cuda_wait(void * stream) {
+    { argus_profile::Scope timer(argus_profile::synchronization); check(cudaStreamSynchronize(static_cast<cudaStream_t>(stream))); }
+    for (size_t i = 0; i < pending_copies; ++i) {
+        const auto & events = *copy_events[i];
+        elapsed(events.device_source ? argus_profile::d2d_gpu : argus_profile::h2d_gpu, events.start, events.end);
+    }
+    pending_copies = 0;
+}
 
 ggml_tensor * argus_ggml_cuda_attention(ggml_context * ctx, ggml_tensor * q, ggml_tensor * k,
                                        ggml_tensor * v, ggml_tensor * mask, float scale) {

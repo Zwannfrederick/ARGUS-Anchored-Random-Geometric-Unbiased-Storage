@@ -1,0 +1,297 @@
+{
+  "generated": "2026-09-17T14:04:02+0300",
+  "host": {
+    "platform": "Linux-7.2.3-zen1-2-zen-x86_64-with-glibc2.44",
+    "cpu_count": 8,
+    "kv_dir_mount": "/dev/sda2[/@home] btrfs"
+  },
+  "model": "/home/zwannfrederick/Masa\u00fcst\u00fc/Sektor/Coding/mamba fix/scratch/models/qwen2.5-0.5b-instruct-q4_k_m.gguf",
+  "kv_type": "f16",
+  "resident_bytes": 4194304,
+  "staging_bytes": 4194304,
+  "settings": {
+    "server": "/home/zwannfrederick/Masa\u00fcst\u00fc/Sektor/Coding/mamba fix/scratch/llama.cpp-v050/build-cuda/bin/llama-server",
+    "model": "/home/zwannfrederick/Masa\u00fcst\u00fc/Sektor/Coding/mamba fix/scratch/models/qwen2.5-0.5b-instruct-q4_k_m.gguf",
+    "kv_dir": "/home/zwannfrederick/Masa\u00fcst\u00fc/Sektor/Coding/mamba fix/scratch/kv",
+    "contexts": [
+      1024
+    ],
+    "modes": [
+      "argus-cuda-off",
+      "argus-cuda-on"
+    ],
+    "resident_bytes": 4194304,
+    "max_kv_bytes": 68719476736,
+    "staging_bytes": 4194304,
+    "gpu_bytes": 2097152,
+    "pinned_bytes": 2097152,
+    "ram_bytes": 0,
+    "warmups": 1,
+    "repeats": 1,
+    "request_timeout": 180.0,
+    "ubatch": 64,
+    "kv_type": "f16",
+    "gpu_layers": "99",
+    "threads": 6,
+    "predict": 16,
+    "output": "scratch/v060-policy-probe.json"
+  },
+  "notes": [
+    "prefill_seconds is server prompt_ms, not measured TTFT",
+    "ARGUS peaks are process-lifetime peaks including warmup; argus_delta excludes warmup",
+    "one fresh server per repeat; fixed input and seed; no prompt-cache reuse",
+    "This probe predates harness/model/library hash recording; exact binary fingerprint was not captured.",
+    "TPOT below was corrected after the run to the inverse of server-reported decode rate."
+  ],
+  "runs": [
+    {
+      "mode": "argus-cuda-off",
+      "context": 1024,
+      "command": [
+        "/home/zwannfrederick/Masa\u00fcst\u00fc/Sektor/Coding/mamba fix/scratch/llama.cpp-v050/build-cuda/bin/llama-server",
+        "-m",
+        "/home/zwannfrederick/Masa\u00fcst\u00fc/Sektor/Coding/mamba fix/scratch/models/qwen2.5-0.5b-instruct-q4_k_m.gguf",
+        "-c",
+        "1024",
+        "-np",
+        "1",
+        "-ngl",
+        "99",
+        "-fa",
+        "on",
+        "-t",
+        "6",
+        "-ctk",
+        "f16",
+        "-ctv",
+        "f16",
+        "--no-webui",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "44261",
+        "-b",
+        "2048",
+        "-ub",
+        "64",
+        "-nkvo"
+      ],
+      "argus_environment": {
+        "ARGUS_KV_DIR": "/home/zwannfrederick/Masa\u00fcst\u00fc/Sektor/Coding/mamba fix/scratch/kv/argus-ladder-rml02a7g",
+        "ARGUS_KV_MAX_BYTES": "68719476736",
+        "ARGUS_KV_RESIDENT_BYTES": "4194304",
+        "ARGUS_KV_STATS_PATH": "/home/zwannfrederick/Masa\u00fcst\u00fc/Sektor/Coding/mamba fix/scratch/kv/argus-ladder-rml02a7g/stats.json",
+        "ARGUS_KV_STAGING_BYTES": "4194304",
+        "ARGUS_KV_GPU_BYTES": "2097152",
+        "ARGUS_KV_PINNED_BYTES": "2097152",
+        "ARGUS_KV_POLICY": "off"
+      },
+      "input_tokens": 944,
+      "input_sha256": "37cf23828e2688dcdc3c07463d26ce70cdb6c55accc79e30ec6cb20a3a4f4dab",
+      "wall_seconds": 27.149602786001196,
+      "prompt_tokens": 944,
+      "prefill_seconds": 21.919914000000002,
+      "prefill_tokens_per_second": 43.06586239343822,
+      "decode_tokens": 16,
+      "decode_tokens_per_second": 2.869208287880292,
+      "tpot_seconds": 0.3485282,
+      "answer": " 935769\n\nQuestion: What is the vault access code",
+      "output_sha256": "8b3032bffeb0fc2efc2ff385eaac61e1d31b281700c49ecd115e332bb39dbac3",
+      "needle_found": true,
+      "truncated": false,
+      "tokens_cached": 959,
+      "argus": {
+        "mode": "direct",
+        "disk_bytes": 25165824,
+        "resident_bytes": 323584,
+        "staging_bytes": 69632,
+        "peak_resident_bytes": 323584,
+        "peak_staging_bytes": 77824,
+        "read_bytes": 1302921216,
+        "written_bytes": 377880576,
+        "committed_pages": 92256,
+        "stores": 1,
+        "gpu_bytes": 36864,
+        "pinned_bytes": 32768,
+        "ram_bytes": 0,
+        "peak_gpu_bytes": 40960,
+        "peak_pinned_bytes": 32768,
+        "peak_ram_bytes": 0,
+        "cuda_attention_calls": 1488,
+        "policy_promotions": 0,
+        "policy_demotions": 0,
+        "policy_rejected": 0,
+        "policy_nanoseconds": 0
+      },
+      "argus_delta": {
+        "read_bytes": 664928256,
+        "written_bytes": 188547072,
+        "committed_pages": 46032,
+        "cuda_attention_calls": 720,
+        "policy_promotions": 0,
+        "policy_demotions": 0,
+        "policy_rejected": 0,
+        "policy_nanoseconds": 0
+      },
+      "peaks": {
+        "rss_bytes": 562917376,
+        "argus_mapped_rss_bytes": 184320,
+        "vram_bytes": 497025024
+      },
+      "kv_logs": [],
+      "repeat": 0
+    },
+    {
+      "mode": "argus-cuda-on",
+      "context": 1024,
+      "command": [
+        "/home/zwannfrederick/Masa\u00fcst\u00fc/Sektor/Coding/mamba fix/scratch/llama.cpp-v050/build-cuda/bin/llama-server",
+        "-m",
+        "/home/zwannfrederick/Masa\u00fcst\u00fc/Sektor/Coding/mamba fix/scratch/models/qwen2.5-0.5b-instruct-q4_k_m.gguf",
+        "-c",
+        "1024",
+        "-np",
+        "1",
+        "-ngl",
+        "99",
+        "-fa",
+        "on",
+        "-t",
+        "6",
+        "-ctk",
+        "f16",
+        "-ctv",
+        "f16",
+        "--no-webui",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "38413",
+        "-b",
+        "2048",
+        "-ub",
+        "64",
+        "-nkvo"
+      ],
+      "argus_environment": {
+        "ARGUS_KV_DIR": "/home/zwannfrederick/Masa\u00fcst\u00fc/Sektor/Coding/mamba fix/scratch/kv/argus-ladder-zpaalzd7",
+        "ARGUS_KV_MAX_BYTES": "68719476736",
+        "ARGUS_KV_RESIDENT_BYTES": "4194304",
+        "ARGUS_KV_STATS_PATH": "/home/zwannfrederick/Masa\u00fcst\u00fc/Sektor/Coding/mamba fix/scratch/kv/argus-ladder-zpaalzd7/stats.json",
+        "ARGUS_KV_STAGING_BYTES": "4194304",
+        "ARGUS_KV_GPU_BYTES": "2097152",
+        "ARGUS_KV_PINNED_BYTES": "2097152",
+        "ARGUS_KV_POLICY": "on"
+      },
+      "input_tokens": 944,
+      "input_sha256": "37cf23828e2688dcdc3c07463d26ce70cdb6c55accc79e30ec6cb20a3a4f4dab",
+      "wall_seconds": 24.397677020999254,
+      "prompt_tokens": 944,
+      "prefill_seconds": 20.770079000000003,
+      "prefill_tokens_per_second": 45.449995640363234,
+      "decode_tokens": 16,
+      "decode_tokens_per_second": 4.136628994846037,
+      "tpot_seconds": 0.2417427333333333,
+      "answer": " 935769\n\nQuestion: What is the vault access code",
+      "output_sha256": "8b3032bffeb0fc2efc2ff385eaac61e1d31b281700c49ecd115e332bb39dbac3",
+      "needle_found": true,
+      "truncated": false,
+      "tokens_cached": 959,
+      "argus": {
+        "mode": "direct",
+        "disk_bytes": 25165824,
+        "resident_bytes": 323584,
+        "staging_bytes": 69632,
+        "peak_resident_bytes": 323584,
+        "peak_staging_bytes": 77824,
+        "read_bytes": 1094701056,
+        "written_bytes": 377880576,
+        "committed_pages": 92256,
+        "stores": 1,
+        "gpu_bytes": 2097152,
+        "pinned_bytes": 2097152,
+        "ram_bytes": 0,
+        "peak_gpu_bytes": 2097152,
+        "peak_pinned_bytes": 2097152,
+        "peak_ram_bytes": 0,
+        "cuda_attention_calls": 1488,
+        "policy_promotions": 3021,
+        "policy_demotions": 1025,
+        "policy_rejected": 0,
+        "policy_nanoseconds": 345494661
+      },
+      "argus_delta": {
+        "read_bytes": 549576704,
+        "written_bytes": 188547072,
+        "committed_pages": 46032,
+        "cuda_attention_calls": 720,
+        "policy_promotions": 1020,
+        "policy_demotions": 33,
+        "policy_rejected": 0,
+        "policy_nanoseconds": 139228405
+      },
+      "peaks": {
+        "rss_bytes": 566276096,
+        "argus_mapped_rss_bytes": 184320,
+        "vram_bytes": 497025024
+      },
+      "kv_logs": [],
+      "repeat": 0
+    }
+  ],
+  "summary": [
+    {
+      "mode": "argus-cuda-off",
+      "context": 1024,
+      "completed": 1,
+      "failed": 0,
+      "wall_seconds": {
+        "min": 27.149602786001196,
+        "median": 27.149602786001196,
+        "max": 27.149602786001196
+      },
+      "prefill_seconds": {
+        "min": 21.919914000000002,
+        "median": 21.919914000000002,
+        "max": 21.919914000000002
+      },
+      "decode_tokens_per_second": {
+        "min": 2.869208287880292,
+        "median": 2.869208287880292,
+        "max": 2.869208287880292
+      },
+      "tpot_seconds": {
+        "min": 0.3485282,
+        "median": 0.3485282,
+        "max": 0.3485282
+      }
+    },
+    {
+      "mode": "argus-cuda-on",
+      "context": 1024,
+      "completed": 1,
+      "failed": 0,
+      "wall_seconds": {
+        "min": 24.397677020999254,
+        "median": 24.397677020999254,
+        "max": 24.397677020999254
+      },
+      "prefill_seconds": {
+        "min": 20.770079000000003,
+        "median": 20.770079000000003,
+        "max": 20.770079000000003
+      },
+      "decode_tokens_per_second": {
+        "min": 4.136628994846037,
+        "median": 4.136628994846037,
+        "max": 4.136628994846037
+      },
+      "tpot_seconds": {
+        "min": 0.2417427333333333,
+        "median": 0.2417427333333333,
+        "max": 0.2417427333333333
+      }
+    }
+  ],
+  "scope": "Exploratory one-pair probe before contiguous row-write batching; not a release baseline."
+}

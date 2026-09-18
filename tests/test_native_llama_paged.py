@@ -140,7 +140,10 @@ def test_cuda_tier_migration_and_attention(tmp_path):
                        "-Wl,--wrap=pwrite", "-Wl,--wrap=pread", "-pthread"],
                       ["-lggml-base", "-lggml-cpu", "-lggml", "-lcudart"])
     for dimension in (48, 64, 256):
-        subprocess.run([binary, _storage(), str(dimension)], check=True, timeout=180)
+        subprocess.run([binary, _storage(), str(dimension)], check=True, timeout=180,
+                       env={**os.environ, "ARGUS_KV_PROFILE": "1"})
+    subprocess.run([binary, _storage(), "64"], check=True, timeout=180,
+                   env={**os.environ, "ARGUS_KV_PROFILE": "cpu"})
 
 
 @pytest.mark.skipif(os.environ.get("ARGUS_TEST_CUDA") != "1", reason="set ARGUS_TEST_CUDA=1 with CUDA build")
@@ -184,8 +187,29 @@ def test_cuda_policy_off_on_preserves_outputs_and_budgets(tmp_path, gpu_budget):
     (tmp_path / "policy-off-on.json").write_text(json.dumps(reports, indent=2) + "\n")
     off, on = reports["off"]["stats"], reports["on"]["stats"]
     assert off["policy_promotions"] == off["policy_demotions"] == 0
+    assert off["policy_nanoseconds"] == 0 and on["policy_nanoseconds"] > 0
     assert on["policy_promotions"] > 0
     if gpu_budget == 4194304:
         assert on["read_bytes"] < off["read_bytes"]
     else:
         assert on["policy_demotions"] > 0
+
+
+@pytest.mark.skipif(os.environ.get("ARGUS_TEST_CUDA") != "1", reason="requires real CUDA")
+def test_cuda_gpu_control_has_no_disk_io_and_preserves_lifecycle(tmp_path):
+    binary = _compile(tmp_path, "tests/cpp/test_llama_paged_attention.cpp", ["-DARGUS_TEST_CUDA_TIER"],
+                      ["-lllama", "-lggml-base"])
+    env = {**os.environ, "ARGUS_KV_STAGING_BYTES": "4194304", "ARGUS_KV_GPU_BYTES": "4194304",
+           "ARGUS_KV_PINNED_BYTES": "4194304", "ARGUS_TEST_PROMPT_TOKENS": "64",
+           "ARGUS_TEST_AUTO_POLICY": "1", "ARGUS_KV_GPU_CONTROL": "1", "ARGUS_KV_POLICY": "off",
+           "ARGUS_KV_PROFILE": "1"}
+    env.pop("ARGUS_TEST_REPORT_LOGITS_ONLY", None)
+    result = subprocess.run([binary, MODEL, _storage(), "f16"], env=env, capture_output=True, text=True, timeout=600)
+    assert result.returncode == 0, result.stderr[-4000:]
+    report = json.loads(next(line for line in result.stdout.splitlines() if line.startswith('{"kv_type"')))
+    assert report["compared_steps"] == 19 and report["greedy_mismatches"] == 0
+    stats = report["stats"]
+    assert stats["read_bytes"] == stats["written_bytes"] == stats["disk_bytes"] == 0
+    assert stats["profile_prefill_kernel_gpu_ns"] > 0 and stats["profile_decode_kernel_gpu_ns"] > 0
+    assert stats["profile_decode_d2d_bytes"] > 0
+    assert stats["peak_gpu_bytes"] <= 4194304

@@ -1,7 +1,9 @@
 #include "ggml_kv_policy.h"
 #include "ggml_cuda_attention.h"
+#include "ggml_profile.h"
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <initializer_list>
@@ -10,6 +12,14 @@
 namespace {
 constexpr size_t page_bytes = 4096;
 std::atomic<uint64_t> promotions{0}, demotions{0}, rejected{0};
+std::atomic<uint64_t> policy_nanoseconds{0};
+struct TimedCall {
+    std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
+    ~TimedCall() {
+        policy_nanoseconds += std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - start).count();
+    }
+};
 
 size_t available(ArgusTier tier) {
     const auto budget = argus_tier_budget(tier);
@@ -68,6 +78,8 @@ bool argus_kv_policy_enabled() {
 
 void argus_kv_policy_prepare(size_t gpu_bytes, size_t pinned_bytes) {
     if (!argus_kv_policy_enabled()) { return; }
+    TimedCall timer;
+    argus_profile::Scope profile(argus_profile::policy);
     for (auto tier : {ArgusTier::gpu, ArgusTier::pinned}) {
         const size_t needed = tier == ArgusTier::gpu ? gpu_bytes : pinned_bytes;
         if (needed > argus_tier_budget(tier).limit) {
@@ -82,6 +94,8 @@ void argus_kv_policy_prepare(size_t gpu_bytes, size_t pinned_bytes) {
 
 void argus_kv_policy_observe(const ggml_tensor * tensor) {
     if (!argus_kv_policy_enabled()) { return; }
+    TimedCall timer;
+    argus_profile::Scope profile(argus_profile::policy);
     if (!argus_ggml_is_disk_tensor(tensor)) { throw std::invalid_argument("ARGUS policy requires disk tensor"); }
     // Full physical pages only; a view may begin/end inside a page.
     const size_t within = reinterpret_cast<uintptr_t>(tensor->data) % page_bytes;
@@ -103,5 +117,5 @@ void argus_kv_policy_observe(const ggml_tensor * tensor) {
 }
 
 ArgusPolicyStats argus_kv_policy_stats() {
-    return {promotions.load(), demotions.load(), rejected.load()};
+    return {promotions.load(), demotions.load(), rejected.load(), policy_nanoseconds.load()};
 }

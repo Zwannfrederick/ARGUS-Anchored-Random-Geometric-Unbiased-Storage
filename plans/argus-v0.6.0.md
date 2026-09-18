@@ -1,6 +1,6 @@
 # ARGUS v0.6 — heterogeneous KV memory runtime
 
-Tarih: 2026-09-17. Durum: **ilk placement policy ve off/on smoke doğrulandı; 262K benchmark baseline'ı açık**.
+Tarih: 2026-09-17. Durum: **4K Qwen2.5-0.5B maliyet atfı öncelikli; 262K benchmark kullanıcı kararıyla beklemede**.
 Sürüm ayrımı (kullanıcı onayı): **v0.5 = mechanism, v0.6 = policy**. Bütçeli
 allocation, açık migration ve attention v0.5; hangi sayfanın nereye ve hangi
 codec ile taşınacağını seçen otomatik policy v0.6 sorumluluğudur.
@@ -77,8 +77,30 @@ context çalışma noktası değildir. 3 CPU ve 4 GPU testi geçti; GPU mekanizm
 testi D=48/64/256, tier fallback, admission, eviction, bozuk backing reddi ve
 teardown'u kapsıyor.
 
-Sıradaki iş policy maliyetini uzun context'te ölçmek ve buna göre seçim/taşıma
-stratejisini geliştirmek. 262K baseline ve kalite kabul eşikleri kararı hâlâ açık.
+Kullanıcı yönlendirmesi: 262K çalıştırılmayacak. Önce aynı 4K Qwen2.5-0.5B
+workload'unda stock-host / policy off / policy on / disk erişimsiz GPU control
+karşılaştırılacak. Policy, blocking disk I/O, set_rows/write, descriptor lookup/
+scan, H2D/D2D staging, kernel ve synchronization ayrı ölçülecek; ölçümden önce
+attention/placement optimizasyonu yapılmayacak. Küçük-context yol makul hale
+gelmeden 262K'ya dönülmeyecek. 262K baseline ve kalite eşikleri hâlâ açık.
+
+Bu yönlendirmeden önceki 1K/4K ölçümleri: [dar bütçe ladder](../docs/measurements/v060-policy-context-ladder-2026-09-17.json)
+ve [64 MiB GPU/pinned karşılaştırması](../docs/measurements/v060-policy-context-resident-2026-09-17.json).
+İlk koşul kapasite baskısı testidir; ikincisi ~48 MiB KV'yi tutabilir. İkisi de
+küçük model tanısıdır; büyük hybrid model veya 262K doğrulaması değildir.
+1K ön incelemede ölçülen tekrarlı 4 KiB row-write maliyeti, mevcut encoding
+buffer'ında bitişik satırları gruplayarak azaltılmıştı. Yeni atıf koşuları bu
+aynı başlangıç uygulamasını kullanır; kernel/tile/staging algoritması değişmez.
+
+[4K maliyet atfı tamamlandı](../docs/measurements/v060-4k-attribution-2026-09-17.md):
+15 ölçüm, aynı 4016-token giriş, policy off/on, 2/64 MiB bütçeler ve sıfır KV
+disk I/O'lu GPU control. Profiler-kapalı control prefill ~39–40 s; kernel
+event toplamı 37,33 s. Dar bütçeli on koşusunda decode disk-read beklemesi
+10,98 s; policy tüm istekte 0,78 s (~%1,25). CPU-only control decode attention
+1,76 s: copy submission 0,61 s, açık synchronization 0,52 s ve staging'in
+exclusive CPU işi 0,44 s. Event overhead ve çalışma zamanı değişkenliği ayrı
+raporlandı; örtüşen GPU/CPU süreleri toplanmadı. Öncelik attention/staging
+yoludur. Bu atıf adımında optimizasyon yapılmadı; 262K hâlâ beklemede.
 
 ## Ürün ve mimari sınır
 
