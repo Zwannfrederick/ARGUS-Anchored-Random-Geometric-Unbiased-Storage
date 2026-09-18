@@ -380,6 +380,52 @@ int main(int argc, char ** argv) try {
             ggml_backend_buffer_free(value_store);
             ggml_free(value_ctx);
 
+            // Qwen2.5-0.5B geometry: 14 Q / 2 KV heads, D=64, one causal 64-token ubatch.
+            setenv("ARGUS_KV_GPU_BYTES", "4194304", 1);
+            const int qwen_heads = 14, qwen_tokens = 64, qwen_cells = 500;
+            auto * qwen_ctx = ggml_init({1 << 20, nullptr, true});
+            auto * qwen_k = ggml_new_tensor_3d(qwen_ctx, GGML_TYPE_F16, 64, 2, qwen_cells);
+            auto * qwen_v = ggml_new_tensor_3d(qwen_ctx, GGML_TYPE_F16, 64, 2, qwen_cells);
+            setenv("ARGUS_KV_GPU_CONTROL", "1", 1);
+            auto * qwen_store = ggml_backend_alloc_ctx_tensors_from_buft(qwen_ctx, argus_ggml_disk_buffer_type());
+            unsetenv("ARGUS_KV_GPU_CONTROL");
+            require(qwen_store);
+            std::vector<ggml_fp16_t> qwen_kv(64 * 2 * qwen_cells);
+            for (auto * tensor : {qwen_k, qwen_v}) {
+                for (auto & x : qwen_kv) { x = ggml_fp32_to_fp16(normal(rng)); }
+                ggml_backend_tensor_set(tensor, qwen_kv.data(), 0, qwen_kv.size() * 2);
+            }
+            auto * qwen_q = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, 64, qwen_heads, qwen_tokens);
+            auto * qwen_mask = ggml_new_tensor_2d(ctx, GGML_TYPE_F16, qwen_cells, qwen_tokens);
+            std::vector<float> qwen_query(64 * qwen_heads * qwen_tokens);
+            for (auto & x : qwen_query) { x = normal(rng); }
+            std::vector<ggml_fp16_t> qwen_bias(qwen_cells * qwen_tokens);
+            for (int t = 0; t < qwen_tokens; ++t) {
+                for (int c = 0; c < qwen_cells; ++c) { qwen_bias[t * qwen_cells + c] = ggml_fp32_to_fp16(c <= 436 + t ? 0.0f : -INFINITY); }
+            }
+            ArgusTierBuffer qwen_q_gpu(ArgusTier::gpu, qwen_query.size() * sizeof(float));
+            ArgusTierBuffer qwen_mask_gpu(ArgusTier::gpu, qwen_bias.size() * 2);
+            ArgusTierBuffer qwen_out_gpu(ArgusTier::gpu, qwen_query.size() * sizeof(float));
+            qwen_q_gpu.write(qwen_query.data(), qwen_query.size() * sizeof(float));
+            qwen_mask_gpu.write(qwen_bias.data(), qwen_bias.size() * 2);
+            qwen_q->data = qwen_q_gpu.data(); qwen_mask->data = qwen_mask_gpu.data();
+            auto * qwen = argus_ggml_cuda_attention(ctx, qwen_q, qwen_k, qwen_v, qwen_mask, 0.125f);
+            qwen->data = qwen_out_gpu.data();
+            std::vector<float> qwen_expected(qwen_query.size()), qwen_actual(qwen_query.size());
+            setenv("ARGUS_KV_ATTENTION_PATH", "staged", 1);
+            compute(qwen, 0, nullptr);
+            qwen_out_gpu.read(qwen_expected.data(), 0, qwen_expected.size() * sizeof(float));
+            for (const auto * path : {"direct", "batched"}) {
+                setenv("ARGUS_KV_ATTENTION_PATH", path, 1);
+                const auto accepted = argus_profile::resident_accepted[prefill].load();
+                compute(qwen, 0, nullptr);
+                require(argus_profile::resident_accepted[prefill] == accepted + 1);
+                qwen_out_gpu.read(qwen_actual.data(), 0, qwen_actual.size() * sizeof(float));
+                require(qwen_actual == qwen_expected);
+            }
+            ggml_backend_buffer_free(qwen_store);
+            ggml_free(qwen_ctx);
+            setenv("ARGUS_KV_GPU_BYTES", "1048576", 1);
         }
         std::vector<const void *> pointers(2 * ((keys.size() * 2 + 4095) / 4096));
         const auto accesses = argus_disk_page_descriptor(rk, 0).access_count;

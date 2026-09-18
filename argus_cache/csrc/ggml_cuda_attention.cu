@@ -123,17 +123,17 @@ __global__ void attention_tile(const char * query, const half * keys, const half
             __syncthreads();
         }
         if (d == 0) {
-            const float score = reduction[0] * scale + bias;
+            const float score = __fmaf_rn(reduction[0], scale, bias);
             const float next = fmaxf(maximum, score);
             alpha = expf(maximum - next); beta = expf(score - next);
-            sum = alpha * sum + beta; maximum = next;
+            sum = __fmaf_rn(alpha, sum, beta); maximum = next;
         }
         __syncthreads();
         if (d < dv) {
             float value;
             if constexpr (resident) { value = resident_value(pages.values, pages.value_offset, (size_t(first + cell) * kv_heads + kv_head) * dv + d); }
             else { value = __half2float(values[(cell * kv_heads + kv_head) * dv + d]); }
-            acc = alpha * acc + beta * value;
+            acc = __fmaf_rn(alpha, acc, __fmul_rn(beta, value));
         }
         __syncthreads();
     }
@@ -145,16 +145,22 @@ void cpu_refused(ggml_tensor *, int, int, void *) { GGML_ABORT("ARGUS CUDA atten
 // Four query/head warps per block, full context in one invocation. The staged
 // 256-lane reduction tree is reproduced in registers, then warp shuffles: no
 // tensor-core/F16 accumulation or reassociation of the FP32 dot product.
+// D > 0 fixes Dk = Dv = D (a multiple of 32) at compile time; D = 0 is the generic
+// Dk/Dv <= 256 kernel. Slots at or beyond D/32 hold the staged tree's structural
+// +0 lanes; skipping those additions changes at most the sign of a zero sum.
+template<int D>
 __global__ void attention_resident_batch(const char * query, const char * mask, bool half_mask,
         float * output, int dk, int dv, int heads, int kv_heads, int tokens, int cells,
         size_t q_head, size_t q_token, size_t mask_cell, size_t mask_token, float scale, ResidentKV pages) {
+    constexpr int slots = D ? D / 32 : 8;
+    if constexpr (D != 0) { dk = D; dv = D; }
     const int row = blockIdx.x * 4 + threadIdx.x / 32, lane = threadIdx.x % 32;
     if (row >= heads * tokens) { return; }
     const int head = row % heads, token = row / heads, kv_head = head / (heads / kv_heads);
     const auto * q = reinterpret_cast<const float *>(query + head * q_head + token * q_token);
-    float query_values[8]{}, acc[8]{};
+    float query_values[slots]{}, acc[slots]{};
     #pragma unroll
-    for (int j = 0; j < 8; ++j) { if (lane + j * 32 < dk) { query_values[j] = q[lane + j * 32]; } }
+    for (int j = 0; j < slots; ++j) { if (lane + j * 32 < dk) { query_values[j] = q[lane + j * 32]; } }
     float maximum = -INFINITY, sum = 0.0f;
     for (int cell = 0; cell < cells; ++cell) {
         const char * entry = mask + size_t(cell) * mask_cell + token * mask_token;
@@ -162,15 +168,15 @@ __global__ void attention_resident_batch(const char * query, const char * mask, 
         if (bias == -INFINITY) { continue; }
         float product[8]{};
         #pragma unroll
-        for (int j = 0; j < 8; ++j) {
+        for (int j = 0; j < slots; ++j) {
             const int d = lane + j * 32;
             if (d < dk) { product[j] = __fmul_rn(query_values[j], resident_value(pages.keys, pages.key_offset, (size_t(cell) * kv_heads + kv_head) * dk + d)); }
         }
         #pragma unroll
-        for (int j = 0; j < 4; ++j) { product[j] = __fadd_rn(product[j], product[j + 4]); }
+        for (int j = 0; j < 4; ++j) { if (j + 4 < slots) { product[j] = __fadd_rn(product[j], product[j + 4]); } }
         #pragma unroll
-        for (int j = 0; j < 2; ++j) { product[j] = __fadd_rn(product[j], product[j + 2]); }
-        float dot = __fadd_rn(product[0], product[1]);
+        for (int j = 0; j < 2; ++j) { if (j + 2 < slots) { product[j] = __fadd_rn(product[j], product[j + 2]); } }
+        float dot = slots > 1 ? __fadd_rn(product[0], product[1]) : product[0];
         #pragma unroll
         for (int width = 16; width; width /= 2) {
             const float other = __shfl_down_sync(0xffffffff, dot, width);
@@ -178,15 +184,16 @@ __global__ void attention_resident_batch(const char * query, const char * mask, 
         }
         float alpha = 0.0f, beta = 0.0f;
         if (lane == 0) {
-            const float score = dot * scale + bias;
+            // Explicit forms of the contractions NVCC emits for the staged kernel.
+            const float score = __fmaf_rn(dot, scale, bias);
             const float next = fmaxf(maximum, score);
             alpha = expf(maximum - next); beta = expf(score - next);
-            sum = alpha * sum + beta; maximum = next;
+            sum = __fmaf_rn(alpha, sum, beta); maximum = next;
         }
         alpha = __shfl_sync(0xffffffff, alpha, 0);
         beta = __shfl_sync(0xffffffff, beta, 0);
         #pragma unroll
-        for (int j = 0; j < 8; ++j) {
+        for (int j = 0; j < slots; ++j) {
             const int d = lane + j * 32;
             if (d < dv) {
                 const float value = resident_value(pages.values, pages.value_offset, (size_t(cell) * kv_heads + kv_head) * dv + d);
@@ -198,7 +205,7 @@ __global__ void attention_resident_batch(const char * query, const char * mask, 
     }
     sum = __shfl_sync(0xffffffff, sum, 0);
     #pragma unroll
-    for (int j = 0; j < 8; ++j) {
+    for (int j = 0; j < slots; ++j) {
         const int d = lane + j * 32;
         if (d < dv) { output[row * dv + d] = sum > 0 ? acc[j] / sum : 0.0f; }
     }
@@ -233,7 +240,8 @@ void resident_compute(size_t k_pages, size_t v_pages, void * raw) {
         check(cudaEventRecord(begin->value, request.stream));
     }
     if (request.batched) {
-        attention_resident_batch<<<(q->ne[1] * q->ne[2] + 3) / 4, 128, 0, request.stream>>>(
+        const auto kernel = q->ne[0] == 64 && v->ne[0] == 64 ? attention_resident_batch<64> : attention_resident_batch<0>;
+        kernel<<<(q->ne[1] * q->ne[2] + 3) / 4, 128, 0, request.stream>>>(
             static_cast<const char *>(q->data), static_cast<const char *>(mask->data), mask->type == GGML_TYPE_F16,
             static_cast<float *>(dst->data), q->ne[0], v->ne[0], q->ne[1], k->ne[1], q->ne[2], k->ne[2],
             q->nb[1], q->nb[2], mask->nb[0], mask->nb[1], scale, pages);
