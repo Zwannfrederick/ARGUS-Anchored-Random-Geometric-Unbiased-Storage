@@ -243,7 +243,19 @@ int main(int argc, char ** argv) try {
         require(compute && argus_ggml_is_cuda_attention(out));
         std::vector<float> first(query.size()), second(query.size());
         const auto before_compute = argus_disk_page_descriptor(k, 0);
+        using argus_profile::resident_rejected;
+        using argus_profile::prefill;
+        const auto key_rejects = resident_rejected[prefill][argus_profile::reject_key_page].load();
+        const auto censused = argus_profile::census[prefill].invocations.load();
         compute(out, 0, nullptr);
+        // K page 0 is GPU, page 1 pinned: the first failing check is a nonresident K page.
+        require(resident_rejected[prefill][argus_profile::reject_key_page] == key_rejects + 1);
+        if (argus_profile::enabled()) {
+            const auto & c = argus_profile::census[prefill];
+            require(c.invocations == censused + 1 && c.cold_key_invocations > 0 && c.cold_value_invocations > 0);
+            require(c.pages[argus_profile::page_gpu] > 0 && c.pages[argus_profile::page_pinned] > 0 &&
+                    c.pages[argus_profile::page_ram] > 0 && c.pages[argus_profile::page_disk] > 0);
+        }
         const auto after_compute = argus_disk_page_descriptor(k, 0);
         require(after_compute.placement == ArgusTier::gpu && after_compute.codec == GGML_TYPE_F16);
         require(after_compute.access_count > before_compute.access_count &&
@@ -320,14 +332,18 @@ int main(int argc, char ** argv) try {
             result->data = output_gpu.data();
             setenv("ARGUS_KV_ATTENTION_PATH", "staged", 1);
             const auto before_staged = argus_disk_page_descriptor(test_k, 0).access_count;
+            const auto forced = resident_rejected[prefill][argus_profile::reject_forced_staged].load();
             compute(result, 0, nullptr);
+            require(resident_rejected[prefill][argus_profile::reject_forced_staged] == forced + 1);
             output_gpu.read(second.data(), 0, second.size() * sizeof(float));
             const auto after_staged = argus_disk_page_descriptor(test_k, 0).access_count;
             for (const auto * path : {"direct", "batched"}) {
                 setenv("ARGUS_KV_ATTENTION_PATH", path, 1);
                 const auto before_direct = argus_disk_page_descriptor(test_k, 0).access_count;
                 const auto copies = argus_profile::d2d_bytes[argus_profile::prefill].load();
+                const auto accepted = argus_profile::resident_accepted[prefill].load();
                 compute(result, 0, nullptr);
+                require(argus_profile::resident_accepted[prefill] == accepted + 1);
                 std::vector<float> direct(second.size());
                 output_gpu.read(direct.data(), 0, direct.size() * sizeof(float));
                 if (direct != second) {
@@ -363,6 +379,7 @@ int main(int argc, char ** argv) try {
             require(actual == expected);
             ggml_backend_buffer_free(value_store);
             ggml_free(value_ctx);
+
         }
         std::vector<const void *> pointers(2 * ((keys.size() * 2 + 4095) / 4096));
         const auto accesses = argus_disk_page_descriptor(rk, 0).access_count;
@@ -388,8 +405,10 @@ int main(int argc, char ** argv) try {
         auto * decode = argus_ggml_cuda_attention(ctx, one_query, rk, rv, float_mask, 0.125f);
         decode->data = output_gpu.data();
         const auto resident_decodes = argus_profile::resident_calls[argus_profile::decode].load();
+        const auto q1 = resident_rejected[argus_profile::decode][argus_profile::reject_q1].load();
         compute(decode, 0, nullptr);
         require(argus_profile::resident_calls[argus_profile::decode] == resident_decodes);
+        require(resident_rejected[argus_profile::decode][argus_profile::reject_q1] == q1 + 1);
         ggml_backend_buffer_clear(resident_store, 0);
         auto * zeros = argus_ggml_cuda_attention(ctx, q, rk, rv, mask, 1.0f);
         zeros->data = output_gpu.data();

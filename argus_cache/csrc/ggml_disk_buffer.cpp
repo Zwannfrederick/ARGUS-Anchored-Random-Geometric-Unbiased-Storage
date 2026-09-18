@@ -46,6 +46,7 @@ struct Store {
     uint64_t id = 0;
     uint64_t content_revision = 0;
     uint64_t access_step = 0;
+    size_t last_written_page = SIZE_MAX; // Diagnostic write frontier for the residency census.
 #ifdef ARGUS_CUDA
     Store * next = nullptr; // Intrusive registry: charged with the store metadata.
     bool gpu_control = false; // Diagnostic GPU-authoritative storage; no disk fallback.
@@ -168,6 +169,7 @@ void write_page(Store & store, size_t page, void * data) {
         descriptor.checksum = digest;
         descriptor.active = 3;
         ++store.content_revision;
+        store.last_written_page = page;
         ++committed_pages;
         return;
     }
@@ -205,6 +207,7 @@ void write_page(Store & store, size_t page, void * data) {
     descriptor.checksum = digest;
     descriptor.active = inactive;
     ++store.content_revision;
+    store.last_written_page = page;
     ++committed_pages;
 }
 
@@ -683,7 +686,7 @@ void argus_disk_publish_stats() {
         ",\"policy_rejected\":" + std::to_string(policy.rejected) +
         ",\"policy_nanoseconds\":" + std::to_string(policy.nanoseconds);
 #endif
-    tier_stats += argus_profile::json_fields();
+    tier_stats += argus_profile::json_fields() + argus_profile::residency_json();
     std::lock_guard<std::mutex> guard(budget_mutex);
     const std::string scratch = std::string(path) + ".tmp";
     FILE * stream = std::fopen(scratch.c_str(), "w");
@@ -796,6 +799,47 @@ void argus_disk_stage_cuda(const ggml_tensor * tensor, void * host, void * devic
     }
 }
 
+// Diagnostic snapshot of the pages an attention invocation would read, taken before
+// record_access so access counts are those the eligibility check saw.
+static void residency_census(Store * const stores[2], const size_t starts[2], const size_t counts[2]) {
+    using namespace argus_profile;
+    Scope timer(descriptor_scan);
+    auto & c = census[phase];
+    uint64_t gpu = 0, written = 0, cold = 0;
+    for (int t = 0; t < 2; ++t) {
+        const Page * pages = stores[t]->pages + starts[t] / page_size;
+        const auto is_written = [&](size_t i) { return pages[i].content_revision && pages[i].active != 2; };
+        const auto tier = [&](size_t i) { return pages[i].resident ? pages[i].resident->tier() : ArgusTier::disk; };
+        // Distance behind the store's most recent page write; pages ahead of it (or a
+        // frontier outside this view) are binned as 64+.
+        const size_t first = starts[t] / page_size, last = stores[t]->last_written_page;
+        uint64_t tensor_cold = 0, run = 0;
+        bool previous_cold = false;
+        for (size_t i = 0; i < counts[t]; ++i) {
+            const bool page_written = is_written(i);
+            const auto placement = tier(i);
+            const bool is_cold = page_written && placement != ArgusTier::gpu;
+            ++c.pages[!page_written ? page_unwritten : placement == ArgusTier::gpu ? page_gpu :
+                      placement == ArgusTier::pinned ? page_pinned : placement == ArgusTier::ram ? page_ram : page_disk];
+            written += page_written;
+            gpu += page_written && !is_cold;
+            if (i && is_cold != previous_cold) { ++c.transitions; }
+            if (is_cold) {
+                ++tensor_cold; ++run;
+                ++c.frontier_distance[last >= first + i && last != SIZE_MAX ? bin(last - first - i) : bins - 1];
+                ++c.cold_access[bin(pages[i].access_count)];
+            } else if (run) { ++c.cold_runs; ++c.run_length[bin(run)]; run = 0; }
+            previous_cold = is_cold;
+        }
+        if (run) { ++c.cold_runs; ++c.run_length[bin(run)]; }
+        if (tensor_cold) { ++(t ? c.cold_value_invocations : c.cold_key_invocations); }
+        cold += tensor_cold;
+    }
+    ++c.invocations;
+    ++c.resident_percent[percent_bin(gpu, written)];
+    for (auto seen = c.max_cold_pages.load(); cold > seen && !c.max_cold_pages.compare_exchange_weak(seen, cold);) {}
+}
+
 bool argus_disk_read_resident(const ggml_tensor * k, const ggml_tensor * v,
         const void ** pages, size_t capacity,
         void (*consume)(size_t, size_t, void *), void * context) {
@@ -814,17 +858,22 @@ bool argus_disk_read_resident(const ggml_tensor * k, const ggml_tensor * v,
     const ggml_tensor * tensors[] = {k, v};
     Store * stores[] = {&ks, &vs};
     size_t counts[2]{}, used = 0;
+    for (int t = 0; t < 2; ++t) {
+        counts[t] = (starts[t] % page_size + ggml_nbytes(tensors[t]) + page_size - 1) / page_size;
+        if (counts[t] > capacity - used) { throw std::out_of_range("ARGUS resident pointer table capacity"); }
+        used += counts[t];
+    }
+    if (argus_profile::enabled()) { residency_census(stores, starts, counts); }
+    used = 0;
     {
         argus_profile::Scope timer(argus_profile::page_lookup);
         for (int t = 0; t < 2; ++t) {
-            counts[t] = (starts[t] % page_size + ggml_nbytes(tensors[t]) + page_size - 1) / page_size;
-            if (counts[t] > capacity - used) { throw std::out_of_range("ARGUS resident pointer table capacity"); }
             for (size_t i = 0; i < counts[t]; ++i) {
                 const auto & page = stores[t]->pages[starts[t] / page_size + i];
-                if (page.codec != GGML_TYPE_F16) { return false; }
+                if (page.codec != GGML_TYPE_F16) { argus_profile::reject(argus_profile::reject_codec); return false; }
                 if (!page.content_revision || page.active == 2) { pages[used++] = nullptr; }
                 else if (page.resident && page.resident->tier() == ArgusTier::gpu) { pages[used++] = page.resident->data(); }
-                else { return false; }
+                else { argus_profile::reject(t ? argus_profile::reject_value_page : argus_profile::reject_key_page); return false; }
             }
         }
     }
