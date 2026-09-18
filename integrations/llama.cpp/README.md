@@ -189,7 +189,8 @@ Before attention scratch is allocated, resident pages can be evicted across all
 live stores to make room for the exact double-buffered tiles and softmax state.
 The store still owns budget enforcement, checksum verification and stale-token checks.
 
-Stats include `policy_promotions`, `policy_demotions` and `policy_rejected`.
+Stats include `policy_promotions`, `policy_demotions`, `policy_rejected` and
+`policy_nanoseconds` (wall time inside enabled policy calls, including moves).
 Rejected moves preserve the source and increment the failure counter. No codec
 conversion is performed. Selection uses read frequency, not model topology;
 eviction scans descriptors and migrations are synchronous. This is an initial
@@ -198,6 +199,61 @@ stories15M workload with `off/on`, no manual migrations, and both 4 MiB and
 256 KiB GPU budgets.
 The [smoke record](../../docs/measurements/v060-policy-smoke-2026-09-17.json)
 contains both reports and tested source hashes; it does not measure throughput.
+
+The context ladder accepts `argus-cuda-off` and `argus-cuda-on` with `--kv-type
+f16`. Set `--gpu-bytes`, `--pinned-bytes` and optional `--ram-bytes`; use
+`--warmups 1 --repeats 3` for repeated comparisons. Token-ID inputs have an exact
+recorded length and hash. Each repeat starts a fresh server; workload warmups
+run within it, with prompt caching disabled. Counter deltas exclude warmup;
+ARGUS peak counters include the whole process lifetime. `prefill_seconds` is
+server prompt time, not TTFT; TPOT is the inverse of the server's decode rate.
+
+For attribution, add `--profile` (`ARGUS_KV_PROFILE=1`). `--profile cpu`
+(`ARGUS_KV_PROFILE=cpu`) keeps CPU scopes and byte counters without timing events,
+to separate observer overhead from the original wait/submission cost.
+Counters are split into
+prefill (query/append rows > 1), decode (one row), and other operations. CPU
+`profile_*_ns` scopes are inclusive; `*_exclusive_ns` subtract nested CPU scopes.
+They cover policy, set_rows, page writes, blocking O_DIRECT pread/pwrite,
+checksums, page lookup/access accounting, descriptor scans, staging, copy
+submission, explicit CUDA synchronization, tier allocation/free, and synchronous
+tier reads/writes. Syscall time includes blocking plus kernel/CPU overhead;
+it is not device-only service time. Allocation/free can themselves synchronize.
+The measured 4016-token input with ubatch=64 has no single-token prefill tail.
+
+Kernel and H2D/D2D staging use CUDA event brackets, read after existing waits;
+profiling adds no synchronization points. Event intervals can include host
+submission gaps for short operations and device scheduling/resource contention
+with the other stream; transfer event latency is not isolated memcpy-engine
+service time or a bandwidth benchmark. GPU event time overlaps CPU scope/wait
+time and **must not be added** to the CPU exclusive partition. Event objects and
+CPU clocks add overhead: compare the same binary and workload without `--profile`.
+Top-level attention/append scopes omit llama.cpp scheduler/model work and stats
+publication; the request residual is reported separately, not labelled GPU time.
+
+`--modes argus-cuda-control` enables `ARGUS_KV_GPU_CONTROL=1`, a diagnostic
+GPU-authoritative store with policy off. Written KV pages have no backing file
+and cannot migrate away from GPU; payload disk read/write counters must remain
+zero. Writes still use the same CPU set_rows conversion and separately budgeted,
+verified GPU page replacement. Attention still traverses the same page lookup,
+double-buffered staging, 32-cell kernel and synchronization path. Masked unwritten
+padding may stage zeros from the host. This isolates disk placement; it is not a
+durability feature or a proposed optimized production path. Stats/model/log I/O
+are outside the zero-KV-payload-I/O claim. The full KV plus scratch and replacement
+page must fit the GPU budget or the run fails. Use 64 MiB GPU/pinned for the 4K
+Qwen2.5-0.5B diagnostic; compare stock-host, off, on and control in the same run.
+
+The [4K attribution report](../../docs/measurements/v060-4k-attribution-2026-09-17.md)
+records paired profiler-disabled/event runs, CPU-only scopes, the original
+2 MiB pressure point, and the GPU-only control. It separates overlapping timers
+and observed measurement overhead; it does not claim 262K validation.
+
+Contiguous `set_rows` writes now share the existing page-rounded encoding
+buffer. A gap, repeated index, full buffer or strided target flushes the batch.
+This reduces repeated disk writes to the same physical page without increasing
+staging allocations or changing per-page verification/rollback. CPU regression
+checks cover adjacent, boundary-crossing and repeated indices, plus Q8/Q4 bytes;
+the native CUDA lifecycle checks cover F16 output parity.
 
 The opt-in `benchmarks/check_ui_mate_workload.py` compares Turkish, visual labels,
 coordinate grounding and a tool call on a generated fixture (Python 3.10+ and

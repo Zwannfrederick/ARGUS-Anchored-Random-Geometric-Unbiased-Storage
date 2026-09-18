@@ -233,7 +233,9 @@ int main(int argc, char ** argv) try {
     const auto remaining = argus_tier_usage();
     require(!remaining.gpu && !remaining.pinned && !remaining.ram, "native tier allocations leaked");
 #endif
-    setenv("ARGUS_KV_MAX_BYTES", "1", 1);
+    // The diagnostic GPU-only store has no disk allocation; its metadata budget
+    // must still fail closed. GPU payload budget/rollback is covered by mechanism tests.
+    setenv(std::getenv("ARGUS_KV_GPU_CONTROL") ? "ARGUS_KV_RESIDENT_BYTES" : "ARGUS_KV_MAX_BYTES", "1", 1);
     require(llama_init_from_model(model, params) == nullptr, "1-byte allocation budget must refuse");
     llama_model_free(model);
     llama_backend_free();

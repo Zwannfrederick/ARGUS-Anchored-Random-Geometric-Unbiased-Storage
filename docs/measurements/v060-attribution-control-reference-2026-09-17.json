@@ -1,0 +1,281 @@
+{
+  "generated": "2026-09-17T15:08:03+0300",
+  "host": {
+    "platform": "Linux-7.2.3-zen1-2-zen-x86_64-with-glibc2.44",
+    "cpu_count": 8,
+    "kv_dir_mount": "/dev/sda2[/@home] btrfs",
+    "cpu": "11th Gen Intel Core i5-11300H @ 3.10GHz",
+    "gpu": "NVIDIA GeForce RTX 3050 Ti Laptop GPU",
+    "gpu_vram_mib": 4096,
+    "driver": "610.57.04",
+    "kv_device": "KIOXIA-EXCERIA SATA SSD (/dev/sda2, btrfs)"
+  },
+  "model": "/home/zwannfrederick/Masa\u00fcst\u00fc/Sektor/Coding/mamba fix/scratch/models/qwen2.5-0.5b-instruct-q4_k_m.gguf",
+  "kv_type": "f16",
+  "resident_bytes": 4194304,
+  "staging_bytes": 4194304,
+  "settings": {
+    "server": "/home/zwannfrederick/Masa\u00fcst\u00fc/Sektor/Coding/mamba fix/scratch/llama.cpp-v050/build-cuda/bin/llama-server",
+    "model": "/home/zwannfrederick/Masa\u00fcst\u00fc/Sektor/Coding/mamba fix/scratch/models/qwen2.5-0.5b-instruct-q4_k_m.gguf",
+    "kv_dir": "/home/zwannfrederick/Masa\u00fcst\u00fc/Sektor/Coding/mamba fix/scratch/kv",
+    "contexts": [
+      4096
+    ],
+    "modes": [
+      "stock-host-kv",
+      "argus-cuda-control"
+    ],
+    "profile": null,
+    "resident_bytes": 4194304,
+    "max_kv_bytes": 68719476736,
+    "staging_bytes": 4194304,
+    "gpu_bytes": 67108864,
+    "pinned_bytes": 67108864,
+    "ram_bytes": 0,
+    "warmups": 1,
+    "repeats": 1,
+    "request_timeout": 600.0,
+    "ubatch": 64,
+    "kv_type": "f16",
+    "gpu_layers": "99",
+    "threads": 6,
+    "predict": 16,
+    "output": "docs/measurements/v060-attribution-control-reference-2026-09-17.json"
+  },
+  "sha256": {
+    "model": "74a4da8c9fdbcd15bd1f6d01d621410d31c6fc00986f5eb687824e7b93d7a9db",
+    "server": "1586bbb12ad678ed33cd4185375de6fd17de40ca5029fae7d0ae6f6fcaa9ab9e",
+    "harness": "f72066d5d41ec7dedd29185a92cc5755035db4756450efdab8e7c704cf24cef6",
+    "libllama": "02666fe8f97ce008ab105aa1e1f3c4455a2136439a31db2ae84faf29570d615d"
+  },
+  "notes": [
+    "prefill_seconds is server prompt_ms, not measured TTFT",
+    "ARGUS peaks are process-lifetime peaks including warmup; argus_delta excludes warmup",
+    "profile *_ns CPU scopes are inclusive; *_exclusive_ns subtract nested CPU scopes; GPU events overlap CPU waits",
+    "disk_read/write_ns measure blocking O_DIRECT syscall elapsed time, not device-only service time",
+    "profile phases use query/row count >1 for prefill, 1 for decode; matched here to ubatch=64 and 4016 prompt tokens",
+    "GPU control is diagnostic GPU-authoritative storage with policy off; no backing file or payload disk I/O",
+    "one fresh server per repeat; fixed input and seed; no prompt-cache reuse"
+  ],
+  "runs": [
+    {
+      "mode": "stock-host-kv",
+      "context": 4096,
+      "command": [
+        "/home/zwannfrederick/Masa\u00fcst\u00fc/Sektor/Coding/mamba fix/scratch/llama.cpp-v050/build-cuda/bin/llama-server",
+        "-m",
+        "/home/zwannfrederick/Masa\u00fcst\u00fc/Sektor/Coding/mamba fix/scratch/models/qwen2.5-0.5b-instruct-q4_k_m.gguf",
+        "-c",
+        "4096",
+        "-np",
+        "1",
+        "-ngl",
+        "99",
+        "-fa",
+        "on",
+        "-t",
+        "6",
+        "-ctk",
+        "f16",
+        "-ctv",
+        "f16",
+        "--no-webui",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "39141",
+        "-b",
+        "2048",
+        "-ub",
+        "64",
+        "-nkvo"
+      ],
+      "argus_environment": {},
+      "input_tokens": 4016,
+      "input_sha256": "b26302d3f09b7516317d9c9bfd1ddac17a667b123199a803a29bd3f6526282b4",
+      "needle_code": 798626,
+      "wall_seconds": 1.795280708000064,
+      "prompt_tokens": 4016,
+      "prefill_seconds": 1.291344,
+      "prefill_tokens_per_second": 3109.938172942299,
+      "decode_tokens": 16,
+      "decode_tokens_per_second": 29.93223342352913,
+      "tpot_seconds": 0.0334088,
+      "answer": " 798626\n\nQuestion: What is the number of ceramic",
+      "output_sha256": "007ddc77d7deb2e440e0e8078cbd21bcf3dd8c37c17b0eb9109c6a597daa75a8",
+      "needle_found": true,
+      "truncated": false,
+      "tokens_cached": 4031,
+      "peaks": {
+        "rss_bytes": 640421888,
+        "argus_mapped_rss_bytes": 0,
+        "vram_bytes": 501219328
+      },
+      "kv_logs": [],
+      "repeat": 0
+    },
+    {
+      "mode": "argus-cuda-control",
+      "context": 4096,
+      "command": [
+        "/home/zwannfrederick/Masa\u00fcst\u00fc/Sektor/Coding/mamba fix/scratch/llama.cpp-v050/build-cuda/bin/llama-server",
+        "-m",
+        "/home/zwannfrederick/Masa\u00fcst\u00fc/Sektor/Coding/mamba fix/scratch/models/qwen2.5-0.5b-instruct-q4_k_m.gguf",
+        "-c",
+        "4096",
+        "-np",
+        "1",
+        "-ngl",
+        "99",
+        "-fa",
+        "on",
+        "-t",
+        "6",
+        "-ctk",
+        "f16",
+        "-ctv",
+        "f16",
+        "--no-webui",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "54531",
+        "-b",
+        "2048",
+        "-ub",
+        "64",
+        "-nkvo"
+      ],
+      "argus_environment": {
+        "ARGUS_KV_DIR": "/home/zwannfrederick/Masa\u00fcst\u00fc/Sektor/Coding/mamba fix/scratch/kv/argus-ladder-fqhm4ke6",
+        "ARGUS_KV_MAX_BYTES": "68719476736",
+        "ARGUS_KV_RESIDENT_BYTES": "4194304",
+        "ARGUS_KV_STATS_PATH": "/home/zwannfrederick/Masa\u00fcst\u00fc/Sektor/Coding/mamba fix/scratch/kv/argus-ladder-fqhm4ke6/stats.json",
+        "ARGUS_KV_STAGING_BYTES": "4194304",
+        "ARGUS_KV_GPU_BYTES": "67108864",
+        "ARGUS_KV_PINNED_BYTES": "67108864",
+        "ARGUS_KV_POLICY": "off",
+        "ARGUS_KV_GPU_CONTROL": "1"
+      },
+      "input_tokens": 4016,
+      "input_sha256": "b26302d3f09b7516317d9c9bfd1ddac17a667b123199a803a29bd3f6526282b4",
+      "needle_code": 798626,
+      "wall_seconds": 40.82364720699843,
+      "prompt_tokens": 4016,
+      "prefill_seconds": 39.085113,
+      "prefill_tokens_per_second": 102.7501186960877,
+      "decode_tokens": 16,
+      "decode_tokens_per_second": 8.64171783523816,
+      "tpot_seconds": 0.11571773333333334,
+      "answer": " 798626\n\nQuestion: What is the total number of",
+      "output_sha256": "a152ed5676e2f9f4412d7aadffa7054cc438c021549ecb4f472a83c864acba0a",
+      "needle_found": true,
+      "truncated": false,
+      "tokens_cached": 4031,
+      "argus": {
+        "mode": "direct",
+        "disk_bytes": 0,
+        "resident_bytes": 1282048,
+        "staging_bytes": 0,
+        "peak_resident_bytes": 1282048,
+        "peak_staging_bytes": 77824,
+        "read_bytes": 0,
+        "written_bytes": 0,
+        "committed_pages": 25632,
+        "stores": 1,
+        "gpu_bytes": 49545216,
+        "pinned_bytes": 0,
+        "ram_bytes": 0,
+        "peak_gpu_bytes": 49586176,
+        "peak_pinned_bytes": 32768,
+        "peak_ram_bytes": 0,
+        "cuda_attention_calls": 3792,
+        "policy_promotions": 0,
+        "policy_demotions": 0,
+        "policy_rejected": 0,
+        "policy_nanoseconds": 0
+      },
+      "argus_delta": {
+        "read_bytes": 0,
+        "written_bytes": 0,
+        "committed_pages": 12768,
+        "cuda_attention_calls": 1872,
+        "policy_promotions": 0,
+        "policy_demotions": 0,
+        "policy_rejected": 0,
+        "policy_nanoseconds": 0
+      },
+      "peaks": {
+        "rss_bytes": 576561152,
+        "argus_mapped_rss_bytes": 700416,
+        "vram_bytes": 545259520
+      },
+      "kv_logs": [],
+      "repeat": 0
+    }
+  ],
+  "summary": [
+    {
+      "mode": "argus-cuda-control",
+      "context": 4096,
+      "completed": 1,
+      "failed": 0,
+      "wall_seconds": {
+        "min": 40.82364720699843,
+        "median": 40.82364720699843,
+        "max": 40.82364720699843
+      },
+      "prefill_seconds": {
+        "min": 39.085113,
+        "median": 39.085113,
+        "max": 39.085113
+      },
+      "decode_tokens_per_second": {
+        "min": 8.64171783523816,
+        "median": 8.64171783523816,
+        "max": 8.64171783523816
+      },
+      "tpot_seconds": {
+        "min": 0.11571773333333334,
+        "median": 0.11571773333333334,
+        "max": 0.11571773333333334
+      }
+    },
+    {
+      "mode": "stock-host-kv",
+      "context": 4096,
+      "completed": 1,
+      "failed": 0,
+      "wall_seconds": {
+        "min": 1.795280708000064,
+        "median": 1.795280708000064,
+        "max": 1.795280708000064
+      },
+      "prefill_seconds": {
+        "min": 1.291344,
+        "median": 1.291344,
+        "max": 1.291344
+      },
+      "decode_tokens_per_second": {
+        "min": 29.93223342352913,
+        "median": 29.93223342352913,
+        "max": 29.93223342352913
+      },
+      "tpot_seconds": {
+        "min": 0.0334088,
+        "median": 0.0334088,
+        "max": 0.0334088
+      }
+    }
+  ],
+  "source_sha256": {
+    "argus_cache/csrc/ggml_cuda_attention.cu": "ac807485e6e884d49478ca91209531bdabfb8fabf879556b89828f242839ac59",
+    "argus_cache/csrc/ggml_disk_buffer.cpp": "e83509bebfd7c2a8bdc1c4430dbec6b13cf9c7ee9557b58960589911bb0d9722",
+    "argus_cache/csrc/ggml_kv_policy.cpp": "f28af683b88cbbc31dc3668b65c8b7943d62b64c1796ce9f5c3fe23a98f112df",
+    "argus_cache/csrc/ggml_kv_policy.h": "4949b086dac2abd84bed27e5cb3d189f2c242d81cad41ccf69329b8a26826564",
+    "argus_cache/csrc/ggml_profile.h": "a645b5724f99a5c2c5f02aaa5a070ff68575a292d1a1d4d6a3b6985302e23afb",
+    "benchmarks/bench_llama_paged_context.py": "f72066d5d41ec7dedd29185a92cc5755035db4756450efdab8e7c704cf24cef6"
+  },
+  "source_base_commit": "36963a4",
+  "scope": "4K diagnostic, one workload warmup + one measured request. No 262K validation."
+}

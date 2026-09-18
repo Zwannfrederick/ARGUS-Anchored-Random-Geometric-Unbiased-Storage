@@ -130,6 +130,67 @@ int main(int argc, char ** argv) {
         prefetch.submit(&cells, &cells, 0, 64, keys.data(), values.data());
     }
     assert(staging_live == 0 && peak_staging <= prefetch_budget);
+    {
+        // Adjacent, crossing-page and repeated/scattered row indices retain set_rows order.
+        ggml_tensor rows = *tensor;
+        rows.ne[0] = 16; rows.ne[1] = 128;
+        rows.nb[1] = 64;
+        auto * source = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 16, 12);
+        auto * indices = ggml_new_tensor_1d(ctx, GGML_TYPE_I64, 12);
+        std::vector<float> input(16 * 12), reference(2048), output(2048);
+        for (size_t i = 0; i < input.size(); ++i) { input[i] = float(i + 1); }
+        source->data = input.data();
+        std::vector<std::vector<int64_t>> cases = {{0,1,2,3,4,5,6,7,8,9,10,11},
+            {60,61,62,63,64,65,66,67,68,69,70,71}, {0,2,1,2,127,126,125,124,123,122,121,120}};
+        for (size_t c = 0; c < cases.size(); ++c) {
+            ggml_backend_buffer_clear(buffer, 0);
+            std::fill(reference.begin(), reference.end(), 0);
+            indices->data = cases[c].data();
+            float result = 1;
+            ggml_tensor operation{};
+            operation.src[0] = source; operation.src[1] = indices; operation.src[2] = &rows;
+            operation.data = &result;
+            const auto writes = committed_pages.load();
+            set_rows(&operation, 0, 1, nullptr);
+            for (size_t row = 0; row < cases[c].size(); ++row) {
+                std::copy_n(input.data() + row * 16, 16, reference.data() + cases[c][row] * 16);
+            }
+            ggml_backend_tensor_get(tensor, output.data(), 0, output.size() * sizeof(float));
+            assert(output == reference && result == 0);
+            if (c < 2) { assert(committed_pages.load() - writes == c + 1); }
+        }
+    }
+    {
+        auto * quant_ctx = ggml_init(init);
+        auto * q8 = ggml_new_tensor_2d(quant_ctx, GGML_TYPE_Q8_0, 256, 8);
+        auto * q4 = ggml_new_tensor_2d(quant_ctx, GGML_TYPE_Q4_0, 256, 8);
+        auto * quant_buffer = ggml_backend_alloc_ctx_tensors_from_buft(quant_ctx, argus_ggml_disk_buffer_type());
+        assert(quant_buffer);
+        std::vector<float> input(256 * 8);
+        for (size_t i = 0; i < input.size(); ++i) { input[i] = float(int(i % 71) - 35) / 17; }
+        int64_t row_indices[] = {0,1,2,3,4,5,6,7};
+        auto * source = ggml_new_tensor_2d(quant_ctx, GGML_TYPE_F32, 256, 8);
+        auto * indices = ggml_new_tensor_1d(quant_ctx, GGML_TYPE_I64, 8);
+        source->data = input.data(); indices->data = row_indices;
+        for (auto * target : {q8, q4}) {
+            const size_t row_bytes = ggml_row_size(target->type, 256);
+            std::vector<unsigned char> reference(ggml_nbytes(target)), actual_quant(reference.size());
+            for (size_t row = 0; row < 8; ++row) {
+                ggml_get_type_traits_cpu(target->type)->from_float(input.data() + row * 256,
+                    reference.data() + row * row_bytes, 256);
+            }
+            float result = 1;
+            ggml_tensor operation{};
+            operation.src[0] = source; operation.src[1] = indices; operation.src[2] = target;
+            operation.data = &result;
+            const auto writes = committed_pages.load();
+            set_rows(&operation, 0, 1, nullptr);
+            ggml_backend_tensor_get(target, actual_quant.data(), 0, actual_quant.size());
+            assert(actual_quant == reference && result == 0 && committed_pages.load() - writes == 1);
+        }
+        ggml_backend_buffer_free(quant_buffer);
+        ggml_free(quant_ctx);
+    }
     store.access_step = store.pages[0].access_count = UINT64_MAX;
     ggml_backend_tensor_get(tensor, actual.data(), 0, 4);
     descriptor = argus_disk_page_descriptor(tensor, 0);

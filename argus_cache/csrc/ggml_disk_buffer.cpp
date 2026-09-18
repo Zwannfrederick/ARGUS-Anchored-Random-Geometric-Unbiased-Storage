@@ -1,4 +1,5 @@
 #include "ggml_disk_buffer.h"
+#include "ggml_profile.h"
 #include "ggml-backend-impl.h"
 #include "ggml-cpu.h"
 #include "ggml-cpu/traits.h"
@@ -47,6 +48,7 @@ struct Store {
     uint64_t access_step = 0;
 #ifdef ARGUS_CUDA
     Store * next = nullptr; // Intrusive registry: charged with the store metadata.
+    bool gpu_control = false; // Diagnostic GPU-authoritative storage; no disk fallback.
 #endif
     std::mutex mutex;
 };
@@ -99,6 +101,7 @@ struct Bounce {
 };
 
 uint32_t checksum(const void * data) {
+    argus_profile::Scope timer(argus_profile::checksum);
     // FNV-1a detects accidental payload corruption; this is not an authenticity check.
     uint32_t hash = 2166136261u;
     const auto * bytes = static_cast<const unsigned char *>(data);
@@ -110,19 +113,29 @@ off_t offset(size_t page, uint32_t active) {
     return static_cast<off_t>((page * 2 + active) * page_size);
 }
 
+Page & page_at(Store & store, size_t index) {
+    argus_profile::Scope timer(argus_profile::page_lookup);
+    return store.pages[index];
+}
+
 void read_disk_page(Store & store, size_t page, void * data) {
-    const Page & descriptor = store.pages[page];
+    const Page & descriptor = page_at(store, page);
     if (!descriptor.content_revision || descriptor.active == 2) { std::memset(data, 0, page_size); return; }
+    if (descriptor.active == 3) { throw std::runtime_error("ARGUS GPU control has no disk backing"); }
     ssize_t got;
-    do { got = pread(store.fd, data, page_size, offset(page, descriptor.active)); } while (got < 0 && errno == EINTR);
+    {
+        argus_profile::Scope timer(argus_profile::disk_read);
+        do { got = pread(store.fd, data, page_size, offset(page, descriptor.active)); } while (got < 0 && errno == EINTR);
+    }
     if (got != static_cast<ssize_t>(page_size)) { throw std::runtime_error("ARGUS short or failed direct page read"); }
     read_bytes += page_size;
+    if (argus_profile::enabled()) { argus_profile::disk_read_bytes[argus_profile::phase] += page_size; }
     if (checksum(data) != descriptor.checksum) { throw std::runtime_error("ARGUS disk page checksum mismatch"); }
 }
 
 void read_page(Store & store, size_t page, void * data) {
 #ifdef ARGUS_CUDA
-    const auto & descriptor = store.pages[page];
+    const auto & descriptor = page_at(store, page);
     if (descriptor.resident) {
         descriptor.resident->read(data, 0, page_size);
         if (checksum(data) != descriptor.checksum) { throw std::runtime_error("ARGUS resident checksum mismatch"); }
@@ -133,27 +146,56 @@ void read_page(Store & store, size_t page, void * data) {
 }
 
 void write_page(Store & store, size_t page, void * data) {
-    Page & descriptor = store.pages[page];
+    argus_profile::Scope timer(argus_profile::write_page);
+    Page & descriptor = page_at(store, page);
     if (descriptor.content_revision == std::numeric_limits<uint64_t>::max() ||
         descriptor.placement_revision == std::numeric_limits<uint64_t>::max() || store.content_revision == std::numeric_limits<uint64_t>::max()) {
         throw std::runtime_error("ARGUS page generation exhausted");
     }
+#ifdef ARGUS_CUDA
+    if (store.gpu_control) {
+        // Diagnostic control, not a placement policy or durability mode. Preserve the
+        // old page until a separately budgeted GPU destination passes verification.
+        const auto digest = checksum(data);
+        auto target = std::make_unique<ArgusTierBuffer>(ArgusTier::gpu, page_size);
+        target->write(data, page_size);
+        target->read(data, 0, page_size);
+        if (checksum(data) != digest) { throw std::runtime_error("ARGUS GPU control verification failed"); }
+        delete descriptor.resident;
+        descriptor.resident = target.release();
+        ++descriptor.content_revision;
+        ++descriptor.placement_revision;
+        descriptor.checksum = digest;
+        descriptor.active = 3;
+        ++store.content_revision;
+        ++committed_pages;
+        return;
+    }
+#endif
     const uint32_t inactive = 1 - (descriptor.active & 1);
     ssize_t wrote;
-    do { wrote = pwrite(store.fd, data, page_size, offset(page, inactive)); } while (wrote < 0 && errno == EINTR);
+    {
+        argus_profile::Scope io(argus_profile::disk_write);
+        do { wrote = pwrite(store.fd, data, page_size, offset(page, inactive)); } while (wrote < 0 && errno == EINTR);
+    }
     if (wrote != static_cast<ssize_t>(page_size)) {
         // The previously published slot remains untouched, even after a short write.
         throw std::runtime_error("ARGUS short or failed direct page write");
     }
     written_bytes += page_size;
+    if (argus_profile::enabled()) { argus_profile::disk_write_bytes[argus_profile::phase] += page_size; }
     const auto digest = checksum(data);
     // Verify the destination before publishing its generation and physical slot.
     ssize_t got;
-    do { got = pread(store.fd, data, page_size, offset(page, inactive)); } while (got < 0 && errno == EINTR);
+    {
+        argus_profile::Scope io(argus_profile::disk_read);
+        do { got = pread(store.fd, data, page_size, offset(page, inactive)); } while (got < 0 && errno == EINTR);
+    }
     if (got != static_cast<ssize_t>(page_size) || checksum(data) != digest) {
         throw std::runtime_error("ARGUS disk page write verification failed");
     }
     read_bytes += page_size;
+    if (argus_profile::enabled()) { argus_profile::disk_read_bytes[argus_profile::phase] += page_size; }
 #ifdef ARGUS_CUDA
     delete descriptor.resident;
     descriptor.resident = nullptr;
@@ -169,6 +211,7 @@ void write_page(Store & store, size_t page, void * data) {
 Store & store_for(ggml_backend_buffer_t buffer) { return *static_cast<Store *>(buffer->context); }
 
 size_t checked_offset(const Store & store, const ggml_tensor * tensor, size_t start, size_t bytes) {
+    argus_profile::Scope timer(argus_profile::page_lookup);
     const auto base = reinterpret_cast<uintptr_t>(store.address);
     const auto address = reinterpret_cast<uintptr_t>(tensor->data);
     if (address < base || address - base > store.bytes || start > store.bytes - (address - base) ||
@@ -207,6 +250,7 @@ ggml_status init_tensor(ggml_backend_buffer_t buffer, ggml_tensor * tensor) {
 
 // Called under the store lock only after the entire public read succeeds.
 void record_access(Store & store, size_t start, size_t bytes) {
+    argus_profile::Scope timer(argus_profile::page_lookup);
     if (!bytes) { return; }
     if (store.access_step != UINT64_MAX) { ++store.access_step; }
     const size_t end = (start + bytes - 1) / page_size;
@@ -314,7 +358,7 @@ void release(ggml_backend_buffer_t buffer) {
     for (size_t i = 0; i < rounded(store->bytes) / page_size; ++i) { delete store->pages[i].resident; }
 #endif
     munmap(store->address, rounded(store->bytes));
-    close(store->fd);
+    if (store->fd >= 0) { close(store->fd); }
     store->~Store();
     munmap(store, metadata);
 #ifdef ARGUS_CUDA
@@ -329,11 +373,19 @@ void release(ggml_backend_buffer_t buffer) {
 }
 
 ggml_backend_buffer_t allocate(ggml_backend_buffer_type_t type, size_t bytes) try {
+    const char * control = std::getenv("ARGUS_KV_GPU_CONTROL");
+    const bool gpu_control = control && std::strcmp(control, "1") == 0;
+    if (control && !gpu_control) { throw std::invalid_argument("ARGUS_KV_GPU_CONTROL must be 1 or unset"); }
+#ifdef ARGUS_CUDA
+    if (gpu_control && argus_kv_policy_enabled()) { throw std::invalid_argument("ARGUS GPU control requires policy=off"); }
+#else
+    if (gpu_control) { throw std::invalid_argument("ARGUS GPU control requires CUDA"); }
+#endif
     const size_t allocation = rounded(bytes);
     if (!bytes || allocation > static_cast<size_t>(std::numeric_limits<off_t>::max()) / 2) {
         throw std::runtime_error("ARGUS disk allocation size is invalid");
     }
-    const size_t physical = allocation * 2;
+    const size_t physical = gpu_control ? 0 : allocation * 2;
     const size_t metadata = rounded(descriptor_offset + allocation / page_size * sizeof(Page));
     size_t metadata_charge = metadata;
 #ifdef ARGUS_CUDA
@@ -352,13 +404,16 @@ ggml_backend_buffer_t allocate(ggml_backend_buffer_type_t type, size_t bytes) tr
     std::string pattern = std::string(directory) + "/argus-direct-XXXXXX";
     std::vector<char> filename(pattern.begin(), pattern.end());
     filename.push_back('\0');
-    const int fd = mkstemp(filename.data());
-    if (fd < 0) { throw std::runtime_error("ARGUS could not create disk store"); }
-    const int reservation = posix_fallocate(fd, 0, static_cast<off_t>(physical));
-    const int removed = unlink(filename.data());
-    if (reservation || removed || fcntl(fd, F_SETFL, O_DIRECT) < 0 || fcntl(fd, F_SETFD, FD_CLOEXEC) < 0) {
-        close(fd);
-        throw std::runtime_error("ARGUS could not reserve direct-I/O storage");
+    int fd = -1;
+    if (!gpu_control) {
+        fd = mkstemp(filename.data());
+        if (fd < 0) { throw std::runtime_error("ARGUS could not create disk store"); }
+        const int reservation = posix_fallocate(fd, 0, static_cast<off_t>(physical));
+        const int removed = unlink(filename.data());
+        if (reservation || removed || fcntl(fd, F_SETFL, O_DIRECT) < 0 || fcntl(fd, F_SETFD, FD_CLOEXEC) < 0) {
+            close(fd);
+            throw std::runtime_error("ARGUS could not reserve direct-I/O storage");
+        }
     }
     void * address = mmap(nullptr, allocation, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     void * descriptors = mmap(nullptr, metadata, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
@@ -369,6 +424,9 @@ ggml_backend_buffer_t allocate(ggml_backend_buffer_type_t type, size_t bytes) tr
         throw std::bad_alloc();
     }
     auto * store = new (descriptors) Store;
+#ifdef ARGUS_CUDA
+    store->gpu_control = gpu_control;
+#endif
     store->fd = fd;
     store->address = address;
     store->pages = reinterpret_cast<Page *>(static_cast<char *>(descriptors) + descriptor_offset);
@@ -419,18 +477,31 @@ class DiskSupport final : public ggml::cpu::extra_buffer_type {
 void set_rows(ggml_tensor * dst, int ith, int, void *) try {
     if (ith != 0) { return; }
     const auto * source = dst->src[0], * indices = dst->src[1];
+    argus_profile::InPhase phase(source->ne[1] > 1);
+    argus_profile::Scope timer(argus_profile::set_rows);
     auto * target = dst->src[2];
     const size_t bytes = ggml_row_size(target->type, target->ne[0]);
     ArgusStagingBuffer encoded(bytes);
+    const size_t capacity = target->nb[1] == bytes ? encoded.size() / bytes : 1;
+    size_t pending = 0;
+    int64_t first = 0;
+    auto flush = [&] {
+        if (pending) { ggml_backend_tensor_set(target, encoded.data(), first * target->nb[1], pending * bytes); }
+        pending = 0;
+    };
     for (int64_t row = 0; row < source->ne[1]; ++row) {
         int64_t index;
         std::memcpy(&index, static_cast<const char *>(indices->data) + row * indices->nb[0], sizeof index);
         if (index < 0 || index >= target->ne[1]) { throw std::runtime_error("ARGUS KV row index out of range"); }
+        if (pending && (pending == capacity || index != first + static_cast<int64_t>(pending))) { flush(); }
+        if (!pending) { first = index; }
         const auto * values = reinterpret_cast<const float *>(static_cast<const char *>(source->data) + row * source->nb[1]);
-        if (target->type == GGML_TYPE_F32) { std::memcpy(encoded.data(), values, bytes); }
-        else { ggml_get_type_traits_cpu(target->type)->from_float(values, encoded.data(), target->ne[0]); }
-        ggml_backend_tensor_set(target, encoded.data(), index * target->nb[1], bytes);
+        auto * destination = static_cast<char *>(encoded.data()) + pending * bytes;
+        if (target->type == GGML_TYPE_F32) { std::memcpy(destination, values, bytes); }
+        else { ggml_get_type_traits_cpu(target->type)->from_float(values, destination, target->ne[0]); }
+        ++pending;
     }
+    flush();
     *static_cast<float *>(dst->data) = 0;
 } catch (const std::exception & error) {
     GGML_ABORT("ARGUS disk append failed: %s", error.what());
@@ -490,6 +561,7 @@ static ArgusDiskPageDescriptor page_descriptor(const Store & store, size_t index
 }
 
 ArgusDiskPageDescriptor argus_disk_page_descriptor(const ggml_tensor * tensor, size_t start) {
+    argus_profile::Scope timer(argus_profile::descriptor_scan);
     if (!argus_ggml_is_disk_tensor(tensor)) { throw std::invalid_argument("ARGUS descriptor requires disk storage"); }
     if (start >= ggml_nbytes(tensor)) { throw std::out_of_range("ARGUS descriptor tensor range"); }
     const auto * storage = tensor->view_src ? tensor->view_src : tensor;
@@ -608,8 +680,10 @@ void argus_disk_publish_stats() {
         ",\"cuda_attention_calls\":" + std::to_string(usage.attention_calls) +
         ",\"policy_promotions\":" + std::to_string(policy.promotions) +
         ",\"policy_demotions\":" + std::to_string(policy.demotions) +
-        ",\"policy_rejected\":" + std::to_string(policy.rejected);
+        ",\"policy_rejected\":" + std::to_string(policy.rejected) +
+        ",\"policy_nanoseconds\":" + std::to_string(policy.nanoseconds);
 #endif
+    tier_stats += argus_profile::json_fields();
     std::lock_guard<std::mutex> guard(budget_mutex);
     const std::string scratch = std::string(path) + ".tmp";
     FILE * stream = std::fopen(scratch.c_str(), "w");
@@ -634,6 +708,7 @@ static void move_page(Store & store, size_t index, ArgusTier tier, ArgusDiskPage
         expected.content_revision != page.content_revision) { throw std::runtime_error("ARGUS stale migration"); }
     if (!page.content_revision || page.active == 2) { throw std::invalid_argument("ARGUS cannot promote an unwritten page"); }
     if ((page.resident ? page.resident->tier() : ArgusTier::disk) == tier) { return; }
+    if (store.gpu_control) { throw std::runtime_error("ARGUS GPU control cannot migrate out of GPU"); }
     if (page.placement_revision == UINT64_MAX) { throw std::runtime_error("ARGUS generation exhausted"); }
     std::unique_ptr<ArgusTierBuffer> target;
     Bounce data;
@@ -672,6 +747,7 @@ void argus_disk_move_page(ArgusDiskPageRevision expected, ArgusTier tier) {
 }
 
 void argus_disk_visit_resident_pages(void (*visit)(const ArgusDiskPageDescriptor &, void *), void * context) {
+    argus_profile::Scope timer(argus_profile::descriptor_scan);
     std::lock_guard<std::mutex> guard(registry_mutex);
     for (auto * store = registry; store; store = store->next) {
         std::lock_guard<std::mutex> page_guard(store->mutex);
@@ -683,6 +759,7 @@ void argus_disk_visit_resident_pages(void (*visit)(const ArgusDiskPageDescriptor
 
 void argus_disk_stage_cuda(const ggml_tensor * tensor, void * host, void * device,
                           size_t start, size_t bytes, void * stream) {
+    argus_profile::Scope timer(argus_profile::staging);
     if (!argus_ggml_is_disk_tensor(tensor)) { throw std::invalid_argument("ARGUS staging requires disk tensor"); }
     if (!host || !device || start > ggml_nbytes(tensor) || bytes > ggml_nbytes(tensor) - start) {
         throw std::out_of_range("ARGUS CUDA staging range");
@@ -697,7 +774,7 @@ void argus_disk_stage_cuda(const ggml_tensor * tensor, void * host, void * devic
         while (copied < bytes) {
             const size_t page_index = position / page_size, within = position % page_size;
             const size_t count = std::min(bytes - copied, page_size - within);
-            const auto & page = store.pages[page_index];
+            const auto & page = page_at(store, page_index);
             if (page.resident && page.resident->tier() == ArgusTier::gpu && page.active != 2) {
                 argus_cuda_copy(static_cast<char *>(device) + copied,
                     static_cast<char *>(page.resident->data()) + within, count, true, stream);

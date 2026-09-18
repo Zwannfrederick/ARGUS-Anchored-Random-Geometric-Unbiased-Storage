@@ -1,0 +1,407 @@
+{
+  "cpu": {
+    "off / 64 MiB": {
+      "phases": {
+        "prefill": {
+          "inclusive_seconds": {
+            "attention": 43.263423426,
+            "set_rows": 5.994465329,
+            "write_page": 5.637302986,
+            "policy": 0.0,
+            "disk_read": 33.265445661,
+            "disk_write": 1.432892706,
+            "page_lookup": 0.050007631,
+            "descriptor_scan": 0.0,
+            "staging": 37.936285989,
+            "copy_enqueue": 1.938180356,
+            "synchronization": 5.298625455,
+            "checksum": 2.364682688,
+            "allocation": 0.328564627,
+            "release": 0.262651436,
+            "tier_read": 0.0,
+            "tier_write": 0.0
+          },
+          "exclusive_seconds": {
+            "attention": 1.023973488,
+            "set_rows": 0.356567466,
+            "write_page": 0.01348629,
+            "policy": 0.0,
+            "disk_read": 33.265445661,
+            "disk_write": 1.432892706,
+            "page_lookup": 0.050007631,
+            "descriptor_scan": 0.0,
+            "staging": 2.922810951,
+            "copy_enqueue": 1.938180356,
+            "synchronization": 5.298625455,
+            "checksum": 2.364682688,
+            "allocation": 0.328564627,
+            "release": 0.262651436,
+            "tier_read": 0.0,
+            "tier_write": 0.0
+          }
+        },
+        "decode": {
+          "inclusive_seconds": {
+            "attention": 17.373158104,
+            "set_rows": 0.407965519,
+            "write_page": 0.350099524,
+            "policy": 0.0,
+            "disk_read": 13.200911534,
+            "disk_write": 0.08692114,
+            "page_lookup": 0.021685941,
+            "descriptor_scan": 0.0,
+            "staging": 16.762313978,
+            "copy_enqueue": 0.826227728,
+            "synchronization": 0.802007435,
+            "checksum": 0.999699919,
+            "allocation": 0.072219351,
+            "release": 0.066635412,
+            "tier_read": 0.0,
+            "tier_write": 0.0
+          },
+          "exclusive_seconds": {
+            "attention": 0.419478656,
+            "set_rows": 0.029285775,
+            "write_page": 0.000914581,
+            "policy": 0.0,
+            "disk_read": 13.200911534,
+            "disk_write": 0.08692114,
+            "page_lookup": 0.021685941,
+            "descriptor_scan": 0.0,
+            "staging": 1.255136151,
+            "copy_enqueue": 0.826227728,
+            "synchronization": 0.802007435,
+            "checksum": 0.999699919,
+            "allocation": 0.072219351,
+            "release": 0.066635412,
+            "tier_read": 0.0,
+            "tier_write": 0.0
+          }
+        }
+      },
+      "native_scope_seconds": 67.03901237800001,
+      "request_wall_seconds": 68.44939371299915,
+      "outside_scopes_seconds": 1.410381334999144
+    },
+    "on / 64 MiB": {
+      "phases": {
+        "prefill": {
+          "inclusive_seconds": {
+            "attention": 39.994520378,
+            "set_rows": 6.37209946,
+            "write_page": 6.039961179,
+            "policy": 0.991736285,
+            "disk_read": 5.94603386,
+            "disk_write": 1.521646805,
+            "page_lookup": 0.033808538,
+            "descriptor_scan": 0.094126961,
+            "staging": 36.767072421,
+            "copy_enqueue": 1.731811923,
+            "synchronization": 33.520060947,
+            "checksum": 0.426992661,
+            "allocation": 0.158901401,
+            "release": 0.241955864,
+            "tier_read": 0.195820173,
+            "tier_write": 0.073043137
+          },
+          "exclusive_seconds": {
+            "attention": 0.479424954,
+            "set_rows": 0.331399894,
+            "write_page": 0.018477745,
+            "policy": 0.136080544,
+            "disk_read": 5.94603386,
+            "disk_write": 1.521646805,
+            "page_lookup": 0.033808538,
+            "descriptor_scan": 0.086109239,
+            "staging": 1.465052153,
+            "copy_enqueue": 1.731811923,
+            "synchronization": 33.520060947,
+            "checksum": 0.426992661,
+            "allocation": 0.158901401,
+            "release": 0.241955864,
+            "tier_read": 0.195820173,
+            "tier_write": 0.073043137
+          }
+        },
+        "decode": {
+          "inclusive_seconds": {
+            "attention": 2.217254433,
+            "set_rows": 0.470341823,
+            "write_page": 0.410325666,
+            "policy": 0.109990287,
+            "disk_read": 0.321911871,
+            "disk_write": 0.112313041,
+            "page_lookup": 0.014439096,
+            "descriptor_scan": 0.042669646,
+            "staging": 1.855836778,
+            "copy_enqueue": 0.718788328,
+            "synchronization": 0.571613179,
+            "checksum": 0.02942238,
+            "allocation": 0.029226644,
+            "release": 0.030461415,
+            "tier_read": 0.033996373,
+            "tier_write": 0.007432066
+          },
+          "exclusive_seconds": {
+            "attention": 0.182422064,
+            "set_rows": 0.032715531,
+            "write_page": 0.001647321,
+            "policy": 0.019348896,
+            "disk_read": 0.321911871,
+            "disk_write": 0.112313041,
+            "page_lookup": 0.014439096,
+            "descriptor_scan": 0.038762974,
+            "staging": 0.543095077,
+            "copy_enqueue": 0.718788328,
+            "synchronization": 0.571613179,
+            "checksum": 0.02942238,
+            "allocation": 0.029226644,
+            "release": 0.030461415,
+            "tier_read": 0.033996373,
+            "tier_write": 0.007432066
+          }
+        }
+      },
+      "native_scope_seconds": 49.054216094,
+      "request_wall_seconds": 50.51993093599958,
+      "outside_scopes_seconds": 1.465714841999585
+    },
+    "GPU control / 64 MiB": {
+      "phases": {
+        "prefill": {
+          "inclusive_seconds": {
+            "attention": 37.834060279,
+            "set_rows": 0.639756312,
+            "write_page": 0.480797962,
+            "policy": 0.0,
+            "disk_read": 0.0,
+            "disk_write": 0.0,
+            "page_lookup": 0.024786218,
+            "descriptor_scan": 0.0,
+            "staging": 35.601736057,
+            "copy_enqueue": 1.620827698,
+            "synchronization": 34.311392981,
+            "checksum": 0.131488572,
+            "allocation": 0.095342332,
+            "release": 0.093517658,
+            "tier_read": 0.199695866,
+            "tier_write": 0.05704013
+          },
+          "exclusive_seconds": {
+            "attention": 0.43058187,
+            "set_rows": 0.158512405,
+            "write_page": 0.010412246,
+            "policy": 0.0,
+            "disk_read": 0.0,
+            "disk_write": 0.0,
+            "page_lookup": 0.024786218,
+            "descriptor_scan": 0.0,
+            "staging": 1.340218615,
+            "copy_enqueue": 1.620827698,
+            "synchronization": 34.311392981,
+            "checksum": 0.131488572,
+            "allocation": 0.095342332,
+            "release": 0.093517658,
+            "tier_read": 0.199695866,
+            "tier_write": 0.05704013
+          }
+        },
+        "decode": {
+          "inclusive_seconds": {
+            "attention": 1.755549131,
+            "set_rows": 0.068287232,
+            "write_page": 0.031823865,
+            "policy": 0.0,
+            "disk_read": 0.0,
+            "disk_write": 0.0,
+            "page_lookup": 0.010039209,
+            "descriptor_scan": 0.0,
+            "staging": 1.546138387,
+            "copy_enqueue": 0.613431127,
+            "synchronization": 0.521827475,
+            "checksum": 0.011875996,
+            "allocation": 0.01501301,
+            "release": 0.015520728,
+            "tier_read": 0.024844557,
+            "tier_write": 0.003837257
+          },
+          "exclusive_seconds": {
+            "attention": 0.15236257,
+            "set_rows": 0.018165743,
+            "write_page": 0.001049269,
+            "policy": 0.0,
+            "disk_read": 0.0,
+            "disk_write": 0.0,
+            "page_lookup": 0.010039209,
+            "descriptor_scan": 0.0,
+            "staging": 0.435869422,
+            "copy_enqueue": 0.613431127,
+            "synchronization": 0.521827475,
+            "checksum": 0.011875996,
+            "allocation": 0.01501301,
+            "release": 0.015520728,
+            "tier_read": 0.024844557,
+            "tier_write": 0.003837257
+          }
+        }
+      },
+      "native_scope_seconds": 40.297652954,
+      "request_wall_seconds": 41.744600237998384,
+      "outside_scopes_seconds": 1.4469472839983837
+    },
+    "on / 2 MiB": {
+      "phases": {
+        "prefill": {
+          "inclusive_seconds": {
+            "attention": 40.352136345,
+            "set_rows": 5.837453312,
+            "write_page": 5.576549678,
+            "policy": 0.572025,
+            "disk_read": 27.33461987,
+            "disk_write": 1.270519601,
+            "page_lookup": 0.04974437,
+            "descriptor_scan": 0.200485447,
+            "staging": 32.666433104,
+            "copy_enqueue": 1.55253767,
+            "synchronization": 10.052461539,
+            "checksum": 2.214458081,
+            "allocation": 0.059577465,
+            "release": 0.045996835,
+            "tier_read": 0.04440645,
+            "tier_write": 0.002817786
+          },
+          "exclusive_seconds": {
+            "attention": 0.721423776,
+            "set_rows": 0.260481146,
+            "write_page": 0.011123588,
+            "policy": 0.317350936,
+            "disk_read": 27.33461987,
+            "disk_write": 1.270519601,
+            "page_lookup": 0.04974437,
+            "descriptor_scan": 0.192436638,
+            "staging": 2.059633906,
+            "copy_enqueue": 1.55253767,
+            "synchronization": 10.052461539,
+            "checksum": 2.214458081,
+            "allocation": 0.059577465,
+            "release": 0.045996835,
+            "tier_read": 0.04440645,
+            "tier_write": 0.002817786
+          }
+        },
+        "decode": {
+          "inclusive_seconds": {
+            "attention": 14.541010715,
+            "set_rows": 0.37368962,
+            "write_page": 0.330772573,
+            "policy": 0.203953197,
+            "disk_read": 10.979408865,
+            "disk_write": 0.072492267,
+            "page_lookup": 0.022121073,
+            "descriptor_scan": 0.059036165,
+            "staging": 13.970885201,
+            "copy_enqueue": 0.665059057,
+            "synchronization": 0.765949532,
+            "checksum": 0.954711576,
+            "allocation": 0.011498916,
+            "release": 0.008824596,
+            "tier_read": 0.007910206,
+            "tier_write": 2.6873e-05
+          },
+          "exclusive_seconds": {
+            "attention": 0.301266367,
+            "set_rows": 0.021728531,
+            "write_page": 0.00075037,
+            "policy": 0.144103171,
+            "disk_read": 10.979408865,
+            "disk_write": 0.072492267,
+            "page_lookup": 0.022121073,
+            "descriptor_scan": 0.0554522,
+            "staging": 0.903396735,
+            "copy_enqueue": 0.665059057,
+            "synchronization": 0.765949532,
+            "checksum": 0.954711576,
+            "allocation": 0.011498916,
+            "release": 0.008824596,
+            "tier_read": 0.007910206,
+            "tier_write": 2.6873e-05
+          }
+        }
+      },
+      "native_scope_seconds": 61.104289992,
+      "request_wall_seconds": 62.45208381100019,
+      "outside_scopes_seconds": 1.347793819000195
+    }
+  },
+  "cuda_events": {
+    "argus-cuda-control": {
+      "prefill": {
+        "kernel_gpu": 37.327515702,
+        "h2d_gpu": 0.004023852,
+        "d2d_gpu": 33.782906025
+      },
+      "decode": {
+        "kernel_gpu": 1.462888882,
+        "h2d_gpu": 0.020010154,
+        "d2d_gpu": 0.890506341
+      }
+    },
+    "argus-cuda-on": {
+      "prefill": {
+        "kernel_gpu": 37.488662526,
+        "h2d_gpu": 0.104034948,
+        "d2d_gpu": 32.943547093
+      },
+      "decode": {
+        "kernel_gpu": 1.467482919,
+        "h2d_gpu": 0.026263755,
+        "d2d_gpu": 0.847973465
+      }
+    },
+    "argus-cuda-off": {
+      "prefill": {
+        "kernel_gpu": 37.279470775,
+        "h2d_gpu": 2.841181378,
+        "d2d_gpu": 0.0
+      },
+      "decode": {
+        "kernel_gpu": 1.843969974,
+        "h2d_gpu": 1.297692908,
+        "d2d_gpu": 0.0
+      }
+    }
+  },
+  "observed_overhead_ratios": {
+    "argus-cuda-control": {
+      "prefill": 1.036364529519821,
+      "tpot": 1.5637734530330425
+    },
+    "argus-cuda-on": {
+      "prefill": 1.019828220921659,
+      "tpot": 1.3651063449584533
+    },
+    "argus-cuda-off": {
+      "prefill": 1.0507060910681965,
+      "tpot": 1.122147447887987
+    },
+    "cpu_only_control": {
+      "prefill": 1.0154848471334854,
+      "tpot": 1.1816731057066447
+    }
+  },
+  "source_sha256": {
+    "v060-attribution-unprofiled-2026-09-17.json": "067f4dc80280498d40fca91bfa0428fcd51b7298a2659c40cce43375f35ff5ea",
+    "v060-attribution-profiled-2026-09-17.json": "d0f4b4f2cafbe012dfac73b8fc083fee7f027832ef5aa408144147ff8e8e88bd",
+    "v060-attribution-cpu-2026-09-17.json": "2b31cf226d88d2ad7c2c3477c78c77ddc4c82fc0b73b0011e29ce7ed7155375c",
+    "v060-attribution-pressure-cpu-2026-09-17.json": "3f132a3274379610c675abda2fd6c29903e6bb3f848db6b44f3d726d3931dae8",
+    "v060-attribution-control-reference-2026-09-17.json": "e4f8f2590d5f36ea4eb3e4c434b4b437880f4058f8f44cc2bc995c2955ebb64f"
+  },
+  "notes": [
+    "Seconds; CPU inclusive scopes nest. Exclusive scopes partition measured ARGUS CPU time only.",
+    "CUDA events overlap CPU waits and each other; intervals include resource contention and submission gaps, not isolated DMA service time.",
+    "O_DIRECT syscall elapsed time includes blocking and kernel/CPU overhead.",
+    "One measured request after one workload warmup per attribution case; overhead ratios include run-to-run noise.",
+    "Decode phase covers 15 evaluations; first of 16 output tokens comes from prefill.",
+    "All ARGUS outputs match. Stock continuation differs after the correct needle answer. No 262K run."
+  ]
+}

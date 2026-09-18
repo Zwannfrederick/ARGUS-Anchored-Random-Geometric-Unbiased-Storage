@@ -2,7 +2,7 @@
 #include "ggml_disk_buffer.h"
 
 struct ArgusPolicyStats {
-    uint64_t promotions, demotions, rejected;
+    uint64_t promotions, demotions, rejected, nanoseconds;
 };
 // Missing/off selects the reference path. Unknown values are errors.
 bool argus_kv_policy_enabled();
