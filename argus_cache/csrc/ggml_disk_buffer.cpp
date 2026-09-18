@@ -800,9 +800,11 @@ bool argus_disk_read_resident(const ggml_tensor * k, const ggml_tensor * v,
         const void ** pages, size_t capacity,
         void (*consume)(size_t, size_t, void *), void * context) {
     if (!pages || !consume || !argus_ggml_is_disk_tensor(k) || !argus_ggml_is_disk_tensor(v) ||
-        k->type != GGML_TYPE_F16 || v->type != GGML_TYPE_F16) {
+        k->type != GGML_TYPE_F16 || v->type != GGML_TYPE_F16 || k->ne[2] <= 0 || k->ne[2] != v->ne[2] ||
+        ggml_nbytes(k) != size_t(k->ne[2]) * k->nb[2] || ggml_nbytes(v) != size_t(v->ne[2]) * v->nb[2]) {
         throw std::invalid_argument("ARGUS resident read requires F16 disk tensors and a callback");
     }
+    // ponytail: registry lock spans the read; use pinned page leases if concurrent requests need teardown independence.
     std::lock_guard<std::mutex> registry_guard(registry_mutex);
     auto & ks = store_for((k->view_src ? k->view_src : k)->buffer);
     auto & vs = store_for((v->view_src ? v->view_src : v)->buffer);

@@ -51,7 +51,9 @@ const char * budget_name(ArgusTier tier) {
 struct Stream {
     cudaStream_t value = nullptr;
     Stream() { check(cudaStreamCreateWithFlags(&value, cudaStreamNonBlocking)); }
-    ~Stream() { argus_profile::Scope timer(argus_profile::synchronization); if (value) { cudaStreamSynchronize(value); cudaStreamDestroy(value); } }
+    // argus_disk_stage_cuda drains every transfer (also on failure) before it
+    // releases source pages. There is no pending work requiring a second wait.
+    ~Stream() { if (value) { cudaStreamDestroy(value); } }
     Stream(const Stream &) = delete;
     Stream & operator=(const Stream &) = delete;
 };
@@ -140,11 +142,74 @@ __global__ void attention_tile(const char * query, const half * keys, const half
 }
 void cpu_refused(ggml_tensor *, int, int, void *) { GGML_ABORT("ARGUS CUDA attention assigned to CPU"); }
 
+// Four query/head warps per block, full context in one invocation. The staged
+// 256-lane reduction tree is reproduced in registers, then warp shuffles: no
+// tensor-core/F16 accumulation or reassociation of the FP32 dot product.
+__global__ void attention_resident_batch(const char * query, const char * mask, bool half_mask,
+        float * output, int dk, int dv, int heads, int kv_heads, int tokens, int cells,
+        size_t q_head, size_t q_token, size_t mask_cell, size_t mask_token, float scale, ResidentKV pages) {
+    const int row = blockIdx.x * 4 + threadIdx.x / 32, lane = threadIdx.x % 32;
+    if (row >= heads * tokens) { return; }
+    const int head = row % heads, token = row / heads, kv_head = head / (heads / kv_heads);
+    const auto * q = reinterpret_cast<const float *>(query + head * q_head + token * q_token);
+    float query_values[8]{}, acc[8]{};
+    #pragma unroll
+    for (int j = 0; j < 8; ++j) { if (lane + j * 32 < dk) { query_values[j] = q[lane + j * 32]; } }
+    float maximum = -INFINITY, sum = 0.0f;
+    for (int cell = 0; cell < cells; ++cell) {
+        const char * entry = mask + size_t(cell) * mask_cell + token * mask_token;
+        const float bias = half_mask ? __half2float(*reinterpret_cast<const half *>(entry)) : *reinterpret_cast<const float *>(entry);
+        if (bias == -INFINITY) { continue; }
+        float product[8]{};
+        #pragma unroll
+        for (int j = 0; j < 8; ++j) {
+            const int d = lane + j * 32;
+            if (d < dk) { product[j] = __fmul_rn(query_values[j], resident_value(pages.keys, pages.key_offset, (size_t(cell) * kv_heads + kv_head) * dk + d)); }
+        }
+        #pragma unroll
+        for (int j = 0; j < 4; ++j) { product[j] = __fadd_rn(product[j], product[j + 4]); }
+        #pragma unroll
+        for (int j = 0; j < 2; ++j) { product[j] = __fadd_rn(product[j], product[j + 2]); }
+        float dot = __fadd_rn(product[0], product[1]);
+        #pragma unroll
+        for (int width = 16; width; width /= 2) {
+            const float other = __shfl_down_sync(0xffffffff, dot, width);
+            if (lane < width) { dot = __fadd_rn(dot, other); }
+        }
+        float alpha = 0.0f, beta = 0.0f;
+        if (lane == 0) {
+            const float score = dot * scale + bias;
+            const float next = fmaxf(maximum, score);
+            alpha = expf(maximum - next); beta = expf(score - next);
+            sum = alpha * sum + beta; maximum = next;
+        }
+        alpha = __shfl_sync(0xffffffff, alpha, 0);
+        beta = __shfl_sync(0xffffffff, beta, 0);
+        #pragma unroll
+        for (int j = 0; j < 8; ++j) {
+            const int d = lane + j * 32;
+            if (d < dv) {
+                const float value = resident_value(pages.values, pages.value_offset, (size_t(cell) * kv_heads + kv_head) * dv + d);
+                // NVCC otherwise contracts beta*value in the final unrolled lane,
+                // unlike the staged kernel's alpha*acc FMA (D=256 exact-parity gate).
+                acc[j] = __fmaf_rn(alpha, acc[j], __fmul_rn(beta, value));
+            }
+        }
+    }
+    sum = __shfl_sync(0xffffffff, sum, 0);
+    #pragma unroll
+    for (int j = 0; j < 8; ++j) {
+        const int d = lane + j * 32;
+        if (d < dv) { output[row * dv + d] = sum > 0 ? acc[j] / sum : 0.0f; }
+    }
+}
+
 struct ResidentRequest {
     ggml_tensor * dst;
     cudaStream_t stream;
     const void ** table;
     size_t state_bytes;
+    bool batched;
 };
 void resident_compute(size_t k_pages, size_t v_pages, void * raw) {
     auto & request = *static_cast<ResidentRequest *>(raw);
@@ -152,7 +217,9 @@ void resident_compute(size_t k_pages, size_t v_pages, void * raw) {
     const auto * q = dst->src[0], * k = dst->src[1], * v = dst->src[2], * mask = dst->src[3];
     const size_t bytes = (k_pages + v_pages) * sizeof(void *);
     ArgusStagingReservation scratch(aligned(bytes) + request.state_bytes);
-    ArgusTierBuffer table(ArgusTier::gpu, bytes), state(ArgusTier::gpu, request.state_bytes);
+    ArgusTierBuffer table(ArgusTier::gpu, bytes);
+    std::unique_ptr<ArgusTierBuffer> state;
+    if (request.state_bytes) { state = std::make_unique<ArgusTierBuffer>(ArgusTier::gpu, request.state_bytes); }
     Drain drain{request.stream};
     argus_cuda_copy(table.data(), request.table, bytes, false, request.stream);
     const auto * pointers = static_cast<const void * const *>(table.data());
@@ -165,11 +232,18 @@ void resident_compute(size_t k_pages, size_t v_pages, void * raw) {
         begin = std::make_unique<Event>(); end = std::make_unique<Event>();
         check(cudaEventRecord(begin->value, request.stream));
     }
-    for (int64_t first = 0; first < k->ne[2]; first += 32) {
+    if (request.batched) {
+        attention_resident_batch<<<(q->ne[1] * q->ne[2] + 3) / 4, 128, 0, request.stream>>>(
+            static_cast<const char *>(q->data), static_cast<const char *>(mask->data), mask->type == GGML_TYPE_F16,
+            static_cast<float *>(dst->data), q->ne[0], v->ne[0], q->ne[1], k->ne[1], q->ne[2], k->ne[2],
+            q->nb[1], q->nb[2], mask->nb[0], mask->nb[1], scale, pages);
+        check(cudaGetLastError());
+        if (argus_profile::enabled()) { ++argus_profile::kernel_launches[argus_profile::phase]; }
+    } else for (int64_t first = 0; first < k->ne[2]; first += 32) {
         const size_t count = std::min<int64_t>(32, k->ne[2] - first);
         attention_tile<true><<<q->ne[1] * q->ne[2], 256, 0, request.stream>>>(
             static_cast<const char *>(q->data), nullptr, nullptr, static_cast<const char *>(mask->data),
-            mask->type == GGML_TYPE_F16, static_cast<float *>(dst->data), static_cast<float *>(state.data()),
+            mask->type == GGML_TYPE_F16, static_cast<float *>(dst->data), static_cast<float *>(state->data()),
             q->ne[0], v->ne[0], q->ne[1], k->ne[1], q->ne[2], first, count, first + count == size_t(k->ne[2]),
             q->nb[1], q->nb[2], mask->nb[0], mask->nb[1], scale, pages);
         check(cudaGetLastError());
@@ -188,12 +262,15 @@ void resident_compute(size_t k_pages, size_t v_pages, void * raw) {
 
 bool try_resident(ggml_tensor * dst, cudaStream_t stream, size_t state_bytes) {
     const char * path = std::getenv("ARGUS_KV_ATTENTION_PATH");
-    if (path && std::strcmp(path, "staged") != 0 && std::strcmp(path, "direct") != 0) {
-        throw std::invalid_argument("ARGUS_KV_ATTENTION_PATH must be staged or direct");
+    if (path && std::strcmp(path, "staged") != 0 && std::strcmp(path, "direct") != 0 && std::strcmp(path, "batched") != 0) {
+        throw std::invalid_argument("ARGUS_KV_ATTENTION_PATH must be staged, direct or batched");
     }
     if (dst->src[0]->ne[2] <= 1 || (path && std::strcmp(path, "staged") == 0)) { return false; }
+    const bool batched = !path || std::strcmp(path, "batched") == 0;
+    if (batched) { state_bytes = 0; }
     size_t count = 0;
     for (auto * tensor : {dst->src[1], dst->src[2]}) {
+        if (reinterpret_cast<uintptr_t>(tensor->data) % sizeof(half)) { return false; }
         count += (reinterpret_cast<uintptr_t>(tensor->data) % 4096 + ggml_nbytes(tensor) + 4095) / 4096;
     }
     const size_t bytes = aligned(count * sizeof(void *));
@@ -201,7 +278,7 @@ bool try_resident(ggml_tensor * dst, cudaStream_t stream, size_t state_bytes) {
     if (bytes + state_bytes > budget.limit || budget.live > budget.limit - bytes - state_bytes ||
         2 * bytes + state_bytes > argus_disk_staging_limit()) { return false; }
     ArgusStagingBuffer table(bytes);
-    ResidentRequest request{dst, stream, static_cast<const void **>(table.data()), state_bytes};
+    ResidentRequest request{dst, stream, static_cast<const void **>(table.data()), state_bytes, batched};
     return argus_disk_read_resident(dst->src[1], dst->src[2], request.table, count, resident_compute, &request);
 }
 

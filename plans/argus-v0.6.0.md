@@ -1,6 +1,6 @@
 # ARGUS v0.6 — heterogeneous KV memory runtime
 
-Tarih: 2026-09-17. Durum: **4K Qwen2.5-0.5B maliyet atfı öncelikli; 262K benchmark kullanıcı kararıyla beklemede**.
+Tarih: 2026-09-18. Durum: **4K resident prefill optimizasyonu ölçüldü; stock farkı sürüyor, 262K benchmark beklemede**.
 Sürüm ayrımı (kullanıcı onayı): **v0.5 = mechanism, v0.6 = policy**. Bütçeli
 allocation, açık migration ve attention v0.5; hangi sayfanın nereye ve hangi
 codec ile taşınacağını seçen otomatik policy v0.6 sorumluluğudur.
@@ -9,6 +9,24 @@ bu sözleşmeye göre başlayabilir. Aşağıdaki ilerleme bölümü doğrulanan
 kalanı henüz çalışan özellik iddiası değildir.
 
 > ARGUS treats KV cache as a heterogeneous virtual-memory hierarchy rather than a tensor assigned to one device.
+
+## Attention datapath ilerlemesi — 2026-09-18
+
+`89eaf06` attribution baseline ve placement policy algoritması korunuyor.
+`6f1ef8c` GPU-resident F16 KV için kilitlerle korunan direct pointer-table yolunu
+getirdi: prefill payload D2D sıfırlandı, fakat scalar kernel yüzünden anlamlı
+hızlanma görülmedi (41,24 → 40,05 s). Sonraki batched kernel aynı FP32 reduction
+ve FMA sırasını koruyarak Q>1 işi attention başına tek CUDA invocation'a topladı:
+profil açık prefill **12,51 s**, kernel çağrısı **101376 → 1512**, sync **1512**.
+Decode ve non-resident KV staged fallback kullanıyor; yalnız zaten tamamlanmış
+transferin teardown wait'i kaldırıldı. Correctness eşiği gevşetilmedi; 5 CPU ve
+5 GPU testi, exact staged/batched parity ve aynı 4K completion hash'i doğrulandı.
+
+Profiler kapalı üç tekrarda medyan prefill: stock-host **1,42 s**, GPU-control
+**12,76 s**, policy-on **48,32 s**. GPU-control hâlâ stock'tan yaklaşık **9×**
+yavaş; decode kazancı ve policy-on hızlanması iddia edilmiyor. **262K çalıştırılmadı.**
+Detaylı süreler, transfer/sync sayıları ve sınırlar:
+[4K datapath raporu](../docs/measurements/v060-datapath-2026-09-18.md).
 
 ## Uygulama ilerlemesi — 2026-09-17
 
