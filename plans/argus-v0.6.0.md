@@ -1,6 +1,6 @@
 # ARGUS v0.6 — heterogeneous KV memory runtime
 
-Tarih: 2026-09-18. Durum: **4K resident prefill optimizasyonu ölçüldü; stock farkı sürüyor, 262K benchmark beklemede**.
+Tarih: 2026-09-18. Durum: **4K resident + partial-resident prefill checkpoint'i ölçüldü (control 3,9×, policy-on 9,2× stock); decode ve 262K beklemede**.
 Sürüm ayrımı (kullanıcı onayı): **v0.5 = mechanism, v0.6 = policy**. Bütçeli
 allocation, açık migration ve attention v0.5; hangi sayfanın nereye ve hangi
 codec ile taşınacağını seçen otomatik policy v0.6 sorumluluğudur.
@@ -27,6 +27,18 @@ Profiler kapalı üç tekrarda medyan prefill: stock-host **1,42 s**, GPU-contro
 yavaş; decode kazancı ve policy-on hızlanması iddia edilmiyor. **262K çalıştırılmadı.**
 Detaylı süreler, transfer/sync sayıları ve sınırlar:
 [4K datapath raporu](../docs/measurements/v060-datapath-2026-09-18.md).
+
+### Checkpoint — 2026-09-18 (`7c51892`..`ff1ca2d`)
+
+Census: policy-on'da her prefill çağrısını, mevcut ubatch'in yeniden yazdığı (write_page
+residency'yi düşürür) tek bir küçük cold run reddediyordu; bütçe/alignment/codec hiç
+reddetmedi. D=64 kernel specialization, satır başına sayfa çözümü ve cold sayfaları
+tek çağrılık scratch'e kopyalayan mixed pointer table (placement/policy değişmeden)
+sonrası profiler kapalı üç tekrarda medyan prefill: stock-host **1,33 s**, GPU-control
+**5,22 s**, policy-on **12,27 s**. Exact staged parity ve policy promotion/demotion
+eşdeğerliği korunuyor. Decode (Q=1 staged) değişmedi. Sonraki kernel adımı önerisi
+(başlatılmadı): lane-per-cell exact tile kernel.
+[Checkpoint raporu](../docs/measurements/v060-checkpoint-2026-09-18.md).
 
 ## Uygulama ilerlemesi — 2026-09-17
 
