@@ -26,6 +26,7 @@ inline constexpr const char * phases[] = {"other", "prefill", "decode"};
 inline std::atomic<uint64_t> nanoseconds[3][metric_count]{}, calls[3][metric_count]{};
 inline std::atomic<uint64_t> exclusive_nanoseconds[3][metric_count]{};
 inline std::atomic<uint64_t> h2d_bytes[3]{}, d2d_bytes[3]{}, disk_read_bytes[3]{}, disk_write_bytes[3]{};
+inline std::atomic<uint64_t> kernel_launches[3]{}, resident_calls[3]{}, resident_table_bytes[3]{};
 inline thread_local Phase phase = other;
 inline bool enabled() {
     static const bool value = [] { const char * p = std::getenv("ARGUS_KV_PROFILE"); return p && (std::strcmp(p, "1") == 0 || std::strcmp(p, "cpu") == 0); }();
@@ -76,6 +77,9 @@ inline std::string json_fields() {
         result += prefix + "d2d_bytes\":" + std::to_string(d2d_bytes[p].load());
         result += prefix + "disk_read_bytes\":" + std::to_string(disk_read_bytes[p].load());
         result += prefix + "disk_write_bytes\":" + std::to_string(disk_write_bytes[p].load());
+        result += prefix + "kernel_launches\":" + std::to_string(kernel_launches[p].load());
+        result += prefix + "resident_calls\":" + std::to_string(resident_calls[p].load());
+        result += prefix + "resident_table_bytes\":" + std::to_string(resident_table_bytes[p].load());
     }
     return result;
 }

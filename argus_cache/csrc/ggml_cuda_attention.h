@@ -39,6 +39,13 @@ void argus_disk_stage_cuda(const ggml_tensor * tensor, void * host, void * devic
 void argus_cuda_copy(void * device, const void * source, size_t bytes, bool device_source, void * stream);
 void argus_cuda_wait(void * stream);
 
+// Callback borrows GPU pages under registry + both store locks. Null means logical
+// zero, never a missing written page. It must drain GPU work before returning or
+// throwing and must not call storage/policy APIs. False leaves access counts intact.
+bool argus_disk_read_resident(const ggml_tensor * k, const ggml_tensor * v,
+    const void ** pages, size_t capacity,
+    void (*consume)(size_t k_pages, size_t v_pages, void * context), void * context);
+
 ggml_tensor * argus_ggml_cuda_attention(ggml_context * ctx, ggml_tensor * q, ggml_tensor * k,
                                        ggml_tensor * v, ggml_tensor * mask, float scale);
 bool argus_ggml_is_cuda_attention(const ggml_tensor * tensor);

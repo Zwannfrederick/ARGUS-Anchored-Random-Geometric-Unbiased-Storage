@@ -133,6 +133,8 @@ def run_one(args, mode, context):
     if mode == "argus-direct" or mode.startswith("argus-cuda-"):
         env["ARGUS_KV_STAGING_BYTES"] = str(args.staging_bytes)
     if mode.startswith("argus-cuda-"):
+        if args.attention_path:
+            env["ARGUS_KV_ATTENTION_PATH"] = args.attention_path
         env.update(ARGUS_KV_GPU_BYTES=str(args.gpu_bytes), ARGUS_KV_PINNED_BYTES=str(args.pinned_bytes),
                    ARGUS_KV_POLICY="on" if mode == "argus-cuda-on" else "off")
         if args.profile:
@@ -255,6 +257,7 @@ def main():
                                  "argus-cuda-off", "argus-cuda-on", "argus-cuda-control"])
     parser.add_argument("--profile", nargs="?", const="cuda", choices=["cpu", "cuda"],
                         help="diagnostic CPU scopes, optionally CUDA events; measure overhead separately")
+    parser.add_argument("--attention-path", choices=["staged", "direct"], help="controlled CUDA datapath A/B")
     parser.add_argument("--resident-bytes", type=int, required=True, help="ARGUS_KV_RESIDENT_BYTES for argus-paged")
     parser.add_argument("--max-kv-bytes", type=int, default=64 << 30)
     parser.add_argument("--staging-bytes", type=int, default=4 << 20)
