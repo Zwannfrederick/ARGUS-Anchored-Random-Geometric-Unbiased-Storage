@@ -230,7 +230,7 @@ __global__ void attention_resident_batch(const char * query, const char * mask, 
 }
 
 // Lane-per-cell variant of attention_resident_batch<64, true>, bit-exact with it; the
-// mlp instantiation is the default for eligible views (D=64, rows aligned to their size).
+// <mlp, kc> instantiation is the default for eligible views (D=64, rows aligned to their size).
 // One warp still owns one query row; each 32-cell tile is split into
 //  1. parallel scores: lane c computes cell c's dot product with the identical
 //     tree (p_i + p_{i+32}, then strides 16, 8, 4, 2, 1 — the former lane/shuffle
@@ -242,11 +242,15 @@ __global__ void attention_resident_batch(const char * query, const char * mask, 
 //     equal differences), then each lane's alpha/beta with the same expf inputs;
 //  3. the only order-dependent arithmetic, unchanged: sum and acc[d] advance
 //     cell by cell through the same __fmaf_rn chains, skipping masked cells.
-// mlp (default): the sequential loop is branch-free. Masked cells get a null V row and (0, 0)
+// mlp: the sequential loop is branch-free. Masked cells get a null V row and (0, 0)
 // weights, their step runs and is discarded by a select, so sum/acc keep their exact
 // bits; live cells run the identical operations. Without a per-cell branch, NVCC can
 // issue the V loads of several unrolled cells before the first one is consumed.
-template<bool mlp>
+// kc (default, with mlp): only the route of the K bytes changes. Each pass's four
+// 16-byte chunks of the tile's 32 rows are fetched 8 rows per warp load (lanes 4s..4s+3
+// take one row) into a per-warp shared tile, then every lane reads its own row back.
+// The products, tree and score are computed from bit-identical k values.
+template<bool mlp, bool kc = false>
 __global__ void attention_resident_cells(const char * query, const char * mask, bool half_mask,
         float * output, int heads, int kv_heads, int tokens, int cells,
         size_t q_head, size_t q_token, size_t mask_cell, size_t mask_token, float scale, ResidentKV pages) {
@@ -254,6 +258,9 @@ __global__ void attention_resident_cells(const char * query, const char * mask, 
     __shared__ float query_tile[4][D];
     __shared__ float2 weights[4][32];
     __shared__ const half * value_rows[4][32];
+    // Chunk r of cell c at 4c + (r ^ (c/2 % 4)): conflict-free 128-bit stores and loads.
+    __shared__ uint4 key_tile[4][kc ? 128 : 1];
+    const auto swizzle = [](int c, int r) { return 4 * c + (r ^ (c >> 1 & 3)); };
     const int warp = threadIdx.x / 32, lane = threadIdx.x % 32, row = blockIdx.x * 4 + warp;
     if (row >= heads * tokens) { return; }
     const int head = row % heads, token = row / heads, kv_head = head / (heads / kv_heads);
@@ -274,7 +281,59 @@ __global__ void attention_resident_cells(const char * query, const char * mask, 
         const unsigned active = __ballot_sync(0xffffffff, live);
         if (!active) { continue; }
         float score = -INFINITY;
-        if (live) {
+        if constexpr (kc) {
+            const half * key_row = nullptr;
+            if (live) {
+                const size_t at = (size_t(cell) * kv_heads + kv_head) * D * sizeof(half);
+                key_row = page_row(pages.keys, pages.key_offset + at);
+                value_rows[warp][lane] = page_row(pages.values, pages.value_offset + at);
+            } else if constexpr (mlp) {
+                value_rows[warp][lane] = nullptr;
+                weights[warp][lane] = make_float2(0.0f, 0.0f);
+            }
+            // Masked lanes run the arithmetic on zero rows; their result is never used.
+            // Pass m yields half_sums[8m..8m+7] of the tree below (explicit arrays keep them in registers).
+            const auto pass = [&](int m, float (&sums)[8]) {
+                #pragma unroll
+                for (int i = 0; i < 4; ++i) {
+                    const int owner = 8 * i + lane / 4, part = lane % 4;
+                    const auto * row = reinterpret_cast<const uint4 *>(
+                        __shfl_sync(0xffffffff, reinterpret_cast<unsigned long long>(key_row), owner));
+                    key_tile[warp][swizzle(owner, part)] = row ? __ldg(row + m + 2 * part) : make_uint4(0, 0, 0, 0);
+                }
+                __syncwarp();
+                uint4 packed[4];
+                #pragma unroll
+                for (int r = 0; r < 4; ++r) { packed[r] = key_tile[warp][swizzle(lane, r)]; }
+                __syncwarp(); // The next pass overwrites the tile.
+                #pragma unroll
+                for (int e = 0; e < 8; ++e) {
+                    const int i = 8 * m + e;
+                    float k[4];
+                    #pragma unroll
+                    for (int r = 0; r < 4; ++r) {
+                        const half2 pair = reinterpret_cast<const half2 *>(&packed[r])[e / 2];
+                        k[r] = e % 2 ? __high2float(pair) : __low2float(pair);
+                    }
+                    const float low = __fadd_rn(__fmul_rn(qs[i], k[0]), __fmul_rn(qs[i + 32], k[2]));
+                    const float high = __fadd_rn(__fmul_rn(qs[i + 16], k[1]), __fmul_rn(qs[i + 48], k[3]));
+                    sums[e] = __fadd_rn(low, high);
+                }
+            };
+            float half_sums[8], upper[8];
+            pass(0, half_sums);
+            pass(1, upper);
+            if (live) {
+                #pragma unroll
+                for (int i = 0; i < 8; ++i) { half_sums[i] = __fadd_rn(half_sums[i], upper[i]); }
+                #pragma unroll
+                for (int width = 4; width; width /= 2) {
+                    #pragma unroll
+                    for (int i = 0; i < width; ++i) { half_sums[i] = __fadd_rn(half_sums[i], half_sums[i + width]); }
+                }
+                score = __fmaf_rn(half_sums[0], scale, bias);
+            }
+        } else if (live) {
             const size_t at = (size_t(cell) * kv_heads + kv_head) * D * sizeof(half);
             const half * key_row = page_row(pages.keys, pages.key_offset + at);
             value_rows[warp][lane] = page_row(pages.values, pages.value_offset + at);
@@ -370,6 +429,7 @@ struct ResidentRequest {
     bool batched;
     bool cells = false;
     bool cells_mlp = false;
+    bool cells_kc = false;
     size_t table_bytes = 0;
     // Written non-GPU pages copied for this invocation only (see ArgusColdStaging).
     std::unique_ptr<ArgusStagingBuffer> cold_host;
@@ -425,7 +485,8 @@ void resident_compute(size_t k_pages, size_t v_pages, void * raw) {
         const bool d64 = q->ne[0] == 64 && v->ne[0] == 64;
         const bool rows = pages.key_offset % (64 * sizeof(half)) == 0 && pages.value_offset % (64 * sizeof(half)) == 0;
         if (request.cells && d64 && rows) {
-            const auto cells_kernel = request.cells_mlp ? attention_resident_cells<true> : attention_resident_cells<false>;
+            const auto cells_kernel = request.cells_kc ? attention_resident_cells<true, true>
+                : request.cells_mlp ? attention_resident_cells<true> : attention_resident_cells<false>;
             cells_kernel<<<(q->ne[1] * q->ne[2] + 3) / 4, 128, 0, request.stream>>>(
                 static_cast<const char *>(q->data), static_cast<const char *>(mask->data), mask->type == GGML_TYPE_F16,
                 static_cast<float *>(dst->data), q->ne[1], k->ne[1], q->ne[2], k->ne[2],
@@ -463,13 +524,15 @@ void resident_compute(size_t k_pages, size_t v_pages, void * raw) {
 
 bool try_resident(ggml_tensor * dst, cudaStream_t stream, size_t state_bytes) {
     const char * path = std::getenv("ARGUS_KV_ATTENTION_PATH");
-    // Default (and "cells-mlp"): batched with the lane-per-cell D=64 kernel and its
-    // branch-free sequential V loop where it applies. References: "cells" keeps the
-    // per-cell-branch loop, "batched" the warp-per-cell kernel.
-    const bool cells_mlp = !path || std::strcmp(path, "cells-mlp") == 0;
+    // Default (and "cells-kc"): batched with the lane-per-cell D=64 kernel, coalesced
+    // K-row loads and the branch-free sequential V loop where it applies. References:
+    // "cells-mlp" keeps per-lane K loads, "cells" also the per-cell-branch loop,
+    // "batched" the warp-per-cell kernel.
+    const bool cells_kc = !path || std::strcmp(path, "cells-kc") == 0;
+    const bool cells_mlp = !path || cells_kc || std::strcmp(path, "cells-mlp") == 0;
     const bool cells = !path || cells_mlp || std::strcmp(path, "cells") == 0;
     if (path && !cells && std::strcmp(path, "staged") != 0 && std::strcmp(path, "direct") != 0 && std::strcmp(path, "batched") != 0) {
-        throw std::invalid_argument("ARGUS_KV_ATTENTION_PATH must be staged, direct, batched, cells or cells-mlp");
+        throw std::invalid_argument("ARGUS_KV_ATTENTION_PATH must be staged, direct, batched, cells, cells-mlp or cells-kc");
     }
     using namespace argus_profile;
     if (dst->src[0]->ne[2] <= 1) { reject(reject_q1); return false; }
@@ -492,6 +555,7 @@ bool try_resident(ggml_tensor * dst, cudaStream_t stream, size_t state_bytes) {
     request.table_bytes = bytes;
     request.cells = cells;
     request.cells_mlp = cells_mlp;
+    request.cells_kc = cells_kc;
     static constexpr ArgusColdStaging cold{reserve_cold, upload_cold};
     if (!argus_disk_read_resident(dst->src[1], dst->src[2], request.table, count, resident_compute, &request, &cold)) { return false; }
     request.cold_drain.pending = false; // resident_compute drained the stream.

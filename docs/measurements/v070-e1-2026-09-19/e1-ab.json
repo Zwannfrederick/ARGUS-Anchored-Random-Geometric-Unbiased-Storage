@@ -1,0 +1,108 @@
+{
+ "note": "E1 same-binary A/B, cells-mlp vs cells-kc, 4K Qwen2.5-0.5B Q4_K_M F16 KV, ubatch 64. prefill_s from bench_llama_paged_context.py; kernel_gpu_s = profile_prefill_kernel_gpu_ns (CUDA events, --profile cuda runs).",
+ "screen_3x": {
+  "cells-mlp": [
+   2.8465700000000003,
+   2.886012,
+   2.813477
+  ],
+  "cells-kc": [
+   2.6559540000000004,
+   2.7649679999999996,
+   2.680278
+  ]
+ },
+ "alternating_7": {
+  "cells-mlp": [
+   2.809219,
+   2.857894,
+   2.790721,
+   2.904321,
+   2.911381,
+   2.876415,
+   2.7874630000000002
+  ],
+  "cells-kc": [
+   2.645206,
+   2.9287449999999997,
+   2.658317,
+   2.87209,
+   2.8616599999999996,
+   2.667338,
+   2.6137539999999997
+  ]
+ },
+ "profiled_control": {
+  "cells-mlp": [
+   {
+    "prefill_s": 3.1211599999999997,
+    "kernel_gpu_s": 1.311820015
+   },
+   {
+    "prefill_s": 3.3296170000000003,
+    "kernel_gpu_s": 1.311663382
+   },
+   {
+    "prefill_s": 3.352921,
+    "kernel_gpu_s": 1.316865318
+   }
+  ],
+  "cells-kc": [
+   {
+    "prefill_s": 3.1996770000000003,
+    "kernel_gpu_s": 1.149338899
+   },
+   {
+    "prefill_s": 3.113372,
+    "kernel_gpu_s": 1.158887726
+   },
+   {
+    "prefill_s": 3.103299,
+    "kernel_gpu_s": 1.155897627
+   }
+  ]
+ },
+ "policy_on_3x": {
+  "cells-mlp": [
+   9.968136000000001,
+   10.038350000000001,
+   13.055044
+  ],
+  "cells-kc": [
+   10.577724,
+   10.426362999999998,
+   9.898978999999999
+  ]
+ },
+ "policy_on_profiled": {
+  "cells-mlp": [
+   {
+    "prefill_s": 10.524781,
+    "kernel_gpu_s": 1.6637279
+   },
+   {
+    "prefill_s": 16.52034,
+    "kernel_gpu_s": 1.667623202
+   },
+   {
+    "prefill_s": 16.614124,
+    "kernel_gpu_s": 1.670454561
+   }
+  ],
+  "cells-kc": [
+   {
+    "prefill_s": 10.339407,
+    "kernel_gpu_s": 1.427435795
+   },
+   {
+    "prefill_s": 12.120191,
+    "kernel_gpu_s": 1.429949724
+   },
+   {
+    "prefill_s": 9.960173000000001,
+    "kernel_gpu_s": 1.420902669
+   }
+  ]
+ },
+ "output_sha256_prefix": "a152ed56 in every run"
+}

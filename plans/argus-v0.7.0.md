@@ -272,3 +272,34 @@ group, where the remaining long-scoreboard stall sits.
 Deferred behind this experiment: the V MLP depth sweep (candidate A; revisit if long
 scoreboard on the first group value dominates after K is relieved), GQA cooperative V
 reuse and explicit V staging (V is ~15% of the data pipe), pointer delivery.
+
+## E1 result (2026-09-19): coalesced K-row loads — ACCEPT, now the default
+
+Report: [`v070-e1-cells-kc-2026-09-19.md`](../docs/measurements/v070-e1-cells-kc-2026-09-19.md).
+
+- Bit-exact everywhere; hash `a152ed56…`; GPU 7/7, CPU/context 5/5.
+- GPU-control prefill: 2.858 → 2.667 s (−6.7%, 7 alternating pairs, kc faster in 6/7).
+- Prefill kernel events: 1.314 → 1.156 s (−12.0%); policy-on kernel events −14.5%.
+- NCU, same launch as E0:
+  - data-pipe wavefronts ≈46.6 → 35.9 M (global −58%, shared +9.4 M);
+  - utilization 76 → 67%;
+  - `lg_throttle` 0.38 → 0.03; long scoreboard 3.52 → 2.24;
+  - issue 0.57 → 0.63;
+  - duration −12%.
+- Accepted under the occupancy exception: 66 registers, 7 blocks/SM, and a 100 KB
+  shared carveout that leaves L1 at 28 KB.
+- Weaker than predicted: 35.9 M wavefronts, not 25–30 M, and 67% utilization, not < 55%.
+
+Final baseline, profiler off, 5 repeats, on an idle GPU:
+- stock-host 1.341 s;
+- GPU-control **2.709 s** (2.02x); M1 < 2.70 s not met;
+- one repeat of 5.917 s with no other GPU process present: an unattributed ARGUS-side
+  outlier, open item.
+
+New dominant in-kernel bottleneck:
+- The L1TEX data pipe is still the most utilized unit (67%), now 60% shared wavefronts:
+  q/weight/pointer `LDS` 12.0 M, K tile 9.4 M.
+- `mio_throttle` 1.51 and long scoreboard 2.24 lead the stalls.
+
+Macro: attention is still the largest ARGUS component, and the CPU page-write path is
+second. The next experiment is chosen from these measurements in a separate turn.
