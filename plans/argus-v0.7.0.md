@@ -367,3 +367,33 @@ Attention is now ≈4x everything else ARGUS does on this path. The two candidat
    against 0.5 ms for the same pages carved from 4 MiB slabs. It makes a page's device
    memory shared with its neighbours', so a slab can be held alive by one live page —
    a VRAM trade that needs its own experiment and its own budget accounting.
+
+## E3 candidate (2026-09-23): Q shared-load vectorization — REJECTED at the compiler gate
+
+Report: [`v070-e3-q-lds-sass-2026-09-23.md`](../docs/measurements/v070-e3-q-lds-sass-2026-09-23.md).
+`5be871e` is the accepted checkpoint: GPU-control 2.406 s, 1.79x stock, decode
+8.08 tok/s, policy-on 9.178 s, hash `a152ed56…`. M1 and M2 met; next is M3 < 2.25 s.
+
+The candidate was a `cells-kq` path whose only change is vectorizing the query reads
+out of `query_tile`. The gate before any benchmark was to prove in SASS that the Q
+loads become a wider, fewer `LDS` form. They already are one:
+
+- Lines 318–319 compile to **16 `LDS.128` per tile**, offsets `0x00`–`0xf0` in 16-byte
+  steps from a warp-uniform base: the whole 256-byte query row, every float loaded
+  exactly once, at the widest shared load sm_86 has, naturally aligned.
+- Every `LDS` in the kernel is already `.128`; the only narrow shared ops are four
+  `STS.64` and the once-per-row `query_tile` fill, and widening them is wavefront-
+  neutral and is not a Q change.
+- Q reads are warp-uniform broadcasts, so structurally conflict-free; E1's 0.37 M bank
+  conflicts belong to the K tile swizzle.
+- Q is 16 of the 48 warp-uniform `LDS.128` per tile, so ≈4.0 M of the 12.0 M
+  "q/weight/pointer" wavefronts — ≈11% of the kernel's 35.9 M data-pipe wavefronts.
+  The V loop's weight and row-pointer broadcasts are twice that.
+
+Even a hypothetical complete removal of Q's shared traffic maps, through E1's measured
+transfer function, to ≈−3% prefill; the vectorization actually proposed is worth zero.
+The only remaining levers on Q — caching the row in registers (64 floats against a
+66-register budget) or consuming more cells per read (a loop restructure) — are
+excluded by the single-factor rule and, for the first, by arithmetic.
+
+No replacement experiment is selected in this turn, as instructed.
