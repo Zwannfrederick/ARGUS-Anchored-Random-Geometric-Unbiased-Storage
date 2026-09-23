@@ -716,6 +716,36 @@ void argus_cuda_copy(void * target, const void * source, size_t bytes, bool devi
                           static_cast<cudaStream_t>(stream)));
     if (events) { check(cudaEventRecord(events->end.value, static_cast<cudaStream_t>(stream))); ++pending_copies; }
 }
+const void * argus_cuda_commit_pages(void * staging, void * const * targets, const void * source,
+                                     size_t count, size_t page_bytes) {
+    // Pinned staging and one private stream turn a flush's 2n blocking copies into 2n
+    // queued ones and a single wait. The arithmetic of the commit is unchanged: the
+    // caller still checksums every page's read-back before it publishes anything.
+    // The stream is process-wide and holds no tier allocation; `staging` is the
+    // caller's, so the pinned bytes are released with the store that owns them.
+    static std::mutex commit_mutex;
+    static cudaStream_t commit_stream = nullptr;
+    const size_t bytes = count * page_bytes;
+    std::lock_guard<std::mutex> lock(commit_mutex);
+    if (!commit_stream && cudaStreamCreate(&commit_stream) != cudaSuccess) { return nullptr; }
+    auto * host = static_cast<char *>(staging);
+    {
+        argus_profile::Scope timer(argus_profile::tier_write);
+        std::memcpy(host, source, bytes);
+        if (argus_profile::enabled()) { argus_profile::h2d_bytes[argus_profile::phase] += bytes; }
+        for (size_t i = 0; i < count; ++i) {
+            check(cudaMemcpyAsync(targets[i], host + i * page_bytes, page_bytes,
+                                  cudaMemcpyHostToDevice, commit_stream));
+        }
+    }
+    argus_profile::Scope timer(argus_profile::tier_read);
+    for (size_t i = 0; i < count; ++i) {
+        check(cudaMemcpyAsync(host + bytes + i * page_bytes, targets[i], page_bytes,
+                              cudaMemcpyDeviceToHost, commit_stream));
+    }
+    check(cudaStreamSynchronize(commit_stream));
+    return host + bytes;
+}
 void argus_cuda_wait(void * stream) {
     { argus_profile::Scope timer(argus_profile::synchronization); check(cudaStreamSynchronize(static_cast<cudaStream_t>(stream))); }
     for (size_t i = 0; i < pending_copies; ++i) {

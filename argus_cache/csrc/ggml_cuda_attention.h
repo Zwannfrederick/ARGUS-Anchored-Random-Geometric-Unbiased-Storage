@@ -37,6 +37,13 @@ void argus_disk_move_page(const ggml_tensor * tensor, size_t offset, ArgusTier t
 void argus_disk_stage_cuda(const ggml_tensor * tensor, void * host, void * device,
                            size_t offset, size_t bytes, void * stream);
 void argus_cuda_copy(void * device, const void * source, size_t bytes, bool device_source, void * stream);
+// GPU-control page commit. Uploads `count` pages of `page_bytes` from `source` to
+// `targets[i]`, reads every one of them back, and waits once. `staging` is
+// 2 * count * page_bytes of caller-owned pinned host memory. Returns the read-back
+// bytes inside it for the caller to verify, or null when the commit stream is
+// unavailable — the caller then keeps its per-page path.
+const void * argus_cuda_commit_pages(void * staging, void * const * targets, const void * source,
+                                     size_t count, size_t page_bytes);
 void argus_cuda_wait(void * stream);
 
 // Written pages that are not GPU-resident, copied for this one read only. Under the

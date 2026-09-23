@@ -303,3 +303,67 @@ New dominant in-kernel bottleneck:
 
 Macro: attention is still the largest ARGUS component, and the CPU page-write path is
 second. The next experiment is chosen from these measurements in a separate turn.
+
+## E2 result (2026-09-23): the GPU-control page-write path — ACCEPT, both factors
+
+Report: [`v070-e2-write-path-2026-09-23.md`](../docs/measurements/v070-e2-write-path-2026-09-23.md).
+This opens the second campaign the nsys section named. It turned out not to touch the
+verification contract at all: the same digests are compared over the same bytes before
+the same publication, only cheaper and in flushes.
+
+Chosen from a direct measurement of the per-page costs on this GPU, before any code
+changed: FNV-1a 5.34 us/page (twice per page), blocking 4 KiB H2D 7.37 us, blocking
+4 KiB D2H 8.76 us, `cudaMalloc` + `cudaFree` 3.34 us. Pinning the host side alone is
+worthless at 4 KiB (D2H 7.83 us pinned vs 8.76 pageable); queueing a flush's copies on
+one stream and waiting once is what pays (18.8 → 8.7 us per page).
+
+- **E2a, hardware CRC32C digest** (`ARGUS_KV_CHECKSUM=fnv` keeps FNV-1a selectable):
+  −4.3%, 2.672 → 2.557 s, faster in 7/7 alternating pairs.
+- **E2b, whole-page runs committed together** (`ARGUS_KV_PAGE_COMMIT=page` keeps the
+  per-page commit selectable): −5.6%, 2.529 → 2.387 s, faster in 6/7 pairs.
+
+Profiled CPU scopes, per request, page/fnv → run/crc32c: `set_rows` 0.566 → 0.309 s,
+`write_page` 0.461 → 0.214 s, `tier_read` 0.204 → 0.086 s, `checksum` 0.136 → 0.015 s.
+`attention` (1.251 → 1.270 s) and `synchronization` (1.154 → 1.173 s) are flat across
+all four variant cells — each factor moves only its own scope.
+
+Costs: `peak_pinned_bytes` 32,768 → 65,536 (store-owned commit staging, released with
+the store). `peak_staging_bytes` and `peak_gpu_bytes` unchanged.
+
+Correctness: hash `a152ed56…` everywhere, GPU 7/7, CPU/context 5/5, policy-on counters
+unchanged (25,632 committed, 25,536 promotions, 0 demotions).
+
+Final baseline, profiler off, 5 repeats, idle GPU:
+- stock-host 1.342 s (1.340–1.389);
+- GPU-control **2.406 s** (2.370–2.424), **1.79x**, −11.2% against E1's 2.709 s;
+- decode 7.08 → 8.08 tok/s;
+- M1 (< 2.70 s) and M2 (< 2.50 s) met; M3 (< 2.25 s) not.
+- Policy-on 9.178 s median (3 repeats) against E1's 10.04–10.43 s: no regression.
+
+The E1 outlier did not reappear in 43 GPU-control prefills today (slowest 2.878 s).
+24k blocking driver round trips per prefill were a credible source and are gone, but
+this is the absence of the symptom, not an attributed fix. The open item stays open.
+
+## Where the time is after E2
+
+| component (per request, profiled) | time |
+|---|---:|
+| attention custom op, inclusive | 1.256 s (1.160 s of it waiting for the kernel) |
+| `set_rows`, inclusive | 0.309 s |
+| of which `write_page` | 0.214 s (`tier_read` 0.086, `allocation` 0.053, `tier_write` 0.040, `release` 0.030, `checksum` 0.014) |
+| of which row gather | 0.096 s |
+
+Attention is now ≈4x everything else ARGUS does on this path. The two candidates:
+
+1. **Attention, in-kernel.** E1's exit state stands: the L1TEX data pipe at 67%, now
+   60% shared-memory wavefronts — q/weight/pointer `LDS` 12.0 M and the K tile
+   round-trip 9.4 M — with `mio_throttle` 1.51 the largest throttle. The q re-read is
+   the biggest single piece of that 12.0 M: every lane reads all 64 query floats from
+   shared memory on every tile, 64 broadcast `LDS` per warp per tile, because 64
+   floats cannot stay in registers at 66 registers per thread. Whether vectorising
+   those reads (`LDS.128` over four contiguous q values) cuts the instruction count
+   without paying it back in registers is a measurable question and the natural E3.
+2. **The page allocator**, worth ≈0.07 s: 12,048 4 KiB `cudaMalloc`/`cudaFree` pairs
+   against 0.5 ms for the same pages carved from 4 MiB slabs. It makes a page's device
+   memory shared with its neighbours', so a slab can be held alive by one live page —
+   a VRAM trade that needs its own experiment and its own budget accounting.

@@ -135,6 +135,10 @@ def run_one(args, mode, context):
     if mode.startswith("argus-cuda-"):
         if args.attention_path:
             env["ARGUS_KV_ATTENTION_PATH"] = args.attention_path
+        if args.checksum:
+            env["ARGUS_KV_CHECKSUM"] = args.checksum
+        if args.page_commit:
+            env["ARGUS_KV_PAGE_COMMIT"] = args.page_commit
         env.update(ARGUS_KV_GPU_BYTES=str(args.gpu_bytes), ARGUS_KV_PINNED_BYTES=str(args.pinned_bytes),
                    ARGUS_KV_POLICY="on" if mode == "argus-cuda-on" else "off")
         if args.profile:
@@ -259,6 +263,8 @@ def main():
     parser.add_argument("--profile", nargs="?", const="cuda", choices=["cpu", "cuda"],
                         help="diagnostic CPU scopes, optionally CUDA events; measure overhead separately")
     parser.add_argument("--attention-path", choices=["staged", "direct", "batched", "cells", "cells-mlp", "cells-kc"], help="controlled CUDA datapath A/B")
+    parser.add_argument("--checksum", choices=["crc32c", "fnv"], help="controlled page-digest A/B")
+    parser.add_argument("--page-commit", choices=["run", "page"], help="controlled GPU-control write-batching A/B")
     parser.add_argument("--resident-bytes", type=int, required=True, help="ARGUS_KV_RESIDENT_BYTES for argus-paged")
     parser.add_argument("--max-kv-bytes", type=int, default=64 << 30)
     parser.add_argument("--staging-bytes", type=int, default=4 << 20)

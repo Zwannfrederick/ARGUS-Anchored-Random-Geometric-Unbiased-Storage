@@ -1,0 +1,197 @@
+{
+ "note": "v0.7 E2 same-binary A/B on the GPU-control page-write path. 4K Qwen2.5-0.5B Q4_K_M, F16 KV, ubatch 64, profiler off unless stated. prefill_s from bench_llama_paged_context.py; --checksum and --page-commit select the variants.",
+ "checksum_alternating_7": {
+  "fnv": [
+   2.8777939999999997,
+   2.672183,
+   2.679359,
+   2.6720349999999997,
+   2.63841,
+   2.697648,
+   2.6600390000000003
+  ],
+  "crc32c": [
+   2.545225,
+   2.638694,
+   2.550491,
+   2.564689,
+   2.538795,
+   2.5572890000000004,
+   2.594832
+  ]
+ },
+ "page_commit_alternating_7_crc32c_both": {
+  "page": [
+   2.42666,
+   2.510103,
+   2.505376,
+   2.5351999999999997,
+   2.531628,
+   2.678551,
+   2.528994
+  ],
+  "run": [
+   2.340078,
+   2.3866590000000003,
+   2.387993,
+   2.4320630000000003,
+   2.3501019999999997,
+   2.2862910000000003,
+   2.624182
+  ]
+ },
+ "profiled_cpu_scopes_per_request": {
+  "page/fnv": {
+   "set_rows": {
+    "seconds_per_request": 0.566,
+    "calls_per_request": 3072
+   },
+   "write_page": {
+    "seconds_per_request": 0.461,
+    "calls_per_request": 12096
+   },
+   "tier_read": {
+    "seconds_per_request": 0.2036,
+    "calls_per_request": 12096
+   },
+   "tier_write": {
+    "seconds_per_request": 0.0521,
+    "calls_per_request": 12096
+   },
+   "checksum": {
+    "seconds_per_request": 0.1358,
+    "calls_per_request": 24192
+   },
+   "allocation": {
+    "seconds_per_request": 0.0521,
+    "calls_per_request": 13632
+   },
+   "release": {
+    "seconds_per_request": 0.0268,
+    "calls_per_request": 7560
+   },
+   "synchronization": {
+    "seconds_per_request": 1.1538,
+    "calls_per_request": 1536
+   },
+   "attention": {
+    "seconds_per_request": 1.2506,
+    "calls_per_request": 1536
+   }
+  },
+  "page/crc32c": {
+   "set_rows": {
+    "seconds_per_request": 0.4343,
+    "calls_per_request": 3072
+   },
+   "write_page": {
+    "seconds_per_request": 0.3306,
+    "calls_per_request": 12096
+   },
+   "tier_read": {
+    "seconds_per_request": 0.1964,
+    "calls_per_request": 12096
+   },
+   "tier_write": {
+    "seconds_per_request": 0.0493,
+    "calls_per_request": 12096
+   },
+   "checksum": {
+    "seconds_per_request": 0.015,
+    "calls_per_request": 24192
+   },
+   "allocation": {
+    "seconds_per_request": 0.0523,
+    "calls_per_request": 13632
+   },
+   "release": {
+    "seconds_per_request": 0.0263,
+    "calls_per_request": 7560
+   },
+   "synchronization": {
+    "seconds_per_request": 1.1617,
+    "calls_per_request": 1536
+   },
+   "attention": {
+    "seconds_per_request": 1.2541,
+    "calls_per_request": 1536
+   }
+  },
+  "run/fnv": {
+   "set_rows": {
+    "seconds_per_request": 0.4123,
+    "calls_per_request": 3072
+   },
+   "write_page": {
+    "seconds_per_request": 0.3254,
+    "calls_per_request": 3072
+   },
+   "tier_read": {
+    "seconds_per_request": 0.0861,
+    "calls_per_request": 3072
+   },
+   "tier_write": {
+    "seconds_per_request": 0.0376,
+    "calls_per_request": 3072
+   },
+   "checksum": {
+    "seconds_per_request": 0.1317,
+    "calls_per_request": 24192
+   },
+   "allocation": {
+    "seconds_per_request": 0.0519,
+    "calls_per_request": 13632
+   },
+   "release": {
+    "seconds_per_request": 0.0292,
+    "calls_per_request": 7560
+   },
+   "synchronization": {
+    "seconds_per_request": 1.1658,
+    "calls_per_request": 1536
+   },
+   "attention": {
+    "seconds_per_request": 1.2601,
+    "calls_per_request": 1536
+   }
+  },
+  "run/crc32c": {
+   "set_rows": {
+    "seconds_per_request": 0.3093,
+    "calls_per_request": 3072
+   },
+   "write_page": {
+    "seconds_per_request": 0.2139,
+    "calls_per_request": 3072
+   },
+   "tier_read": {
+    "seconds_per_request": 0.0889,
+    "calls_per_request": 3072
+   },
+   "tier_write": {
+    "seconds_per_request": 0.0375,
+    "calls_per_request": 3072
+   },
+   "checksum": {
+    "seconds_per_request": 0.0145,
+    "calls_per_request": 24192
+   },
+   "allocation": {
+    "seconds_per_request": 0.0541,
+    "calls_per_request": 13632
+   },
+   "release": {
+    "seconds_per_request": 0.0304,
+    "calls_per_request": 7560
+   },
+   "synchronization": {
+    "seconds_per_request": 1.1731,
+    "calls_per_request": 1536
+   },
+   "attention": {
+    "seconds_per_request": 1.2699,
+    "calls_per_request": 1536
+   }
+  }
+ }
+}
