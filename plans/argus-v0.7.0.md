@@ -397,3 +397,90 @@ The only remaining levers on Q — caching the row in registers (64 floats again
 excluded by the single-factor rule and, for the first, by arithmetic.
 
 No replacement experiment is selected in this turn, as instructed.
+
+## Possible next map (2026-09-23, after `4a58e3f`)
+
+Not a selected experiment — the candidate list with what each is worth, what evidence
+it already has and what it still needs. Nothing here is committed to.
+
+### Where the 2.406 s stands
+
+| component (per request, profiled) | time | note |
+|---|---:|---|
+| attention, inclusive | 1.256 s | 1.160 s of it is the host waiting on the kernel |
+| `set_rows`, inclusive | 0.309 s | `write_page` 0.214 + row gather 0.096 |
+| everything else ARGUS | ≈0.03 s | page table, descriptor scan, copies |
+| stock-host, whole prefill | 1.342 s | its FlashAttention alone is 0.073 s |
+
+Kernel interior, still valid because the kernel has not changed since E1: 35.9 M
+L1TEX data-pipe wavefronts at 67.2%, 14.5 M global and 21.4 M shared, `mio_throttle`
+1.51 the largest throttle, long scoreboard 2.24, issue 0.63, 66 registers,
+7 blocks/SM, 49.1% achieved occupancy, 100 KB shared carveout leaving L1 at 28 KB.
+
+Per-tile instruction census (this turn's SASS work) with the E1 wavefront totals
+distributed across it:
+
+| traffic | per tile | ≈ wavefronts | share of 35.9 M |
+|---|---|---:|---:|
+| K tile shared round trip (302/307) | 8 `STS.128` + 8 `LDS.128`, lane-distinct | 9.4 M | 26% |
+| V row loads (`__ldg` of one `half`, 397) | 64 `LDG`, 2 per cell per lane | ≈6.9 M | 19% |
+| K row global loads (302) | 8 `LDG.E.128` | ≈6.9 M | 19% |
+| Q broadcasts (318–319) | 16 `LDS.128` | ≈4.0 M | 11% |
+| V-loop weight broadcasts (393) | 16 `LDS.128` | ≈4.0 M | 11% |
+| V-loop pointer broadcasts (394) | 16 `LDS.128` | ≈4.0 M | 11% |
+| mask, `STS.64`, output | rest | ≈0.7 M | 2% |
+
+E1's transfer function, for sizing anything below: −23% data-pipe wavefronts gave
+−12% kernel and −6.7% prefill, so roughly **0.29% of prefill per 1% of wavefronts**.
+
+### Candidates, strongest first
+
+1. **V values as `half2`: let each lane own two adjacent output dims.** Today a lane
+   loads `value_row + lane` and `value_row + lane + 32` as two separate 2-byte `__ldg`,
+   64 `LDG` per tile. If lane *l* owned dims `2l` and `2l+1` it would load one
+   `half2`, 32 `LDG` per tile, each still one fully used wavefront. Estimated −3.4 M
+   wavefronts (−9.5%) → ≈−5% kernel → ≈−2.8% prefill, plus 32 fewer issued
+   instructions per tile against the top throttle, which the linear estimate does not
+   capture. **Category 1**: every dim keeps its own `acc` chain, advanced cell by cell
+   with the same `__fmaf_rn` and the same weights; only which lane holds which dim
+   changes, and the final `output[row * D + …]` index changes with it (and can become
+   a 64-bit store). Needs: a SASS gate that nvcc actually emits one 32-bit `LDG` per
+   pair, and an exactness argument written out before any benchmark.
+2. **The page allocator**, ≈0.07 s (−2.9%). Measured, low risk, no kernel involvement:
+   12,048 4 KiB `cudaMalloc`/`cudaFree` pairs against 0.5 ms for the same pages carved
+   from 4 MiB slabs. The cost is that a page's device memory becomes shared with its
+   neighbours', so a slab can be held alive by one live page — it needs its own VRAM
+   accounting and a bound on retention. Deferred on instruction, not on merit.
+3. **The row gather in `set_rows`**, 0.096 s. Per-row `from_float` into the staging
+   buffer. Worth looking at only after it is broken down; it is an upper bound, not an
+   opportunity.
+4. **Occupancy step 7 → 8 blocks/SM.** Shared (11 KiB) already allows 9 blocks; the
+   limiter is exactly the two registers above 64. `__launch_bounds__(128, 8)` was
+   tried in E1 and spilled. Any retry is a lottery on nvcc's allocator, so it is only
+   worth attaching to another change that happens to free registers, never as an
+   experiment of its own.
+5. **Weight and pointer broadcasts via `__shfl` instead of shared** (8.0 M together).
+   Removes data-pipe wavefronts but replaces 16 `LDS.128` with ~64 `SHFL` per tile and
+   pushes the same warp onto the unit `mio_throttle` already names. Likely a loss;
+   listed so it is not re-derived from scratch.
+
+### What the map does not reach
+
+M3 (< 2.25 s) needs −0.156 s and is reachable: candidate 2 plus candidate 1 is
+≈0.14 s, plus whatever 3 yields. **M4 (< 2.00 s) needs −0.41 s and is not visible.**
+At the current attribution it would have to come from attention, ≈−25% of kernel time,
+from data-movement changes alone with the data pipe already down to 67%. Stock does
+the same attention in 0.073 s against our 1.16 s because it uses tensor-core
+FlashAttention; that 16x is the price of the Category 1 contract, and closing it is a
+contract decision, not an optimization. Past M3, the honest options are an explicit
+Category 2/3 experiment or a structural change that overlaps attention with the next
+layer's writes — both larger than anything on this list.
+
+### Open items carried forward
+
+- The E1 multi-second outlier: not reproduced in 43 GPU-control prefills on
+  2026-09-23, not attributed either. Still open.
+- **Decode is untouched**: 8.08 tok/s against stock's 37.02, a 4.6x gap, far wider in
+  relative terms than prefill's 1.79x. The prefill campaign was chosen first on
+  purpose, but decode is what a user of this feature actually waits on, and no
+  experiment in v0.7 has looked at it.
