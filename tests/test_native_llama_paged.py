@@ -244,5 +244,6 @@ def test_cuda_gpu_control_has_no_disk_io_and_preserves_lifecycle(tmp_path):
     stats = report["stats"]
     assert stats["read_bytes"] == stats["written_bytes"] == stats["disk_bytes"] == 0
     assert stats["profile_prefill_kernel_gpu_ns"] > 0 and stats["profile_decode_kernel_gpu_ns"] > 0
-    assert stats["profile_decode_d2d_bytes"] > 0
+    # Decode reads GPU-resident pages in place: no staging copies.
+    assert stats["resident_decode_accepted"] > 0 and stats["profile_decode_d2d_bytes"] == 0
     assert stats["peak_gpu_bytes"] <= 4194304

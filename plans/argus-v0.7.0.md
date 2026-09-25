@@ -510,3 +510,16 @@ largest remaining levers are outside the kernel:
 2. The CPU-side `set_rows` round trip (1.05 s of idle GPU time).
 3. Two policy logic faults in the product mode: a rewrite drops a page's promotion,
    and the LFU heat is never reset.
+
+## E5 result (2026-09-25): single-token decode on the resident path — ACCEPT
+
+Report: [`v070-e5-resident-decode-2026-09-25.md`](../docs/measurements/v070-e5-resident-decode-2026-09-25.md).
+
+- `reject_q1` is removed, so decode now uses the resident kernel: one launch per layer,
+  with pages read in place. Bit-exact with staged on every resident path (TDD).
+- The equivalence test exposed a policy bug on the staged path: scratch was still
+  alive while the policy observed. The scratch is now released before `observe`, and
+  policy decisions are identical again at both budgets.
+- GPU-control decode **7.53 → 39.31 tok/s** (stock 39.06): decode reaches stock parity.
+- Policy-on decode ≈2.5x (6.1–6.7 → 14.3–18.5 tok/s). It is still disk-latency-bound
+  because of L0.1.

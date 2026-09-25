@@ -547,7 +547,6 @@ bool try_resident(ggml_tensor * dst, cudaStream_t stream, size_t state_bytes) {
         throw std::invalid_argument("ARGUS_KV_ATTENTION_PATH must be staged, direct, batched, cells, cells-mlp, cells-kc or cells-v2");
     }
     using namespace argus_profile;
-    if (dst->src[0]->ne[2] <= 1) { reject(reject_q1); return false; }
     if (path && std::strcmp(path, "staged") == 0) { reject(reject_forced_staged); return false; }
     const bool batched = !path || cells || std::strcmp(path, "batched") == 0;
     if (batched) { state_bytes = 0; }
@@ -594,53 +593,57 @@ void compute_impl(ggml_tensor * dst, int device, void * raw_stream) {
         ++calls;
         return;
     }
-    // Includes both double-buffered host/device tiles and the online-softmax state.
-    ArgusStagingReservation reservation(4 * tile_bytes + state_bytes);
-    std::array<std::unique_ptr<ArgusTierBuffer>, 2> host, gpu;
-    for (int i = 0; i < 2; ++i) {
-        host[i] = std::make_unique<ArgusTierBuffer>(ArgusTier::pinned, tile_bytes);
-        gpu[i] = std::make_unique<ArgusTierBuffer>(ArgusTier::gpu, tile_bytes);
-    }
-    ArgusTierBuffer state(ArgusTier::gpu, state_bytes);
-    Stream transfer;
-    Event done[2];
-    std::unique_ptr<Event[]> start_events;
-    if (argus_profile::cuda_events()) { start_events = std::make_unique<Event[]>(2); }
-    bool pending_kernel[2]{};
-    // Construct after buffers: all queued work drains before their destructors.
-    Drain drain{stream};
-    float scale;
-    std::memcpy(&scale, reinterpret_cast<const char *>(dst->op_params) + sizeof(ggml_custom_op_params), sizeof scale);
-    const bool overlap = std::getenv("ARGUS_KV_NO_OVERLAP") == nullptr;
-    for (int64_t first = 0, step = 0; first < k->ne[2]; first += cells, ++step) {
-        const int slot = step % 2;
-        if (step >= 2) {
-            { argus_profile::Scope timer(argus_profile::synchronization); check(cudaEventSynchronize(done[slot].value)); }
-            if (start_events) { elapsed(argus_profile::kernel_gpu, start_events[slot], done[slot]); pending_kernel[slot] = false; }
+    // Scratch is released before the policy observes, as on the resident path:
+    // placement must not see transient attention buffers as occupied tier budget.
+    {
+        // Includes both double-buffered host/device tiles and the online-softmax state.
+        ArgusStagingReservation reservation(4 * tile_bytes + state_bytes);
+        std::array<std::unique_ptr<ArgusTierBuffer>, 2> host, gpu;
+        for (int i = 0; i < 2; ++i) {
+            host[i] = std::make_unique<ArgusTierBuffer>(ArgusTier::pinned, tile_bytes);
+            gpu[i] = std::make_unique<ArgusTierBuffer>(ArgusTier::gpu, tile_bytes);
         }
-        if (!overlap) { argus_profile::Scope timer(argus_profile::synchronization); check(cudaStreamSynchronize(stream)); }
-        const size_t count = std::min<int64_t>(cells, k->ne[2] - first);
-        argus_disk_stage_cuda(k, host[slot]->data(), gpu[slot]->data(), first * k->nb[2], count * k->nb[2], transfer.value);
-        argus_disk_stage_cuda(v, static_cast<char *>(host[slot]->data()) + key_bytes,
-            static_cast<char *>(gpu[slot]->data()) + key_bytes, first * v->nb[2], count * v->nb[2], transfer.value);
-        if (start_events) { check(cudaEventRecord(start_events[slot].value, stream)); }
-        attention_tile<false><<<q->ne[1] * q->ne[2], 256, 0, stream>>>(
-            static_cast<const char *>(q->data), static_cast<const half *>(gpu[slot]->data()),
-            reinterpret_cast<const half *>(static_cast<char *>(gpu[slot]->data()) + key_bytes),
-            static_cast<const char *>(mask->data), mask->type == GGML_TYPE_F16,
-            static_cast<float *>(dst->data), static_cast<float *>(state.data()),
-            q->ne[0], v->ne[0], q->ne[1], k->ne[1], q->ne[2], first, count, first + count == size_t(k->ne[2]),
-            q->nb[1], q->nb[2], mask->nb[0], mask->nb[1], scale, {});
-        if (argus_profile::enabled()) { ++argus_profile::kernel_launches[argus_profile::phase]; }
-        check(cudaGetLastError());
-        check(cudaEventRecord(done[slot].value, stream));
-        pending_kernel[slot] = true;
-    }
-    { argus_profile::Scope timer(argus_profile::synchronization); check(cudaStreamSynchronize(stream)); }
-    drain.pending = false;
-    if (start_events) {
-        for (int slot = 0; slot < 2; ++slot) {
-            if (pending_kernel[slot]) { elapsed(argus_profile::kernel_gpu, start_events[slot], done[slot]); }
+        ArgusTierBuffer state(ArgusTier::gpu, state_bytes);
+        Stream transfer;
+        Event done[2];
+        std::unique_ptr<Event[]> start_events;
+        if (argus_profile::cuda_events()) { start_events = std::make_unique<Event[]>(2); }
+        bool pending_kernel[2]{};
+        // Construct after buffers: all queued work drains before their destructors.
+        Drain drain{stream};
+        float scale;
+        std::memcpy(&scale, reinterpret_cast<const char *>(dst->op_params) + sizeof(ggml_custom_op_params), sizeof scale);
+        const bool overlap = std::getenv("ARGUS_KV_NO_OVERLAP") == nullptr;
+        for (int64_t first = 0, step = 0; first < k->ne[2]; first += cells, ++step) {
+            const int slot = step % 2;
+            if (step >= 2) {
+                { argus_profile::Scope timer(argus_profile::synchronization); check(cudaEventSynchronize(done[slot].value)); }
+                if (start_events) { elapsed(argus_profile::kernel_gpu, start_events[slot], done[slot]); pending_kernel[slot] = false; }
+            }
+            if (!overlap) { argus_profile::Scope timer(argus_profile::synchronization); check(cudaStreamSynchronize(stream)); }
+            const size_t count = std::min<int64_t>(cells, k->ne[2] - first);
+            argus_disk_stage_cuda(k, host[slot]->data(), gpu[slot]->data(), first * k->nb[2], count * k->nb[2], transfer.value);
+            argus_disk_stage_cuda(v, static_cast<char *>(host[slot]->data()) + key_bytes,
+                static_cast<char *>(gpu[slot]->data()) + key_bytes, first * v->nb[2], count * v->nb[2], transfer.value);
+            if (start_events) { check(cudaEventRecord(start_events[slot].value, stream)); }
+            attention_tile<false><<<q->ne[1] * q->ne[2], 256, 0, stream>>>(
+                static_cast<const char *>(q->data), static_cast<const half *>(gpu[slot]->data()),
+                reinterpret_cast<const half *>(static_cast<char *>(gpu[slot]->data()) + key_bytes),
+                static_cast<const char *>(mask->data), mask->type == GGML_TYPE_F16,
+                static_cast<float *>(dst->data), static_cast<float *>(state.data()),
+                q->ne[0], v->ne[0], q->ne[1], k->ne[1], q->ne[2], first, count, first + count == size_t(k->ne[2]),
+                q->nb[1], q->nb[2], mask->nb[0], mask->nb[1], scale, {});
+            if (argus_profile::enabled()) { ++argus_profile::kernel_launches[argus_profile::phase]; }
+            check(cudaGetLastError());
+            check(cudaEventRecord(done[slot].value, stream));
+            pending_kernel[slot] = true;
+        }
+        { argus_profile::Scope timer(argus_profile::synchronization); check(cudaStreamSynchronize(stream)); }
+        drain.pending = false;
+        if (start_events) {
+            for (int slot = 0; slot < 2; ++slot) {
+                if (pending_kernel[slot]) { elapsed(argus_profile::kernel_gpu, start_events[slot], done[slot]); }
+            }
         }
     }
     if (!(kr == argus_disk_revision(k)) || !(vr == argus_disk_revision(v))) { throw std::runtime_error("ARGUS stale CUDA attention"); }

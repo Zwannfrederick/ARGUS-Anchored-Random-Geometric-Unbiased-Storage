@@ -641,11 +641,22 @@ int main(int argc, char ** argv) try {
         auto * one_query = ggml_view_3d(ctx, q, d, heads, 1, q->nb[1], q->nb[2], q->nb[2]);
         auto * decode = argus_ggml_cuda_attention(ctx, one_query, rk, rv, float_mask, 0.125f);
         decode->data = output_gpu.data();
-        const auto resident_decodes = argus_profile::resident_calls[argus_profile::decode].load();
-        const auto q1 = resident_rejected[argus_profile::decode][argus_profile::reject_q1].load();
+        // Single-token decode reads resident pages in place, bit-exact with the staged tiles.
+        std::vector<float> staged_decode(size_t(d) * heads), resident_decode(staged_decode.size());
+        setenv("ARGUS_KV_ATTENTION_PATH", "staged", 1);
         compute(decode, 0, nullptr);
-        require(argus_profile::resident_calls[argus_profile::decode] == resident_decodes);
-        require(resident_rejected[argus_profile::decode][argus_profile::reject_q1] == q1 + 1);
+        output_gpu.read(staged_decode.data(), 0, staged_decode.size() * sizeof(float));
+        for (const auto * path : {"direct", "batched", "cells", "cells-mlp", "cells-kc", "cells-v2"}) {
+            setenv("ARGUS_KV_ATTENTION_PATH", path, 1);
+            const auto resident_decodes = argus_profile::resident_calls[argus_profile::decode].load();
+            compute(decode, 0, nullptr);
+            require(argus_profile::resident_calls[argus_profile::decode] == resident_decodes + 1);
+            output_gpu.read(resident_decode.data(), 0, resident_decode.size() * sizeof(float));
+            for (size_t i = 0; i < resident_decode.size(); ++i) if (resident_decode[i] != staged_decode[i]) {
+                std::fprintf(stderr, "decode path=%s index=%zu actual=%a expected=%a\n", path, i, resident_decode[i], staged_decode[i]);
+                require(false);
+            }
+        }
         ggml_backend_buffer_clear(resident_store, 0);
         auto * zeros = argus_ggml_cuda_attention(ctx, q, rk, rv, mask, 1.0f);
         zeros->data = output_gpu.data();

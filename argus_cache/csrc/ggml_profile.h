@@ -31,9 +31,9 @@ inline thread_local Phase phase = other;
 
 // Resident fast-path eligibility. Always counted: one reason per rejected invocation,
 // the first failing check in evaluation order.
-enum Reject { reject_q1, reject_forced_staged, reject_alignment, reject_gpu_table_budget, reject_staging_budget,
+enum Reject { reject_forced_staged, reject_alignment, reject_gpu_table_budget, reject_staging_budget,
               reject_codec, reject_key_page, reject_value_page, reject_cold_budget, reject_count };
-inline constexpr const char * reject_names[] = {"q1", "forced_staged", "alignment", "gpu_table_budget",
+inline constexpr const char * reject_names[] = {"forced_staged", "alignment", "gpu_table_budget",
     "staging_budget", "codec", "nonresident_key_page", "nonresident_value_page", "cold_scratch_budget"};
 // cold_pages: written non-GPU pages staged into scratch for accepted invocations.
 inline std::atomic<uint64_t> resident_accepted[3]{}, resident_rejected[3][reject_count]{}, resident_cold_pages[3]{};
