@@ -111,6 +111,14 @@ static void check_policy() {
     require(argus_disk_page_descriptor(tensor, 12288).placement == ArgusTier::gpu);
     require(argus_disk_page_descriptor(tensor, 0).placement == ArgusTier::disk);
     require(argus_disk_revision(tensor) == revision);
+    // Rewriting a promoted page (a decode append) keeps it in its tier, refreshed.
+    const auto moved = argus_kv_policy_stats();
+    payload[12288] = 74;
+    ggml_backend_tensor_set(tensor, payload.data() + 12288, 12288, 1);
+    require(argus_disk_page_descriptor(tensor, 12288).placement == ArgusTier::gpu);
+    ggml_backend_tensor_get(tensor, copied.data(), 0, copied.size());
+    require(copied == payload);
+    require(argus_kv_policy_stats().promotions == moved.promotions && argus_kv_policy_stats().demotions == moved.demotions);
     const auto stats = argus_kv_policy_stats();
     corrupt_read = true;
     argus_kv_policy_prepare(4096, 0);
@@ -130,6 +138,35 @@ static void check_policy() {
     require(argus_tier_usage().gpu == 0 && argus_tier_usage().pinned == 0 && argus_tier_usage().ram == 0);
     setenv("ARGUS_KV_POLICY", "off", 1);
     std::puts("policy: off/on, admission, tier budgets, eviction, failure counters and teardown passed");
+}
+
+// Attention scratch and cached pages share a tier budget. The headroom one invocation
+// reserves must stay free afterwards, or every call evicts what the last one promoted.
+static void check_scratch_headroom() {
+    setenv("ARGUS_KV_GPU_BYTES", "12288", 1);
+    setenv("ARGUS_KV_PINNED_BYTES", "4096", 1);
+    setenv("ARGUS_KV_RAM_BYTES", "4096", 1);
+    setenv("ARGUS_KV_POLICY", "on", 1);
+    auto * ctx = ggml_init({1 << 20, nullptr, true});
+    auto * tensor = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 4096);
+    auto * buffer = ggml_backend_alloc_ctx_tensors_from_buft(ctx, argus_ggml_disk_buffer_type());
+    require(buffer);
+    std::vector<unsigned char> payload(16384, 5), copied(payload.size());
+    ggml_backend_tensor_set(tensor, payload.data(), 0, payload.size());
+    const auto before = argus_kv_policy_stats();
+    for (int call = 0; call < 4; ++call) {
+        argus_kv_policy_prepare(4096, 0); // one page of scratch per invocation
+        ggml_backend_tensor_get(tensor, copied.data(), 0, copied.size());
+        argus_kv_policy_observe(tensor);
+    }
+    const auto after = argus_kv_policy_stats();
+    require(argus_tier_usage().gpu == 8192); // two cached pages, one page of headroom
+    require(after.demotions == before.demotions); // no churn between invocations
+    require(after.promotions - before.promotions == 4); // 2 GPU + pinned + RAM, once
+    ggml_backend_buffer_free(buffer);
+    ggml_free(ctx);
+    setenv("ARGUS_KV_POLICY", "off", 1);
+    std::puts("policy: attention scratch headroom stays free across invocations");
 }
 
 // Qwen2.5-0.5B geometry: 14 Q / 2 KV heads, D=64, a 64-token ubatch over 600 cells of
@@ -278,12 +315,13 @@ static void check_mixed_residency(ggml_tensor * k, ggml_tensor * v, ggml_tensor 
     run("cold value pinned", 3);
     argus_disk_move_page(v, 0, ArgusTier::ram, argus_disk_page_revision(v, 0));
     run("gpu pinned ram disk", 4);
-    // A rewrite drops residency: the write frontier is cold.
+    // A rewrite keeps residency: the write frontier stays in its tier, refreshed.
     std::vector<unsigned char> page(4096);
     const size_t frontier = (ggml_nbytes(k) / 4096 - 1) * 4096;
     ggml_backend_tensor_get(k, page.data(), frontier, 4096);
     ggml_backend_tensor_set(k, page.data(), frontier, 4096);
-    run("write frontier", 5);
+    require(argus_disk_page_descriptor(k, frontier).placement == ArgusTier::gpu);
+    run("write frontier", 4);
 
     move_pages(k, ArgusTier::disk);
     move_pages(v, ArgusTier::disk);
@@ -677,6 +715,7 @@ int main(int argc, char ** argv) try {
     ggml_backend_buffer_free(store);
     ggml_free(ctx);
     check_policy();
+    check_scratch_headroom();
     check_gpu_control();
     if (argus_profile::enabled()) {
         using namespace argus_profile;

@@ -523,3 +523,16 @@ Report: [`v070-e5-resident-decode-2026-09-25.md`](../docs/measurements/v070-e5-r
 - GPU-control decode **7.53 → 39.31 tok/s** (stock 39.06): decode reaches stock parity.
 - Policy-on decode ≈2.5x (6.1–6.7 → 14.3–18.5 tok/s). It is still disk-latency-bound
   because of L0.1.
+
+## E6 result (2026-09-25): placement policy logic — two fixes, one withdrawn
+
+Report: [`v070-e6-policy-logic-2026-09-25.md`](../docs/measurements/v070-e6-policy-logic-2026-09-25.md).
+
+- **Rewrite keeps promotion** (audit L0.1). At 64 MiB, steady state: promotions
+  12,768 → 0, cold pages 2,520 → 0, `read_bytes` −67%. Wall clock stays bound by the
+  durable write.
+- **Promotion no longer fills the attention scratch headroom** (new L0.3, found by
+  measurement). At the tight budget (2 MiB GPU): promotions and demotions go from
+  78,680 / 78,496 to 36 / 34, reads −30%, prefill −10–13%.
+- The LFU "heat inversion" (audit L0.2) is withdrawn: it was wrong for full causal
+  attention, and the proposed reset would have caused harm.

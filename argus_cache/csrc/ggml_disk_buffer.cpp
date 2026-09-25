@@ -226,10 +226,6 @@ void write_page(Store & store, size_t page, void * data) {
     }
     read_bytes += page_size;
     if (argus_profile::enabled()) { argus_profile::disk_read_bytes[argus_profile::phase] += page_size; }
-#ifdef ARGUS_CUDA
-    delete descriptor.resident;
-    descriptor.resident = nullptr;
-#endif
     ++descriptor.content_revision;
     ++descriptor.placement_revision;
     descriptor.checksum = digest;
@@ -237,6 +233,22 @@ void write_page(Store & store, size_t page, void * data) {
     ++store.content_revision;
     store.last_written_page = page;
     ++committed_pages;
+#ifdef ARGUS_CUDA
+    // A promoted page keeps its tier: refresh the copy from the verified bytes instead of
+    // dropping it, or every decode append would send the tail page back through disk.
+    // On any refresh failure the copy goes; the published disk page stays authoritative.
+    if (descriptor.resident) {
+        try {
+            descriptor.resident->write(data, page_size);
+            descriptor.resident->read(data, 0, page_size);
+            if (checksum(data) != digest) { throw std::runtime_error("ARGUS resident refresh verification failed"); }
+        } catch (...) {
+            delete descriptor.resident;
+            descriptor.resident = nullptr;
+            throw;
+        }
+    }
+#endif
 }
 
 #ifdef ARGUS_CUDA

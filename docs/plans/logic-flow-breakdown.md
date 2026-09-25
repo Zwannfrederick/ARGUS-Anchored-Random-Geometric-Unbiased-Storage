@@ -51,11 +51,16 @@ flowchart TD
 - **Gerçek kırılım:** Dar bütçeli policy-on decode ölçümü 0.991 tok/s ve 10.979 s disk-read beklemesi ([v060-4k-attribution](../measurements/v060-4k-attribution-2026-09-17.md)). v0.7 kampanyası bu modu hiç ölçmedi.
 - **Reçete:** Yazma yerleşimi = mevcut yerleşim. Sayfa bir tier'da resident ise yeni içeriği o tier'a yazıp orada doğrulamak. Disk kopyası isteniyorsa arka planda backing copy olarak güncellemek; `placement_revision` değişmez.
 
-### L0.2 Isı ters çalışıyor: LFU, kesin okunacak sayfayı kurban seçiyor
-- **Kanıt:** Kurban seçimi sadece `access_count` minimumuna bakıyor (`ggml_kv_policy.cpp:36–42`). Tam causal attention'da her görünür sayfa her adımda okunuyor, dolayısıyla `access_count` fiilen sayfanın **yaşı** oluyor. En düşük sayıya sahip sayfa en yeni sayfa, yani bir sonraki token'ın da kesin okuyacağı kuyruk sayfası.
-- **Ek kırılım:** `write_page` ve `write_run` içerik değiştiğinde (`content_revision++`) `access_count`'u sıfırlamıyor. Slot yeniden kullanımında ya da crop sonrasında yeni içerik eski içeriğin ısısını miras alıyor. `content_revision` ile ısı arasında bir split-brain var.
-- **Ölü veri:** `last_access_step` her okumada yazılıyor (`:352`) ve descriptor'a ihraç ediliyor (`:673`), ama policy onu hiç kullanmıyor; sadece census istatistiklerinde okunuyor. Recency toplanıyor ve atılıyor.
-- **Reçete:** İçerik değişince ısıyı sıfırlamak. Kurbanı `last_access_step` (LRU) ile seçmek ya da kuyruğa en yakın N sayfayı korumak. İkisi de mevcut alanlarla birkaç satırlık bir değişiklik.
+### L0.2 ~~Isı ters çalışıyor~~ — GERİ ÇEKİLDİ (E6, 2026-09-25)
+Tam causal attention'da her görünür sayfa her adımda okunuyor. Bu yüzden "kesin okunacak sayfa" nitelemesi hepsi için geçerli. Tier'dan büyük döngüsel bir taramada hit oranını belirleyen şey *sabit* bir alt kümenin tutulması, ve monoton LFU sayaçları bunu zaten sağlıyor. Önerilen "yeniden yazımda sayacı sıfırla" düzeltmesi kuyruk sayfasını her token'da kurban yapardı. Geçerli kalan tek şey küçük bir P3: `last_access_step` toplanıyor ama policy tarafından kullanılmıyor. Ayrıntı: [E6 raporu](../measurements/v070-e6-policy-logic-2026-09-25.md).
+
+### L0.3 Terfi, attention scratch'inin payını dolduruyordu (ölçümle bulundu, E6'da düzeltildi)
+- `argus_kv_policy_prepare` her çağrıdan önce scratch için sayfa atıyor (`ggml_kv_policy.cpp`, `force=true`).
+- Attention bitince `observe` o boşluğa terfi ediyordu, sonraki `prepare` aynı sayfaları tekrar atıyordu.
+- Dar bütçede (GPU 2 MiB) request başına 78,680 terfi ve 78,496 demote, 3.04 GB okuma.
+- **Düzeltme:** `observe` son `prepare`'in ayırdığı payı boş bırakıyor. Sonuç: 36 terfi / 34 demote, okuma −30%, prefill −10–13%.
+
+**L0.1 durumu:** E6'da düzeltildi. Resident kopya doğrulanmış byte'larla tazeleniyor. 64 MiB bütçede kararlı durumda terfi 12,768 → 0, `read_bytes` −67%.
 
 ---
 
@@ -65,7 +70,7 @@ flowchart TD
 - `gpu_control` kodda açıkça "Diagnostic GPU-authoritative storage; no disk fallback" (`ggml_disk_buffer.cpp:52`, `:186`) ve "cannot migrate out of GPU" (`:824`) olarak tanımlı.
 - v0.7'deki bütün M1–M4 hedefleri ve kabul kriterleri bu moda göre (`plans/argus-v0.7.0.md`, "Workload and method").
 - Ürün modları (policy-on: 9.18 s; disk: ölçülmedi) v0.7'de sadece regresyon kontrolü olarak koşuldu.
-- **Sonuç:** Kampanya kernel'i ve GPU-control yazma yolunu hızlandırıyor. Bu kazançların bir kısmı (kernel, E4) her moda taşınıyor, ama L0.1 ve L0.2 ürün modunun asıl kaybı ve kampanyanın dışında kalıyor.
+- **Sonuç:** Kampanya kernel'i ve GPU-control yazma yolunu hızlandırıyor. Bu kazançların bir kısmı (kernel, E4) her moda taşınıyor, ama L0.1 ve L0.3 ürün modunun asıl kaybıydı ve kampanyanın dışında kalıyordu (ikisi de E6'da düzeltildi).
 - **Reçete:** v0.7'nin sonraki ölçüm matrisine policy-on prefill ve decode'u birinci sınıf metrik olarak eklemek.
 
 ### L1.2 Yeni sayfa her zaman soğuk doğuyor (write-time admission yok)
@@ -83,7 +88,7 @@ flowchart TD
 ### L1.4 Policy'nin saati, staged yolun tile boyuyla tanımlı
 - Resident yol, policy kararları staged yolla birebir aynı kalsın diye 32 hücrelik okuma geçmişini taklit ediyor (`ggml_disk_buffer.cpp:1017–1023`).
 - Her `record_access` `access_step`'i artırıyor. "Zaman" token değil tile okuması; bu yüzden aynı recency farkı context uzunluğuyla ölçekleniyor.
-- Şu an zararsız, çünkü `access_step` kullanılmıyor (L0.2). Ama L0.2'nin LRU reçetesi uygulanırsa bu saat anlamsız hale gelir. Önce saatin çağrı (token) başına bir kez ilerlemesi gerekir.
+- Şu an zararsız, çünkü `access_step` kullanılmıyor. L0.2 geri çekildiği için LRU gündemde değil; recency ileride kullanılırsa önce saatin çağrı (token) başına bir kez ilerlemesi gerekir.
 - Control-audit P0.1'deki decode geçişi (Q=1'in resident yola alınması) bu taklidi de miras alacak.
 
 ---
@@ -120,8 +125,8 @@ Decode'da 256 B'lık tek satır için tam bir 4 KiB sayfa okunuyor, birleştiril
 
 | Sıra | Değişiklik | Boyut | Doğrulama |
 |---|---|---|---|
-| 1 | **L0.2:** yazımda `access_count = 0`; kurbanı `last_access_step` ile seçmek; saati çağrı başına ilerletmek (L1.4) | ~10 satır, mevcut alanlar | Policy counter testleri; policy-on 4K prefill ve decode A/B |
-| 2 | **L0.1:** resident sayfaya yazmak onu diske düşürmesin. Resident tier'a yazıp doğrulamak; disk kopyası backing copy olarak kalır | `write_page` içinde bir dal | `test_ggml_disk_buffer` short-write ve corrupt-page testleri ile policy off/on eşitliği; dar bütçeli decode ölçümü (0.991 tok/s baseline) |
+| 1 | ~~L0.2~~ geri çekildi; yerine **L0.3** (scratch headroom) — **yapıldı, E6** | — | — |
+| 2 | **Yapıldı (E6).** **L0.1:** resident sayfaya yazmak onu diske düşürmesin. Resident tier'a yazıp doğrulamak; disk kopyası backing copy olarak kalır | `write_page` içinde bir dal | `test_ggml_disk_buffer` short-write ve corrupt-page testleri ile policy off/on eşitliği; dar bütçeli decode ölçümü (0.991 tok/s baseline) |
 | 3 | **L1.2:** yazma anında admission (hedef tier bütçesi varsa) | `write_page`'e yerleşim girdisi | Policy census; `peak_*` bütçeleri |
 | 4 | **L2.1:** GPU-side `set_rows` (GPU-resident sayfalar için) | Yeni kernel; doğrulama sözleşmesi kararı gerekli | Hash `a152ed56`; nsys GPU idle |
 | 5 | **L1.1:** v0.7 ölçüm matrisine policy-on prefill ve decode eklemek | Plan değişikliği | — |
