@@ -1,0 +1,7 @@
+pair 1 load 3.22
+pair 2 load 3.97
+pair 3 load 4.19
+pair 4 load 4.35
+pair 5 load 4.11
+pair 6 load 4.13
+pair 7 load 3.84

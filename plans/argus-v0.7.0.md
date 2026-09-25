@@ -484,3 +484,29 @@ layer's writes — both larger than anything on this list.
   relative terms than prefill's 1.79x. The prefill campaign was chosen first on
   purpose, but decode is what a user of this feature actually waits on, and no
   experiment in v0.7 has looked at it.
+
+## E4 result (2026-09-25): V values as `half2` — ACCEPT, now the default
+
+Report: [`v070-e4-v-half2-2026-09-25.md`](../docs/measurements/v070-e4-v-half2-2026-09-25.md).
+
+- Category 1: only the lane that owns a dim changes (`2l, 2l+1` instead of `l, l+32`).
+  One 32-bit `half2` `__ldg` replaces two 16-bit loads. Mutation-checked.
+- SASS: 8 → 4 V loads per unrolled 4-cell group; reference kernels byte-identical to
+  `be4cc47`. 76 registers, 6 blocks/SM, no spill. `__launch_bounds__(128, 7)` (72
+  registers plus an `LDL.64` per tile) was a +1.3% kernel loss; it is rejected and
+  must not be retried.
+- Kernel events −6.3% (5/5, ranges do not overlap). Profiler-off prefill −4.5%
+  (2.442 → 2.332 s, 6/7). Accepted below the preferred 5% on the strength of the
+  clean kernel signal and two runs that agree in direction; the call is stated in the
+  report.
+- Final baseline: GPU-control **2.328 s** (2.271–2.396), **1.73x** stock (1.342 s).
+  Policy-on 8.976 s median, counters unchanged. Hash `a152ed56`.
+- M3 (< 2.25 s) needs −0.078 s more.
+
+The 2026-09-25 audits ([control](../docs/plans/control-audit.md),
+[logic flow](../docs/plans/logic-flow-breakdown.md)) reorder what comes next. The
+largest remaining levers are outside the kernel:
+1. Decode goes through the staged Q=1 path.
+2. The CPU-side `set_rows` round trip (1.05 s of idle GPU time).
+3. Two policy logic faults in the product mode: a rewrite drops a page's promotion,
+   and the LFU heat is never reset.

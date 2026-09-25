@@ -262,7 +262,7 @@ def main():
                                  "argus-cuda-off", "argus-cuda-on", "argus-cuda-control"])
     parser.add_argument("--profile", nargs="?", const="cuda", choices=["cpu", "cuda"],
                         help="diagnostic CPU scopes, optionally CUDA events; measure overhead separately")
-    parser.add_argument("--attention-path", choices=["staged", "direct", "batched", "cells", "cells-mlp", "cells-kc"], help="controlled CUDA datapath A/B")
+    parser.add_argument("--attention-path", choices=["staged", "direct", "batched", "cells", "cells-mlp", "cells-kc", "cells-v2"], help="controlled CUDA datapath A/B")
     parser.add_argument("--checksum", choices=["crc32c", "fnv"], help="controlled page-digest A/B")
     parser.add_argument("--page-commit", choices=["run", "page"], help="controlled GPU-control write-batching A/B")
     parser.add_argument("--resident-bytes", type=int, required=True, help="ARGUS_KV_RESIDENT_BYTES for argus-paged")

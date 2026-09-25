@@ -250,10 +250,14 @@ __global__ void attention_resident_batch(const char * query, const char * mask, 
 // 16-byte chunks of the tile's 32 rows are fetched 8 rows per warp load (lanes 4s..4s+3
 // take one row) into a per-warp shared tile, then every lane reads its own row back.
 // The products, tree and score are computed from bit-identical k values.
-template<bool mlp, bool kc = false>
+// v2 (with kc): a lane owns output dims 2*lane and 2*lane+1 instead of lane and lane+32,
+// loading both as one half2. Each dim keeps its own acc chain with the same weights in
+// the same cell order, and half->float is exact, so only the lane holding a dim changes.
+template<bool mlp, bool kc = false, bool v2 = false>
 __global__ void attention_resident_cells(const char * query, const char * mask, bool half_mask,
         float * output, int heads, int kv_heads, int tokens, int cells,
         size_t q_head, size_t q_token, size_t mask_cell, size_t mask_token, float scale, ResidentKV pages) {
+    static_assert(!v2 || (mlp && kc), "v2 extends cells-kc");
     constexpr int D = 64;
     __shared__ float query_tile[4][D];
     __shared__ float2 weights[4][32];
@@ -394,9 +398,14 @@ __global__ void attention_resident_cells(const char * query, const char * mask, 
                 const half * value_row = value_rows[warp][c];
                 const float next_sum = __fmaf_rn(weight.x, sum, weight.y);
                 sum = live_cell ? next_sum : sum;
+                float2 pair{};
+                if constexpr (v2) {
+                    pair = value_row ? __half22float2(__ldg(reinterpret_cast<const half2 *>(value_row) + lane)) : make_float2(0.0f, 0.0f);
+                }
                 #pragma unroll
                 for (int j = 0; j < 2; ++j) {
-                    const float value = value_row ? __half2float(__ldg(value_row + lane + j * 32)) : 0.0f;
+                    const float value = v2 ? (j ? pair.y : pair.x)
+                        : value_row ? __half2float(__ldg(value_row + lane + j * 32)) : 0.0f;
                     const float next = __fmaf_rn(weight.x, acc[j], __fmul_rn(weight.y, value));
                     acc[j] = live_cell ? next : acc[j];
                 }
@@ -418,7 +427,7 @@ __global__ void attention_resident_cells(const char * query, const char * mask, 
         __syncwarp();
     }
     #pragma unroll
-    for (int j = 0; j < 2; ++j) { output[row * D + lane + j * 32] = sum > 0 ? acc[j] / sum : 0.0f; }
+    for (int j = 0; j < 2; ++j) { output[row * D + (v2 ? 2 * lane + j : lane + j * 32)] = sum > 0 ? acc[j] / sum : 0.0f; }
 }
 
 struct ResidentRequest {
@@ -430,6 +439,7 @@ struct ResidentRequest {
     bool cells = false;
     bool cells_mlp = false;
     bool cells_kc = false;
+    bool cells_v2 = false;
     size_t table_bytes = 0;
     // Written non-GPU pages copied for this invocation only (see ArgusColdStaging).
     std::unique_ptr<ArgusStagingBuffer> cold_host;
@@ -485,7 +495,8 @@ void resident_compute(size_t k_pages, size_t v_pages, void * raw) {
         const bool d64 = q->ne[0] == 64 && v->ne[0] == 64;
         const bool rows = pages.key_offset % (64 * sizeof(half)) == 0 && pages.value_offset % (64 * sizeof(half)) == 0;
         if (request.cells && d64 && rows) {
-            const auto cells_kernel = request.cells_kc ? attention_resident_cells<true, true>
+            const auto cells_kernel = request.cells_v2 ? attention_resident_cells<true, true, true>
+                : request.cells_kc ? attention_resident_cells<true, true>
                 : request.cells_mlp ? attention_resident_cells<true> : attention_resident_cells<false>;
             cells_kernel<<<(q->ne[1] * q->ne[2] + 3) / 4, 128, 0, request.stream>>>(
                 static_cast<const char *>(q->data), static_cast<const char *>(mask->data), mask->type == GGML_TYPE_F16,
@@ -524,15 +535,16 @@ void resident_compute(size_t k_pages, size_t v_pages, void * raw) {
 
 bool try_resident(ggml_tensor * dst, cudaStream_t stream, size_t state_bytes) {
     const char * path = std::getenv("ARGUS_KV_ATTENTION_PATH");
-    // Default (and "cells-kc"): batched with the lane-per-cell D=64 kernel, coalesced
-    // K-row loads and the branch-free sequential V loop where it applies. References:
-    // "cells-mlp" keeps per-lane K loads, "cells" also the per-cell-branch loop,
-    // "batched" the warp-per-cell kernel.
-    const bool cells_kc = !path || std::strcmp(path, "cells-kc") == 0;
+    // Default (and "cells-v2"): batched with the lane-per-cell D=64 kernel, coalesced
+    // K-row loads, half2 V loads and the branch-free sequential V loop where it applies.
+    // References: "cells-kc" keeps one half per V load, "cells-mlp" also per-lane K loads,
+    // "cells" also the per-cell-branch loop, "batched" the warp-per-cell kernel.
+    const bool cells_v2 = !path || std::strcmp(path, "cells-v2") == 0;
+    const bool cells_kc = cells_v2 || std::strcmp(path, "cells-kc") == 0;
     const bool cells_mlp = !path || cells_kc || std::strcmp(path, "cells-mlp") == 0;
     const bool cells = !path || cells_mlp || std::strcmp(path, "cells") == 0;
     if (path && !cells && std::strcmp(path, "staged") != 0 && std::strcmp(path, "direct") != 0 && std::strcmp(path, "batched") != 0) {
-        throw std::invalid_argument("ARGUS_KV_ATTENTION_PATH must be staged, direct, batched, cells, cells-mlp or cells-kc");
+        throw std::invalid_argument("ARGUS_KV_ATTENTION_PATH must be staged, direct, batched, cells, cells-mlp, cells-kc or cells-v2");
     }
     using namespace argus_profile;
     if (dst->src[0]->ne[2] <= 1) { reject(reject_q1); return false; }
@@ -556,6 +568,7 @@ bool try_resident(ggml_tensor * dst, cudaStream_t stream, size_t state_bytes) {
     request.cells = cells;
     request.cells_mlp = cells_mlp;
     request.cells_kc = cells_kc;
+    request.cells_v2 = cells_v2;
     static constexpr ArgusColdStaging cold{reserve_cold, upload_cold};
     if (!argus_disk_read_resident(dst->src[1], dst->src[2], request.table, count, resident_compute, &request, &cold)) { return false; }
     request.cold_drain.pending = false; // resident_compute drained the stream.
