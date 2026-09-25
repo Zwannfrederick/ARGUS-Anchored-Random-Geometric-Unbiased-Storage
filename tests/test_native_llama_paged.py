@@ -135,6 +135,7 @@ def test_cuda_tier_migration_and_attention(tmp_path):
     )
     binary = _compile(tmp_path, "tests/cpp/test_ggml_cuda_mechanism.cpp",
                       ["-DARGUS_CUDA", f"-I{cuda}/include", str(ROOT / "argus_cache/csrc/ggml_disk_buffer.cpp"),
+                       str(ROOT / "argus_cache/csrc/ggml_disk_gpu.cpp"),
                        str(ROOT / "argus_cache/csrc/ggml_kv_policy.cpp"),
                        str(obj), f"-L{cuda}/lib64", f"-Wl,-rpath,{cuda}/lib64",
                        "-Wl,--wrap=pwrite", "-Wl,--wrap=pread", "-pthread"],

@@ -1,13 +1,14 @@
 --- a/src/CMakeLists.txt
 +++ b/src/CMakeLists.txt
-@@ -70,6 +70,14 @@
+@@ -70,6 +70,15 @@
  
  target_link_libraries(llama PUBLIC ggml)
  
 +set(ARGUS_CORE_DIR "" CACHE PATH "ARGUS csrc directory for experimental host KV ownership")
 +if (ARGUS_CORE_DIR)
-+    target_sources(llama PRIVATE "${ARGUS_CORE_DIR}/ggml_host_buffer.cpp" "${ARGUS_CORE_DIR}/ggml_paged_attention.cpp" "${ARGUS_CORE_DIR}/ggml_disk_buffer.cpp")
++    target_sources(llama PRIVATE "${ARGUS_CORE_DIR}/ggml_host_buffer.cpp" "${ARGUS_CORE_DIR}/ggml_paged_attention.cpp" "${ARGUS_CORE_DIR}/ggml_disk_buffer.cpp" "${ARGUS_CORE_DIR}/ggml_disk_gpu.cpp")
 +    set_source_files_properties("${ARGUS_CORE_DIR}/ggml_disk_buffer.cpp" PROPERTIES SKIP_UNITY_BUILD_INCLUSION ON)
++    set_source_files_properties("${ARGUS_CORE_DIR}/ggml_disk_gpu.cpp" PROPERTIES SKIP_UNITY_BUILD_INCLUSION ON)
 +    target_include_directories(llama PRIVATE "${ARGUS_CORE_DIR}" ../ggml/src)
 +    target_compile_definitions(llama PRIVATE LLAMA_ARGUS_HOST)
 +endif()

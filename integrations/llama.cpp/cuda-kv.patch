@@ -91,8 +91,8 @@
      return (ggml_backend_buft_is_cuda(buft) && buft->device == dev) || (integrated && ggml_backend_buft_is_cuda_host(buft));
 --- a/src/CMakeLists.txt
 +++ b/src/CMakeLists.txt
-@@ -76,6 +76,14 @@
-     set_source_files_properties("${ARGUS_CORE_DIR}/ggml_disk_buffer.cpp" PROPERTIES SKIP_UNITY_BUILD_INCLUSION ON)
+@@ -77,6 +77,14 @@
+     set_source_files_properties("${ARGUS_CORE_DIR}/ggml_disk_gpu.cpp" PROPERTIES SKIP_UNITY_BUILD_INCLUSION ON)
      target_include_directories(llama PRIVATE "${ARGUS_CORE_DIR}" ../ggml/src)
      target_compile_definitions(llama PRIVATE LLAMA_ARGUS_HOST)
 +    if (GGML_CUDA)
