@@ -19,6 +19,7 @@
 #include <mutex>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 #include <fcntl.h>
 #include <sys/mman.h>
@@ -38,8 +39,13 @@ struct Page {
     ArgusTierBuffer * resident = nullptr;
     // Written on the GPU: `checksum` is unknown until the first host read computes it.
     bool digest_pending = false;
+    // The resident copy is newer than the disk slot; the flusher publishes it.
+    bool dirty = false;
 #endif
 };
+#ifdef ARGUS_CUDA
+struct Flusher;
+#endif
 struct Store {
     void * address = MAP_FAILED;
     Page * pages = nullptr;
@@ -54,8 +60,13 @@ struct Store {
     bool gpu_control = false; // Diagnostic GPU-authoritative storage; no disk fallback.
     // Pinned upload + read-back staging for whole-page flushes; released with the store.
     std::unique_ptr<ArgusTierBuffer> commit_host;
+    std::vector<size_t> dirty_pages; // may hold pages flushed since; `dirty` decides
+    Flusher * flusher = nullptr;      // started by the first GPU append of a disk-backed store
 #endif
     std::mutex mutex;
+    // Disk-slot I/O. `active` changes only with both locks held (taken in this order), so the
+    // flusher can write a slot without holding `mutex` while attention reads pages.
+    std::mutex io_mutex;
 };
 #ifdef ARGUS_CUDA
 std::mutex registry_mutex;
@@ -149,6 +160,14 @@ Page & page_at(Store & store, size_t index) {
     return store.pages[index];
 }
 
+// Written content exists: a published slot, GPU control, or a dirty copy not yet flushed.
+bool has_content(const Page & page) {
+#ifdef ARGUS_CUDA
+    if (page.dirty) { return true; }
+#endif
+    return page.content_revision && page.active != 2;
+}
+
 void read_disk_page(Store & store, size_t page, void * data) {
     const Page & descriptor = page_at(store, page);
     if (!descriptor.content_revision || descriptor.active == 2) { std::memset(data, 0, page_size); return; }
@@ -210,6 +229,7 @@ void write_page(Store & store, size_t page, void * data) {
         return;
     }
 #endif
+    std::lock_guard<std::mutex> io_guard(store.io_mutex);
     const uint32_t inactive = 1 - (descriptor.active & 1);
     ssize_t wrote;
     {
@@ -240,6 +260,7 @@ void write_page(Store & store, size_t page, void * data) {
     descriptor.active = inactive;
 #ifdef ARGUS_CUDA
     descriptor.digest_pending = false;
+    descriptor.dirty = false; // the published slot now matches the refreshed copy
 #endif
     ++store.content_revision;
     store.last_written_page = page;
@@ -263,6 +284,157 @@ void write_page(Store & store, size_t page, void * data) {
 }
 
 #ifdef ARGUS_CUDA
+// Writes a page image to one disk slot and reads it back, verified like write_page.
+// Caller holds io_mutex. Throws, publishing nothing, on any failure.
+void write_slot(Store & store, size_t index, uint32_t slot, void * data, uint32_t digest) {
+    ssize_t wrote;
+    {
+        argus_profile::Scope io(argus_profile::disk_write);
+        do { wrote = pwrite(store.fd, data, page_size, offset(index, slot)); } while (wrote < 0 && errno == EINTR);
+    }
+    if (wrote != static_cast<ssize_t>(page_size)) { throw std::runtime_error("ARGUS short or failed direct page write"); }
+    written_bytes += page_size;
+    ssize_t got;
+    {
+        argus_profile::Scope io(argus_profile::disk_read);
+        do { got = pread(store.fd, data, page_size, offset(index, slot)); } while (got < 0 && errno == EINTR);
+    }
+    if (got != static_cast<ssize_t>(page_size) || checksum(data) != digest) {
+        throw std::runtime_error("ARGUS disk page write verification failed");
+    }
+    read_bytes += page_size;
+}
+
+// Copies a dirty page's resident bytes and returns their digest. Caller holds `mutex`.
+uint32_t snapshot(Store & store, size_t index, void * data) {
+    Page & descriptor = page_at(store, index);
+    descriptor.resident->read(data, 0, page_size);
+    const auto digest = checksum(data);
+    if (!descriptor.digest_pending && digest != descriptor.checksum) {
+        throw std::runtime_error("ARGUS resident checksum mismatch");
+    }
+    return digest;
+}
+
+void publish_slot(Page & descriptor, uint32_t slot, uint32_t digest) {
+    descriptor.active = slot;
+    descriptor.checksum = digest;
+    descriptor.digest_pending = false;
+    descriptor.dirty = false;
+}
+
+// Synchronous flush, for demotion and explicit sync points. Caller holds `mutex`. On
+// failure the page stays dirty and the previously published slot is untouched.
+void flush_page(Store & store, size_t index) {
+    Page & descriptor = page_at(store, index);
+    if (!descriptor.dirty) { return; }
+    Bounce data;
+    const auto digest = snapshot(store, index, data.data);
+    std::lock_guard<std::mutex> io_guard(store.io_mutex);
+    const uint32_t slot = 1 - (descriptor.active & 1);
+    write_slot(store, index, slot, data.data, digest);
+    publish_slot(descriptor, slot, digest);
+}
+
+// Background publisher of dirty pages, one per disk-backed store. Its stack is charged to
+// staging like the prefetch worker's. A failure stops it until the next wake; the page
+// stays dirty and the error is rethrown by the next GPU append.
+struct Flusher {
+    explicit Flusher(Store & store) : store_(store) {
+        if (mprotect(stack_.data(), 4096, PROT_NONE)) { throw std::runtime_error("ARGUS flusher stack guard failed"); }
+        pthread_attr_t attributes;
+        if (pthread_attr_init(&attributes)) { throw std::runtime_error("ARGUS flusher attributes failed"); }
+        const int configured = pthread_attr_setstack(&attributes, static_cast<char *>(stack_.data()) + 4096, stack_.size() - 4096);
+        const int created = configured ? configured : pthread_create(&thread_, &attributes, run, this);
+        pthread_attr_destroy(&attributes);
+        if (created) { throw std::runtime_error(std::string("ARGUS flusher creation failed: ") + std::strerror(created)); }
+    }
+    ~Flusher() {
+        {
+            std::lock_guard<std::mutex> guard(mutex_);
+            stop_ = true;
+            condition_.notify_all();
+        }
+        if (pthread_join(thread_, nullptr)) { GGML_ABORT("ARGUS could not join the flusher"); }
+    }
+    void wake() {
+        std::lock_guard<std::mutex> guard(mutex_);
+        pending_ = true;
+        condition_.notify_all();
+    }
+    std::exception_ptr take_error() {
+        std::lock_guard<std::mutex> guard(mutex_);
+        return std::exchange(error_, nullptr);
+    }
+private:
+    static void * run(void * context) {
+        auto & self = *static_cast<Flusher *>(context);
+        std::unique_lock<std::mutex> guard(self.mutex_);
+        for (;;) {
+            self.condition_.wait(guard, [&] { return self.stop_ || self.pending_; });
+            if (self.stop_) { return nullptr; }
+            self.pending_ = false;
+            guard.unlock();
+            std::exception_ptr error;
+            try {
+                while (self.flush_one()) {}
+            } catch (...) { error = std::current_exception(); }
+            guard.lock();
+            if (error) { self.error_ = error; }
+        }
+    }
+    // One page: snapshot under the store lock, slot I/O under io_mutex alone, then publish
+    // only if neither the content nor the published slot moved meanwhile.
+    bool flush_one() {
+        auto & store = store_;
+        size_t index;
+        uint32_t digest, seen;
+        uint64_t revision;
+        {
+            std::lock_guard<std::mutex> store_guard(store.mutex);
+            while (!store.dirty_pages.empty() && !page_at(store, store.dirty_pages.back()).dirty) {
+                store.dirty_pages.pop_back(); // flushed synchronously since
+            }
+            if (store.dirty_pages.empty()) { return false; }
+            index = store.dirty_pages.back();
+            store.dirty_pages.pop_back();
+            digest = snapshot(store, index, bounce_.data());
+            revision = page_at(store, index).content_revision;
+            seen = page_at(store, index).active;
+        }
+        const uint32_t slot = 1 - (seen & 1);
+        bool written = false;
+        try {
+            std::lock_guard<std::mutex> io_guard(store.io_mutex);
+            if (page_at(store, index).active == seen) { // else someone published it meanwhile
+                write_slot(store, index, slot, bounce_.data(), digest);
+                written = true;
+            }
+        } catch (...) {
+            std::lock_guard<std::mutex> store_guard(store.mutex);
+            if (page_at(store, index).dirty) { store.dirty_pages.push_back(index); }
+            throw;
+        }
+        std::lock_guard<std::mutex> store_guard(store.mutex);
+        std::lock_guard<std::mutex> io_guard(store.io_mutex);
+        Page & descriptor = page_at(store, index);
+        if (written && descriptor.dirty && descriptor.content_revision == revision && descriptor.active == seen) {
+            publish_slot(descriptor, slot, digest);
+        } else if (descriptor.dirty) {
+            store.dirty_pages.push_back(index); // rewritten meanwhile: flush the new content later
+        }
+        return true;
+    }
+    Store & store_;
+    ArgusStagingBuffer bounce_{page_size};
+    ArgusStagingBuffer stack_{ArgusDiskPrefetch::stack_bytes};
+    pthread_t thread_{};
+    std::mutex mutex_;
+    std::condition_variable condition_;
+    std::exception_ptr error_;
+    bool stop_ = false, pending_ = false;
+};
+
 // One flush of whole pages under GPU control. Per page the contract is write_page's:
 // a separately budgeted destination is written, read back and checked before the old
 // page is released, and nothing is published until every page of the run passes.
@@ -444,6 +616,7 @@ void clear(ggml_backend_buffer_t buffer, uint8_t value) {
     auto & store = store_for(buffer);
     if (value == 0) {
         std::lock_guard<std::mutex> guard(store.mutex);
+        std::lock_guard<std::mutex> io_guard(store.io_mutex);
         // No outstanding reads survive this lock; no data pages need to be faulted in.
         const size_t count = rounded(store.bytes) / page_size;
         if (store.content_revision == std::numeric_limits<uint64_t>::max()) {
@@ -462,6 +635,9 @@ void clear(ggml_backend_buffer_t buffer, uint8_t value) {
             const auto codec = store.pages[i].codec;
             store.pages[i] = {store.pages[i].content_revision + 1, store.pages[i].placement_revision + 1, 0, 2, codec};
         }
+#ifdef ARGUS_CUDA
+        store.dirty_pages.clear(); // the content they held is gone
+#endif
         store.access_step = 0;
         ++store.content_revision;
         return;
@@ -477,6 +653,7 @@ void release(ggml_backend_buffer_t buffer) {
     const auto metadata = store->metadata_bytes, charged = store->metadata_charge, physical = store->disk_bytes;
     const auto id = store->id;
 #ifdef ARGUS_CUDA
+    delete store->flusher; // joins before the pages it reads can go
     // Registry users finish before this allocation's pages can be destroyed.
     std::unique_lock<std::mutex> registry_guard(registry_mutex);
     Store ** link = &registry;
@@ -606,34 +783,11 @@ void set_rows(ggml_tensor * dst, int ith, int, void *) try {
     const auto * source = dst->src[0], * indices = dst->src[1];
     argus_profile::InPhase phase(source->ne[1] > 1);
     argus_profile::Scope timer(argus_profile::set_rows);
-    auto * target = dst->src[2];
-    const size_t bytes = ggml_row_size(target->type, target->ne[0]);
-    // Staged per call, not per page: contiguous rows reach the store as one whole-page
-    // run instead of four single-page writes. Never asks for more than the free staging
-    // budget, so a tight budget keeps exactly the single-row behaviour it had before.
-    constexpr size_t stage_cap = 64 * 1024;
-    const size_t wanted = std::min({size_t(source->ne[1]) * bytes, stage_cap, argus_disk_staging_free()});
-    ArgusStagingBuffer encoded(std::max(bytes, wanted));
-    const size_t capacity = target->nb[1] == bytes ? encoded.size() / bytes : 1;
-    size_t pending = 0;
-    int64_t first = 0;
-    auto flush = [&] {
-        if (pending) { ggml_backend_tensor_set(target, encoded.data(), first * target->nb[1], pending * bytes); }
-        pending = 0;
-    };
-    for (int64_t row = 0; row < source->ne[1]; ++row) {
-        int64_t index;
-        std::memcpy(&index, static_cast<const char *>(indices->data) + row * indices->nb[0], sizeof index);
-        if (index < 0 || index >= target->ne[1]) { throw std::runtime_error("ARGUS KV row index out of range"); }
-        if (pending && (pending == capacity || index != first + static_cast<int64_t>(pending))) { flush(); }
-        if (!pending) { first = index; }
-        const auto * values = reinterpret_cast<const float *>(static_cast<const char *>(source->data) + row * source->nb[1]);
-        auto * destination = static_cast<char *>(encoded.data()) + pending * bytes;
-        if (target->type == GGML_TYPE_F32) { std::memcpy(destination, values, bytes); }
-        else { ggml_get_type_traits_cpu(target->type)->from_float(values, destination, target->ne[0]); }
-        ++pending;
+    std::vector<int64_t> rows(source->ne[1]);
+    for (size_t row = 0; row < rows.size(); ++row) {
+        std::memcpy(&rows[row], static_cast<const char *>(indices->data) + row * indices->nb[0], sizeof(int64_t));
     }
-    flush();
+    argus_disk_append_rows(dst->src[2], static_cast<const char *>(source->data), source->nb[1], rows.data(), rows.size());
     *static_cast<float *>(dst->data) = 0;
 } catch (const std::exception & error) {
     GGML_ABORT("ARGUS disk append failed: %s", error.what());
@@ -694,7 +848,7 @@ static ArgusDiskPageDescriptor page_descriptor(const Store & store, size_t index
     if (page.resident) { placement = page.resident->tier(); }
 #endif
     return {{store.id, index, page.content_revision}, page.placement_revision, placement,
-            page.codec, page.last_access_step, page.access_count, page.content_revision != 0 && page.active != 2};
+            page.codec, page.last_access_step, page.access_count, has_content(page)};
 }
 
 ArgusDiskPageDescriptor argus_disk_page_descriptor(const ggml_tensor * tensor, size_t start) {
@@ -848,10 +1002,12 @@ static void move_page(Store & store, size_t index, ArgusTier tier, ArgusDiskPage
     auto & page = store.pages[index];
     if (expected.allocation != store.id || expected.page != index ||
         expected.content_revision != page.content_revision) { throw std::runtime_error("ARGUS stale migration"); }
-    if (!page.content_revision || page.active == 2) { throw std::invalid_argument("ARGUS cannot promote an unwritten page"); }
+    if (!has_content(page)) { throw std::invalid_argument("ARGUS cannot promote an unwritten page"); }
     if ((page.resident ? page.resident->tier() : ArgusTier::disk) == tier) { return; }
     if (store.gpu_control) { throw std::runtime_error("ARGUS GPU control cannot migrate out of GPU"); }
     if (page.placement_revision == UINT64_MAX) { throw std::runtime_error("ARGUS generation exhausted"); }
+    // Dropping the last copy of dirty bytes would lose them: publish them first.
+    if (tier == ArgusTier::disk) { flush_page(store, index); }
     std::unique_ptr<ArgusTierBuffer> target;
     Bounce data;
     if (tier != ArgusTier::disk) {
@@ -1004,7 +1160,7 @@ bool argus_disk_read_resident(const ggml_tensor * k, const ggml_tensor * v,
     }
     if (argus_profile::enabled()) { residency_census(stores, starts, counts); }
     const auto page = [&](int t, size_t i) -> const Page & { return stores[t]->pages[starts[t] / page_size + i]; };
-    const auto written = [](const Page & p) { return p.content_revision && p.active != 2; };
+    const auto written = [](const Page & p) { return has_content(p); };
     const auto on_gpu = [](const Page & p) { return p.resident && p.resident->tier() == ArgusTier::gpu; };
     size_t cold_pages = 0;
     {
@@ -1057,20 +1213,28 @@ bool argus_disk_gpu_appendable(const ggml_tensor * target) {
     if (!argus_ggml_is_disk_tensor(target)) { return false; }
     const size_t row = target->nb[1];
     auto & store = store_for((target->view_src ? target->view_src : target)->buffer);
-    return store.gpu_control && row && page_size % row == 0 && target->nb[1] == ggml_row_size(target->type, target->ne[0]) &&
+    // GPU control, or a policy-managed store with a GPU tier. Policy off stays the
+    // reference disk path: a GPU append would make placement decisions it must not make.
+    const bool gpu_backed = store.gpu_control || (argus_kv_policy_enabled() && argus_tier_budget(ArgusTier::gpu).limit);
+    return gpu_backed && row && page_size % row == 0 && row == ggml_row_size(target->type, target->ne[0]) &&
            checked_offset(store, target, 0, ggml_nbytes(target)) % row == 0;
 }
 
-void argus_disk_gpu_rows(const ggml_tensor * target, const int64_t * rows, size_t count,
-                         void ** destinations, void * stream) {
-    if (!argus_disk_gpu_appendable(target)) { throw std::invalid_argument("ARGUS GPU append needs a GPU-control store"); }
+bool argus_disk_gpu_rows(const ggml_tensor * target, const int64_t * rows, size_t count, void * stream,
+                         void (*encode)(void * const * destinations, void * context), void * context) {
+    if (!argus_disk_gpu_appendable(target)) { throw std::invalid_argument("ARGUS GPU append needs a GPU-backed store"); }
     auto & store = store_for((target->view_src ? target->view_src : target)->buffer);
+    if (!store.gpu_control) {
+        if (!store.flusher) { store.flusher = new Flusher(store); }
+        if (auto error = store.flusher->take_error()) { std::rethrow_exception(error); }
+    }
     const size_t row = target->nb[1];
     std::lock_guard<std::mutex> guard(store.mutex);
     const size_t base = checked_offset(store, target, 0, ggml_nbytes(target));
-    // Validate and allocate everything before any descriptor changes.
+    // Pages this call touches, and a GPU page for each one that has none yet.
     std::vector<size_t> pages;
     std::vector<std::unique_ptr<ArgusTierBuffer>> fresh;
+    size_t needed = 0;
     for (size_t i = 0; i < count; ++i) {
         if (rows[i] < 0 || rows[i] >= target->ne[1]) { throw std::out_of_range("ARGUS KV row index out of range"); }
         const size_t page = (base + size_t(rows[i]) * row) / page_size;
@@ -1080,17 +1244,42 @@ void argus_disk_gpu_rows(const ggml_tensor * target, const int64_t * rows, size_
             descriptor.placement_revision == std::numeric_limits<uint64_t>::max()) {
             throw std::runtime_error("ARGUS page generation exhausted");
         }
-        const bool written = descriptor.content_revision && descriptor.active != 2;
-        if (written && !descriptor.resident) { throw std::logic_error("ARGUS GPU control page has no GPU copy"); }
+        const bool on_gpu = descriptor.resident && descriptor.resident->tier() == ArgusTier::gpu;
+        if (store.gpu_control && has_content(descriptor) && !on_gpu) { throw std::logic_error("ARGUS GPU control page has no GPU copy"); }
         pages.push_back(page);
+        needed += on_gpu ? 0 : 1;
+    }
+    if (!store.gpu_control) {
+        // The new pages and the row table must fit beside the scratch headroom the policy
+        // keeps free; appending into it would make the next prepare() evict dirty pages.
+        const auto budget = argus_tier_budget(ArgusTier::gpu);
+        const size_t wanted = (needed + (count * sizeof(void *) + page_size - 1) / page_size) * page_size +
+                              argus_kv_policy_headroom(ArgusTier::gpu);
+        if (budget.live > budget.limit || budget.limit - budget.live < wanted) { return false; } // host append
+    }
+    for (size_t page : pages) {
+        const Page & descriptor = page_at(store, page);
         fresh.emplace_back();
-        if (!written) {
-            // An unwritten page reads as zeros; the new rows land on a zeroed GPU page.
-            fresh.back() = std::make_unique<ArgusTierBuffer>(ArgusTier::gpu, page_size);
-            argus_cuda_zero(fresh.back()->data(), page_size, stream);
+        if (descriptor.resident && descriptor.resident->tier() == ArgusTier::gpu) { continue; }
+        fresh.back() = std::make_unique<ArgusTierBuffer>(ArgusTier::gpu, page_size);
+        if (has_content(descriptor)) { // keep the rows this call does not write: promotion by write
+            Bounce data;
+            read_page(store, page, data.data);
+            fresh.back()->write(data.data, page_size);
+        } else {
+            argus_cuda_zero(fresh.back()->data(), page_size, stream); // an unwritten page reads as zeros
         }
     }
     if (store.content_revision == std::numeric_limits<uint64_t>::max()) { throw std::runtime_error("ARGUS store generation exhausted"); }
+    std::vector<void *> destinations(count);
+    for (size_t i = 0; i < count; ++i) {
+        const size_t position = base + size_t(rows[i]) * row, page = position / page_size;
+        const size_t slot = std::find(pages.begin(), pages.end(), page) - pages.begin();
+        auto * buffer = fresh[slot] ? fresh[slot].get() : page_at(store, page).resident;
+        destinations[i] = static_cast<char *>(buffer->data()) + position % page_size;
+    }
+    // Encoded and finished under the lock: no reader or flusher sees a half-written page.
+    encode(destinations.data(), context);
     for (size_t i = 0; i < pages.size(); ++i) {
         Page & descriptor = page_at(store, pages[i]);
         if (fresh[i]) {
@@ -1100,14 +1289,57 @@ void argus_disk_gpu_rows(const ggml_tensor * target, const int64_t * rows, size_
         }
         ++descriptor.content_revision;
         descriptor.digest_pending = true;
-        descriptor.active = 3;
+        if (store.gpu_control) {
+            descriptor.active = 3;
+        } else if (!descriptor.dirty) {
+            descriptor.dirty = true;
+            store.dirty_pages.push_back(pages[i]);
+        }
         ++store.content_revision;
         store.last_written_page = pages[i];
     }
     committed_pages += pages.size();
-    for (size_t i = 0; i < count; ++i) {
-        const size_t position = base + size_t(rows[i]) * row;
-        destinations[i] = static_cast<char *>(page_at(store, position / page_size).resident->data()) + position % page_size;
-    }
+    if (store.flusher) { store.flusher->wake(); }
+    return true;
+}
+
+void argus_disk_flush(const ggml_tensor * tensor) {
+    if (!argus_ggml_is_disk_tensor(tensor)) { throw std::invalid_argument("ARGUS flush requires disk storage"); }
+    auto & store = store_for((tensor->view_src ? tensor->view_src : tensor)->buffer);
+    std::lock_guard<std::mutex> guard(store.mutex);
+    for (size_t index : store.dirty_pages) { flush_page(store, index); }
+    store.dirty_pages.clear();
+    // Everything is published, so an earlier background failure has been recovered from.
+    if (store.flusher) { store.flusher->take_error(); }
 }
 #endif
+
+void argus_disk_append_rows(ggml_tensor * target, const char * source, size_t source_row,
+                            const int64_t * rows, size_t count) {
+    const size_t bytes = ggml_row_size(target->type, target->ne[0]);
+    // Staged per call, not per page: contiguous rows reach the store as one whole-page
+    // run instead of four single-page writes. Never asks for more than the free staging
+    // budget, so a tight budget keeps exactly the single-row behaviour it had before.
+    constexpr size_t stage_cap = 64 * 1024;
+    const size_t wanted = std::min({count * bytes, stage_cap, argus_disk_staging_free()});
+    ArgusStagingBuffer encoded(std::max(bytes, wanted));
+    const size_t capacity = target->nb[1] == bytes ? encoded.size() / bytes : 1;
+    size_t pending = 0;
+    int64_t first = 0;
+    auto flush = [&] {
+        if (pending) { ggml_backend_tensor_set(target, encoded.data(), first * target->nb[1], pending * bytes); }
+        pending = 0;
+    };
+    for (size_t row = 0; row < count; ++row) {
+        const int64_t index = rows[row];
+        if (index < 0 || index >= target->ne[1]) { throw std::runtime_error("ARGUS KV row index out of range"); }
+        if (pending && (pending == capacity || index != first + static_cast<int64_t>(pending))) { flush(); }
+        if (!pending) { first = index; }
+        const auto * values = reinterpret_cast<const float *>(source + row * source_row);
+        auto * destination = static_cast<char *>(encoded.data()) + pending * bytes;
+        if (target->type == GGML_TYPE_F32) { std::memcpy(destination, values, bytes); }
+        else { ggml_get_type_traits_cpu(target->type)->from_float(values, destination, target->ne[0]); }
+        ++pending;
+    }
+    flush();
+}

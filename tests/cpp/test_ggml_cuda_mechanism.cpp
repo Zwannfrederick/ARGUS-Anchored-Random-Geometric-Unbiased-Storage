@@ -203,6 +203,91 @@ static void check_gpu_set_rows() {
     std::puts("gpu set_rows: byte-identical encoding, scattered rows, zeroed fresh pages");
 }
 
+// Policy stores take GPU appends too: pages become GPU-resident and dirty, and the disk
+// copy is published in the background with the usual slot verification.
+static void check_gpu_write_back() {
+    setenv("ARGUS_KV_GPU_BYTES", "4194304", 1);
+    setenv("ARGUS_KV_POLICY", "on", 1);
+    const int width = 128, cells = 80; // 256-byte F16 rows: 16 per page, 5 pages
+    auto * kv_ctx = ggml_init({1 << 20, nullptr, true});
+    auto * k = ggml_new_tensor_2d(kv_ctx, GGML_TYPE_F16, width, cells);
+    auto * store = ggml_backend_alloc_ctx_tensors_from_buft(kv_ctx, argus_ggml_disk_buffer_type());
+    require(store);
+    std::vector<ggml_fp16_t> expected(size_t(width) * cells, 0), actual(expected.size());
+    for (int i = 0; i < width * 16; ++i) { expected[i] = ggml_fp32_to_fp16(float(i % 89) - 40.0f); }
+    ggml_backend_tensor_set(k, expected.data(), 0, width * 16 * sizeof(ggml_fp16_t)); // page 0 on disk only
+    require(argus_disk_page_descriptor(k, 0).placement == ArgusTier::disk);
+    auto * ctx = ggml_init({1 << 20, nullptr, true});
+    const int64_t rows[] = {3, 40, 41, 79, 17};
+    const int count = 5;
+    auto * source = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, width, count);
+    auto * indices = ggml_new_tensor_1d(ctx, GGML_TYPE_I64, count);
+    ArgusTierBuffer source_gpu(ArgusTier::gpu, ggml_nbytes(source)), indices_gpu(ArgusTier::gpu, ggml_nbytes(indices));
+    indices_gpu.write(rows, sizeof rows);
+    source->data = source_gpu.data();
+    indices->data = indices_gpu.data();
+    std::vector<float> values(size_t(width) * count);
+    const auto append = [&](float scale) {
+        for (size_t i = 0; i < values.size(); ++i) { values[i] = scale * (float(i % 53) - 26.5f); }
+        source_gpu.write(values.data(), ggml_nbytes(source));
+        for (int r = 0; r < count; ++r) {
+            ggml_get_type_traits_cpu(GGML_TYPE_F16)->from_float(values.data() + r * width, expected.data() + rows[r] * width, width);
+        }
+        auto * node = argus_ggml_disk_set_rows(ctx, k, source, indices);
+        require(argus_ggml_is_cuda_set_rows(node));
+        compute(node, 0, nullptr);
+    };
+    const auto matches = [&] {
+        ggml_backend_tensor_get(k, actual.data(), 0, actual.size() * sizeof(ggml_fp16_t));
+        return actual == expected;
+    };
+    const auto demote_all = [&] {
+        for (size_t offset = 0; offset < ggml_nbytes(k); offset += 4096) {
+            if (argus_disk_page_descriptor(k, offset).placement != ArgusTier::disk) {
+                argus_disk_move_page(k, offset, ArgusTier::disk, argus_disk_page_revision(k, offset));
+            }
+        }
+    };
+    append(1.0f);
+    require(matches());
+    for (size_t page : {0, 1, 2, 4}) { require(argus_disk_page_descriptor(k, page * 4096).placement == ArgusTier::gpu); }
+    require(!argus_disk_page_descriptor(k, 3 * 4096).written);
+    argus_disk_flush(k);
+    demote_all(); // the published slots hold the new bytes
+    require(matches());
+    append(0.5f);
+    demote_all(); // demoting a dirty page flushes it first
+    require(matches());
+    append(0.25f);
+    short_write = true;
+    refuses([&] { argus_disk_flush(k); });
+    short_write = false;
+    require(matches()); // the GPU copy is intact and stays authoritative
+    argus_disk_flush(k);
+    demote_all();
+    require(matches());
+    setenv("ARGUS_KV_GPU_BYTES", "4096", 1); // too small for the pages: host append instead
+    append(2.0f);
+    require(matches());
+    require(argus_disk_page_descriptor(k, 2 * 4096).placement == ArgusTier::disk);
+    // Appends never fill attention's scratch headroom: with source and indices holding two
+    // pages, six free pages fit the four pages plus the row table, but not with two more
+    // reserved for scratch.
+    demote_all();
+    setenv("ARGUS_KV_GPU_BYTES", "32768", 1);
+    argus_kv_policy_prepare(8192, 0);
+    append(4.0f);
+    require(matches());
+    require(argus_disk_page_descriptor(k, 2 * 4096).placement == ArgusTier::disk);
+    argus_kv_policy_prepare(0, 0);
+    setenv("ARGUS_KV_GPU_BYTES", "4194304", 1);
+    ggml_backend_buffer_free(store);
+    ggml_free(ctx);
+    ggml_free(kv_ctx);
+    setenv("ARGUS_KV_POLICY", "off", 1);
+    std::puts("gpu write-back: dirty pages flush, demotion flushes, short writes retry, budget fallback");
+}
+
 // Attention scratch and cached pages share a tier budget. The headroom one invocation
 // reserves must stay free afterwards, or every call evicts what the last one promoted.
 static void check_scratch_headroom() {
@@ -793,6 +878,7 @@ int main(int argc, char ** argv) try {
         require(exclusive == nanoseconds[prefill][attention].load());
     }
     check_gpu_set_rows(); // after the accounting above, which covers attention alone
+    check_gpu_write_back();
     return 0;
 } catch (const std::exception & error) {
     std::fprintf(stderr, "FAILED: %s\n", error.what());

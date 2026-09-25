@@ -96,5 +96,8 @@ private:
 size_t argus_disk_staging_limit();
 size_t argus_disk_staging_free();
 void argus_disk_publish_stats();
+// The host append: encodes `count` F32 rows (stride `source_row`) into their cells.
+void argus_disk_append_rows(ggml_tensor * target, const char * source, size_t source_row,
+                            const int64_t * rows, size_t count);
 ggml_tensor * argus_ggml_disk_set_rows(
     ggml_context * ctx, ggml_tensor * target, ggml_tensor * source, ggml_tensor * indices);

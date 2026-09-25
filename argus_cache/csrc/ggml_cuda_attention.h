@@ -68,16 +68,22 @@ ggml_tensor * argus_ggml_cuda_attention(ggml_context * ctx, ggml_tensor * q, ggm
                                        ggml_tensor * v, ggml_tensor * mask, float scale);
 bool argus_ggml_is_cuda_attention(const ggml_tensor * tensor);
 
-// KV appends written on the GPU. Only for GPU-control (GPU-authoritative) stores whose
-// rows never straddle a page.
+// KV appends written on the GPU: GPU-control stores, and policy-managed stores with a
+// GPU tier, whose rows never straddle a page.
 bool argus_disk_gpu_appendable(const ggml_tensor * target);
-// Under the store lock, resolves each row of `target` to its device address. Unwritten
-// pages get zeroed GPU pages (queued on `stream`). New revisions are published with a
-// pending digest, which the first host read computes. The caller must write the rows on
-// `stream` before anything else reads those pages.
-void argus_disk_gpu_rows(const ggml_tensor * target, const int64_t * rows, size_t count,
-                         void ** destinations, void * stream);
+// Under the store lock: gives every touched page a GPU copy (zeroed if unwritten,
+// uploaded if its content lives elsewhere), calls `encode` with each row's device
+// address (it must finish the writes before returning), then publishes the new
+// revisions. The digest is pending until the first host read or flush computes it.
+// Disk-backed pages become dirty and a background flusher publishes their disk slots.
+// Returns false, touching nothing, when the GPU budget cannot hold the pages; the
+// caller then appends through argus_disk_append_rows.
+bool argus_disk_gpu_rows(const ggml_tensor * target, const int64_t * rows, size_t count, void * stream,
+                         void (*encode)(void * const * destinations, void * context), void * context);
 void argus_cuda_zero(void * device, size_t bytes, void * stream);
 ggml_tensor * argus_ggml_cuda_set_rows(ggml_context * ctx, ggml_tensor * target, ggml_tensor * source,
                                        ggml_tensor * indices);
 bool argus_ggml_is_cuda_set_rows(const ggml_tensor * tensor);
+// Publishes every dirty page of the tensor's store to disk now (verified slots), and
+// rethrows a background flush failure only if this synchronous attempt fails too.
+void argus_disk_flush(const ggml_tensor * tensor);

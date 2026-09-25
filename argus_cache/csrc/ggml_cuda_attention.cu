@@ -670,9 +670,26 @@ __global__ void encode_rows(const char * source, size_t source_row, half * const
     half * out = destinations[blockIdx.x];
     for (int e = threadIdx.x; e < width; e += blockDim.x) { out[e] = __float2half_rn(row[e]); }
 }
+struct Append {
+    const ggml_tensor * source;
+    size_t count;
+    cudaStream_t stream;
+    int width;
+};
+void encode_appended_rows(void * const * destinations, void * raw) {
+    const auto & append = *static_cast<const Append *>(raw);
+    ArgusTierBuffer table(ArgusTier::gpu, append.count * sizeof(void *));
+    check(cudaMemcpyAsync(table.data(), destinations, append.count * sizeof(void *), cudaMemcpyHostToDevice, append.stream));
+    encode_rows<<<append.count, 128, 0, append.stream>>>(static_cast<const char *>(append.source->data),
+        append.source->nb[1], static_cast<half * const *>(table.data()), append.width);
+    check(cudaGetLastError());
+    // The rows must be in place before the store publishes them; the table must outlive the kernel.
+    argus_profile::Scope wait(argus_profile::synchronization);
+    check(cudaStreamSynchronize(append.stream));
+}
 void set_rows_compute(ggml_tensor * dst, int device, void * raw_stream) {
     const auto * source = dst->src[0], * indices = dst->src[1];
-    const auto * target = dst->src[2];
+    auto * target = dst->src[2];
     argus_profile::InPhase phase(source->ne[1] > 1);
     argus_profile::Scope timer(argus_profile::set_rows);
     if (device != 0) { throw std::runtime_error("ARGUS v0.5 CUDA supports device 0 only"); }
@@ -684,15 +701,13 @@ void set_rows_compute(ggml_tensor * dst, int device, void * raw_stream) {
     std::vector<int64_t> rows(count);
     check(cudaMemcpyAsync(rows.data(), indices->data, count * sizeof(int64_t), cudaMemcpyDefault, stream));
     { argus_profile::Scope wait(argus_profile::synchronization); check(cudaStreamSynchronize(stream)); }
-    std::vector<void *> destinations(count);
-    argus_disk_gpu_rows(target, rows.data(), count, destinations.data(), stream);
-    ArgusTierBuffer table(ArgusTier::gpu, count * sizeof(void *));
-    check(cudaMemcpyAsync(table.data(), destinations.data(), count * sizeof(void *), cudaMemcpyHostToDevice, stream));
-    encode_rows<<<count, 128, 0, stream>>>(static_cast<const char *>(source->data), source->nb[1],
-        static_cast<half * const *>(table.data()), static_cast<int>(target->ne[0]));
-    check(cudaGetLastError());
-    // The table and the pageable pointer copy must outlive the queued work.
+    Append append{source, count, stream, static_cast<int>(target->ne[0])};
+    if (argus_disk_gpu_rows(target, rows.data(), count, stream, encode_appended_rows, &append)) { return; }
+    // No GPU budget for these pages: the rows go through the host append instead.
+    ArgusStagingBuffer host(count * source->nb[1]);
+    check(cudaMemcpyAsync(host.data(), source->data, count * source->nb[1], cudaMemcpyDeviceToHost, stream));
     { argus_profile::Scope wait(argus_profile::synchronization); check(cudaStreamSynchronize(stream)); }
+    argus_disk_append_rows(target, static_cast<const char *>(host.data()), source->nb[1], rows.data(), count);
 }
 void compute(ggml_tensor * dst, int device, void * raw_stream) {
     if (external_kind(dst) == kind_set_rows) { set_rows_compute(dst, device, raw_stream); return; }

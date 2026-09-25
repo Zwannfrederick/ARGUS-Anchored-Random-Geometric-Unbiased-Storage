@@ -16,9 +16,6 @@ std::atomic<uint64_t> policy_nanoseconds{0};
 // Scratch the last attention invocation reserved per tier (gpu, pinned). Promotion never
 // fills it: otherwise every call evicts what the previous one promoted into it.
 std::atomic<size_t> headroom[2]{};
-size_t reserved(ArgusTier tier) {
-    return tier == ArgusTier::gpu ? headroom[0].load() : tier == ArgusTier::pinned ? headroom[1].load() : 0;
-}
 struct TimedCall {
     std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
     ~TimedCall() {
@@ -75,6 +72,9 @@ bool evict(Victim & victim, uint64_t ceiling, bool force = false) {
 }
 } // namespace
 
+size_t argus_kv_policy_headroom(ArgusTier tier) {
+    return tier == ArgusTier::gpu ? headroom[0].load() : tier == ArgusTier::pinned ? headroom[1].load() : 0;
+}
 bool argus_kv_policy_enabled() {
     const char * mode = std::getenv("ARGUS_KV_POLICY");
     if (!mode || std::strcmp(mode, "off") == 0) { return false; }
@@ -118,7 +118,7 @@ void argus_kv_policy_observe(const ggml_tensor * tensor) {
             if (page.placement == tier) { break; }
             if (argus_tier_budget(tier).limit < page_bytes) { continue; }
             auto & victim = victims[static_cast<size_t>(tier) - 1];
-            const size_t room = available(tier), keep = reserved(tier);
+            const size_t room = available(tier), keep = argus_kv_policy_headroom(tier);
             // Swap a colder page out only when the headroom is intact; never evict into it.
             if (room < keep + page_bytes && (room < keep || !evict(victim, page.access_count))) { continue; }
             if (move(page, tier)) { victim.scanned = false; break; }

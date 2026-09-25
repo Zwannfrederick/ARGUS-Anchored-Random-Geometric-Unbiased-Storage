@@ -589,3 +589,76 @@ Report: [`v070-e7a-gpu-set-rows-2026-09-25.md`](../docs/measurements/v070-e7a-gp
   stock's 38.0. **M3 met.** M4 was met only by the A/B median, so it is not claimed.
 - The earlier claim that M4 could not be reached from data movement held for the
   kernel only; the write path was outside that estimate.
+
+### Release gate (user, 2026-09-25): repeat the final baselines before pushing v0.7
+
+On a quiet machine: stock-host vs GPU-control, 5 repeats, to confirm or refute M4
+(< 2.00 s; the E7a A/B median was 1.975 s, the loaded baseline 2.027 s). Policy-on,
+3 repeats, to see whether the 28.8 s outlier recurs without foreign IO pressure.
+
+## E7b plan (2026-09-25): GPU appends with background disk write-back
+
+**Scope.** Every CUDA disk store: policy-on and disk modes, i.e. any store with a GPU
+tier budget, F16 KV and page-aligned rows.
+
+**Write path.** The append resolves each row to a GPU page, obtained as follows:
+- a page that is already GPU-resident is used as is;
+- a written page resident elsewhere, or on disk only, has its verified bytes uploaded
+  to a new GPU page — a promotion by write, which advances `placement_revision`;
+- an unwritten page gets a zeroed GPU page.
+
+If the GPU budget cannot hold the pages the call needs, the op copies the rows to the
+host and takes the existing host append, unchanged. The store lock is held from row
+resolution through the encode kernel's completion, so no host reader or flusher can
+see a half-written page. The new revisions are then published and the pages marked
+**dirty**, meaning the disk slot is older than the resident copy.
+
+**Flusher.** One worker per store. Its stack is charged to staging, as with the
+prefetch worker. For each dirty page, under the store lock, it:
+1. copies the resident bytes,
+2. computes the digest,
+3. writes the inactive disk slot and reads it back for verification,
+4. publishes the slot and digest, then clears the dirty flag.
+
+Holding the lock serializes slot I/O with `write_page`, which also writes the inactive
+slot. A worker error is kept and rethrown by the next storage call, as prefetch does.
+
+**Readers and policy.**
+- Readers already prefer the resident copy, so a dirty page is never read from its
+  stale slot.
+- Demoting a dirty page to disk flushes it synchronously first.
+- Promoting it to another tier keeps it dirty.
+- `clear(0)` drops dirty state together with the content.
+- Teardown stops the worker before the store goes.
+- An explicit `argus_disk_flush(tensor)` drains the dirty pages, for tests and
+  for sync points.
+
+**Durability contract (user decision).** After a crash, the disk copy can trail the
+GPU copy by the dirty pages. Every published slot is still verified, and the previous
+slot is kept until the new one verifies.
+
+**Tests first.**
+- A GPU append on a policy store is byte-exact with the CPU append; the page is
+  GPU-resident and dirty.
+- After a flush, demoting the page and reading it back returns the new bytes.
+- Demoting without an explicit flush preserves the content.
+- A short write during a flush leaves the page dirty and intact and surfaces the
+  error; a retry succeeds.
+- With a GPU budget too small for the pages, the append falls back to the host path.
+- Policy equivalence between staged and mixed reads still holds.
+
+**Acceptance.** Policy-on 4K prefill and decode improve, and the tight-budget path
+does not regress (both same-binary A/B). Hash unchanged, suites green.
+
+## E7b result (2026-09-25): GPU appends with background write-back — ACCEPT
+
+Report: [`v070-e7b-write-back-2026-09-25.md`](../docs/measurements/v070-e7b-write-back-2026-09-25.md).
+
+- Policy-on 4K: prefill **8.0–13.6 → 2.0–2.2 s**, decode **~19 → ~40 tok/s**.
+  The product mode is now within a few percent of GPU control.
+- Tight budget (2 MiB) unchanged: every append falls back to the host path there.
+  GPU control unchanged.
+- Measurement caught two design mistakes before acceptance: the flusher did its disk
+  I/O under the store lock, and appends filled the attention scratch headroom.
+- Contract: after a crash, disk can trail the GPU by the dirty pages. Every published
+  slot is still verified. Policy off stays the reference host path.
