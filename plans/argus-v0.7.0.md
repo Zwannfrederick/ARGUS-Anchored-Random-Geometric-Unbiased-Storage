@@ -536,3 +536,56 @@ Report: [`v070-e6-policy-logic-2026-09-25.md`](../docs/measurements/v070-e6-poli
   78,680 / 78,496 to 36 / 34, reads −30%, prefill −10–13%.
 - The LFU "heat inversion" (audit L0.2) is withdrawn: it was wrong for full causal
   attention, and the proposed reset would have caused harm.
+
+## E7 plan (2026-09-25): KV appends written on the GPU (audit L2.1)
+
+Decision by the user: GPU-side `set_rows` in every mode, with the disk copy
+maintained in the background. Two phases, each measured and committed on its own.
+
+**Why.** nsys puts 1.05 s of idle GPU time in the 4K GPU-control prefill, dominated
+by the CPU-side `set_rows` path:
+1. the scheduler splits every layer to copy `K_cur`/`V_cur` D2H,
+2. the CPU encodes F32 → F16,
+3. the pages are uploaded,
+4. every page is read back D2H for verification.
+
+**E7a — GPU control.** A CUDA `set_rows` custom op, sharing the registered external
+marker and dispatched by a kind tag in `op_params`:
+- resolves each destination row to its GPU page (unwritten pages start as zeroed GPU pages),
+- converts with `__float2half_rn` (RNE, the same rounding as ggml's CPU `from_float`),
+- scatters the rows on the attention stream.
+
+*Contract change, chosen by the user.* There is no transport, so the D2H
+verification read-back goes. A GPU-written page's digest is pending until the first
+host read (`read_page`) or flush computes it. Corruption of GPU memory between the
+write and that first read is not detected. Attention never checked digests.
+
+*Invariants.* Byte-identical page contents to the CPU path. The output hash stays
+`a152ed56`. Revisions advance as before. Budgets are enforced, and allocation
+failure aborts exactly like the CPU append.
+
+*Tests first.* GPU-written bytes must equal the CPU encoding on random, subnormal,
+overflow, ±0 and ±inf values. Rows are scattered and pages partially written; an
+unwritten page must start at zeros. The node lands on the CUDA path only for
+GPU-authoritative F16 stores.
+
+*Acceptance.* GPU-control prefill ≥5% faster, hash unchanged, suites green.
+
+**E7b — policy and disk modes (write-back).** Designed after E7a is measured.
+Pages written on the GPU become dirty. A background flusher publishes the disk copy
+with the existing double-slot and verification rules. Demotion and teardown wait
+for the flush. Durability changes: after a crash, the disk copy can trail the GPU
+by the unflushed pages.
+
+## E7a result (2026-09-25): KV appends written on the GPU (GPU control) — ACCEPT
+
+Report: [`v070-e7a-gpu-set-rows-2026-09-25.md`](../docs/measurements/v070-e7a-gpu-set-rows-2026-09-25.md).
+
+- CUDA `set_rows` for GPU-control F16 stores: byte-identical RNE encoding
+  (mutation-checked); the verification read-back is replaced by a digest that stays
+  pending until the first host read.
+- A/B (5/5): prefill **2.193 → 1.975 s (−9.9%)**, decode 39.6 → 43.4 tok/s.
+- Final baseline under load: **2.027 s, 1.56x stock**; decode 43.1 tok/s, faster than
+  stock's 38.0. **M3 met.** M4 was met only by the A/B median, so it is not claimed.
+- The earlier claim that M4 could not be reached from data movement held for the
+  kernel only; the write path was outside that estimate.

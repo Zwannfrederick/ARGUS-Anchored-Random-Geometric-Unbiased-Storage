@@ -225,8 +225,9 @@ def run_one(args, mode, context):
             if mode == "argus-cuda-control":
                 if any(result["argus"][key] for key in ("read_bytes", "written_bytes", "disk_bytes")):
                     raise RuntimeError("GPU-resident control performed disk payload I/O or allocated disk backing")
-                if args.profile and delta.get("profile_decode_d2d_bytes", 0) <= 0:
-                    raise RuntimeError("GPU-resident control did not stage resident KV")
+                if args.profile and (delta.get("resident_decode_accepted", 0) <= 0 or
+                                     delta.get("profile_decode_d2d_bytes", 0) != 0):
+                    raise RuntimeError("GPU-resident control did not read decode KV in place")
     except Exception as error:  # the ladder records OOM/timeouts instead of aborting
         result["error"] = f"{type(error).__name__}: {error}"
     finally:

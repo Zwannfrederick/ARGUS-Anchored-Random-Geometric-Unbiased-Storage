@@ -4,6 +4,7 @@
 #include "ggml_kv_policy.h"
 #include "ggml_profile.h"
 #include "ggml-cuda.h"
+#include "ggml-cpu.h"
 #include <cuda_runtime.h>
 #include <algorithm>
 #include <cassert>
@@ -138,6 +139,68 @@ static void check_policy() {
     require(argus_tier_usage().gpu == 0 && argus_tier_usage().pinned == 0 && argus_tier_usage().ram == 0);
     setenv("ARGUS_KV_POLICY", "off", 1);
     std::puts("policy: off/on, admission, tier budgets, eviction, failure counters and teardown passed");
+}
+
+// KV appends to a GPU-authoritative store are encoded and scattered on the GPU,
+// byte-identical to the CPU append's encoding. Unwritten pages start as zeros.
+static void check_gpu_set_rows() {
+    setenv("ARGUS_KV_GPU_BYTES", "4194304", 1);
+    const int width = 128, cells = 80; // 256-byte F16 rows: 16 per page, 5 pages
+    auto * kv_ctx = ggml_init({1 << 20, nullptr, true});
+    auto * k = ggml_new_tensor_2d(kv_ctx, GGML_TYPE_F16, width, cells);
+    auto * host_ctx = ggml_init({1 << 20, nullptr, true});
+    auto * host_k = ggml_new_tensor_2d(host_ctx, GGML_TYPE_F16, width, cells);
+    setenv("ARGUS_KV_GPU_CONTROL", "1", 1);
+    auto * store = ggml_backend_alloc_ctx_tensors_from_buft(kv_ctx, argus_ggml_disk_buffer_type());
+    unsetenv("ARGUS_KV_GPU_CONTROL");
+    auto * host_store = ggml_backend_alloc_ctx_tensors_from_buft(host_ctx, argus_ggml_disk_buffer_type());
+    require(store && host_store);
+    std::vector<ggml_fp16_t> expected(size_t(width) * cells, 0), actual(expected.size());
+    for (int i = 0; i < width * 16; ++i) { expected[i] = ggml_fp32_to_fp16(float(i % 97) - 48.0f); }
+    ggml_backend_tensor_set(k, expected.data(), 0, width * 16 * sizeof(ggml_fp16_t)); // page 0 already written
+    auto * ctx = ggml_init({1 << 20, nullptr, true});
+    const int64_t rows[] = {3, 40, 41, 79, 17}; // page 3 (rows 48-63) stays unwritten
+    const int count = 5;
+    auto * source = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, width, count);
+    auto * indices = ggml_new_tensor_1d(ctx, GGML_TYPE_I64, count);
+    std::vector<float> values(size_t(width) * count);
+    std::mt19937 rng(7);
+    std::normal_distribution<float> normal(0.0f, 3.0f);
+    for (auto & x : values) { x = normal(rng); }
+    const float edges[] = {0.0f, -0.0f, 5.96e-8f, 2.98e-8f, 6.1e-5f, 65504.0f, 65520.0f, 1e9f, -1e9f,
+                           INFINITY, -INFINITY, 1.0009765625f, 3.0517578e-5f};
+    std::copy(std::begin(edges), std::end(edges), values.begin());
+    for (int r = 0; r < count; ++r) {
+        ggml_get_type_traits_cpu(GGML_TYPE_F16)->from_float(values.data() + r * width, expected.data() + rows[r] * width, width);
+    }
+    ArgusTierBuffer source_gpu(ArgusTier::gpu, ggml_nbytes(source)), indices_gpu(ArgusTier::gpu, ggml_nbytes(indices));
+    source_gpu.write(values.data(), ggml_nbytes(source));
+    indices_gpu.write(rows, sizeof rows);
+    source->data = source_gpu.data();
+    indices->data = indices_gpu.data();
+    require(!argus_ggml_is_cuda_set_rows(argus_ggml_disk_set_rows(ctx, host_k, source, indices)));
+    auto * node = argus_ggml_disk_set_rows(ctx, k, source, indices);
+    require(argus_ggml_is_cuda_set_rows(node) && !argus_ggml_is_cuda_attention(node));
+    const auto before = argus_disk_revision(k);
+    compute(node, 0, nullptr);
+    require(!(argus_disk_revision(k) == before));
+    for (int pass = 0; pass < 2; ++pass) { // the first host read computes the pending digests, the second checks them
+        ggml_backend_tensor_get(k, actual.data(), 0, actual.size() * sizeof(ggml_fp16_t));
+        for (size_t i = 0; i < actual.size(); ++i) if (actual[i] != expected[i]) {
+            std::fprintf(stderr, "gpu set_rows index=%zu actual=%04x expected=%04x\n", i, actual[i], expected[i]);
+            require(false);
+        }
+    }
+    for (size_t page = 0; page < 5; ++page) {
+        const auto descriptor = argus_disk_page_descriptor(k, page * 4096);
+        require(descriptor.written == (page != 3) && (page == 3 || descriptor.placement == ArgusTier::gpu));
+    }
+    ggml_backend_buffer_free(store);
+    ggml_backend_buffer_free(host_store);
+    ggml_free(ctx);
+    ggml_free(host_ctx);
+    ggml_free(kv_ctx);
+    std::puts("gpu set_rows: byte-identical encoding, scattered rows, zeroed fresh pages");
 }
 
 // Attention scratch and cached pages share a tier budget. The headroom one invocation
@@ -729,6 +792,7 @@ int main(int argc, char ** argv) try {
         for (int m = 0; m < metric_count; ++m) { exclusive += exclusive_nanoseconds[prefill][m].load(); }
         require(exclusive == nanoseconds[prefill][attention].load());
     }
+    check_gpu_set_rows(); // after the accounting above, which covers attention alone
     return 0;
 } catch (const std::exception & error) {
     std::fprintf(stderr, "FAILED: %s\n", error.what());

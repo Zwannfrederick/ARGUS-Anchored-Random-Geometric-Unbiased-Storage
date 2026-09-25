@@ -67,3 +67,17 @@ bool argus_disk_read_resident(const ggml_tensor * k, const ggml_tensor * v,
 ggml_tensor * argus_ggml_cuda_attention(ggml_context * ctx, ggml_tensor * q, ggml_tensor * k,
                                        ggml_tensor * v, ggml_tensor * mask, float scale);
 bool argus_ggml_is_cuda_attention(const ggml_tensor * tensor);
+
+// KV appends written on the GPU. Only for GPU-control (GPU-authoritative) stores whose
+// rows never straddle a page.
+bool argus_disk_gpu_appendable(const ggml_tensor * target);
+// Under the store lock, resolves each row of `target` to its device address. Unwritten
+// pages get zeroed GPU pages (queued on `stream`). New revisions are published with a
+// pending digest, which the first host read computes. The caller must write the rows on
+// `stream` before anything else reads those pages.
+void argus_disk_gpu_rows(const ggml_tensor * target, const int64_t * rows, size_t count,
+                         void ** destinations, void * stream);
+void argus_cuda_zero(void * device, size_t bytes, void * stream);
+ggml_tensor * argus_ggml_cuda_set_rows(ggml_context * ctx, ggml_tensor * target, ggml_tensor * source,
+                                       ggml_tensor * indices);
+bool argus_ggml_is_cuda_set_rows(const ggml_tensor * tensor);

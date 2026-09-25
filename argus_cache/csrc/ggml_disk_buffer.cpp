@@ -36,6 +36,8 @@ struct Page {
     uint64_t last_access_step = 0, access_count = 0;
 #ifdef ARGUS_CUDA
     ArgusTierBuffer * resident = nullptr;
+    // Written on the GPU: `checksum` is unknown until the first host read computes it.
+    bool digest_pending = false;
 #endif
 };
 struct Store {
@@ -164,10 +166,15 @@ void read_disk_page(Store & store, size_t page, void * data) {
 
 void read_page(Store & store, size_t page, void * data) {
 #ifdef ARGUS_CUDA
-    const auto & descriptor = page_at(store, page);
+    auto & descriptor = page_at(store, page);
     if (descriptor.resident) {
         descriptor.resident->read(data, 0, page_size);
-        if (checksum(data) != descriptor.checksum) { throw std::runtime_error("ARGUS resident checksum mismatch"); }
+        if (descriptor.digest_pending) {
+            descriptor.checksum = checksum(data);
+            descriptor.digest_pending = false;
+        } else if (checksum(data) != descriptor.checksum) {
+            throw std::runtime_error("ARGUS resident checksum mismatch");
+        }
         return;
     }
 #endif
@@ -195,6 +202,7 @@ void write_page(Store & store, size_t page, void * data) {
         ++descriptor.content_revision;
         ++descriptor.placement_revision;
         descriptor.checksum = digest;
+        descriptor.digest_pending = false;
         descriptor.active = 3;
         ++store.content_revision;
         store.last_written_page = page;
@@ -230,6 +238,9 @@ void write_page(Store & store, size_t page, void * data) {
     ++descriptor.placement_revision;
     descriptor.checksum = digest;
     descriptor.active = inactive;
+#ifdef ARGUS_CUDA
+    descriptor.digest_pending = false;
+#endif
     ++store.content_revision;
     store.last_written_page = page;
     ++committed_pages;
@@ -304,6 +315,7 @@ bool write_run(Store & store, size_t first, size_t count, const char * source) {
         ++descriptor.content_revision;
         ++descriptor.placement_revision;
         descriptor.checksum = digests[i];
+        descriptor.digest_pending = false;
         descriptor.active = 3;
         ++store.content_revision;
     }
@@ -786,6 +798,11 @@ ggml_tensor * argus_ggml_disk_set_rows(ggml_context * ctx, ggml_tensor * target,
     if (rounded(ggml_row_size(target->type, target->ne[0])) + page_size > argus_disk_staging_limit()) {
         throw std::runtime_error("ARGUS staging budget cannot hold an encoded KV row");
     }
+#ifdef ARGUS_CUDA
+    if (target->type == GGML_TYPE_F16 && argus_disk_gpu_appendable(target)) {
+        return argus_ggml_cuda_set_rows(ctx, target, source, indices);
+    }
+#endif
     ggml_tensor * args[] = {source, indices, target};
     return ggml_custom_4d(ctx, GGML_TYPE_F32, 1, 1, 1, 1, args, 3, set_rows, 1, nullptr);
 }
@@ -1034,5 +1051,63 @@ bool argus_disk_read_resident(const ggml_tensor * k, const ggml_tensor * v,
         record_access(vs, starts[1] + first * v->nb[2], count * v->nb[2]);
     }
     return true;
+}
+
+bool argus_disk_gpu_appendable(const ggml_tensor * target) {
+    if (!argus_ggml_is_disk_tensor(target)) { return false; }
+    const size_t row = target->nb[1];
+    auto & store = store_for((target->view_src ? target->view_src : target)->buffer);
+    return store.gpu_control && row && page_size % row == 0 && target->nb[1] == ggml_row_size(target->type, target->ne[0]) &&
+           checked_offset(store, target, 0, ggml_nbytes(target)) % row == 0;
+}
+
+void argus_disk_gpu_rows(const ggml_tensor * target, const int64_t * rows, size_t count,
+                         void ** destinations, void * stream) {
+    if (!argus_disk_gpu_appendable(target)) { throw std::invalid_argument("ARGUS GPU append needs a GPU-control store"); }
+    auto & store = store_for((target->view_src ? target->view_src : target)->buffer);
+    const size_t row = target->nb[1];
+    std::lock_guard<std::mutex> guard(store.mutex);
+    const size_t base = checked_offset(store, target, 0, ggml_nbytes(target));
+    // Validate and allocate everything before any descriptor changes.
+    std::vector<size_t> pages;
+    std::vector<std::unique_ptr<ArgusTierBuffer>> fresh;
+    for (size_t i = 0; i < count; ++i) {
+        if (rows[i] < 0 || rows[i] >= target->ne[1]) { throw std::out_of_range("ARGUS KV row index out of range"); }
+        const size_t page = (base + size_t(rows[i]) * row) / page_size;
+        if (std::find(pages.begin(), pages.end(), page) != pages.end()) { continue; }
+        const Page & descriptor = page_at(store, page);
+        if (descriptor.content_revision == std::numeric_limits<uint64_t>::max() ||
+            descriptor.placement_revision == std::numeric_limits<uint64_t>::max()) {
+            throw std::runtime_error("ARGUS page generation exhausted");
+        }
+        const bool written = descriptor.content_revision && descriptor.active != 2;
+        if (written && !descriptor.resident) { throw std::logic_error("ARGUS GPU control page has no GPU copy"); }
+        pages.push_back(page);
+        fresh.emplace_back();
+        if (!written) {
+            // An unwritten page reads as zeros; the new rows land on a zeroed GPU page.
+            fresh.back() = std::make_unique<ArgusTierBuffer>(ArgusTier::gpu, page_size);
+            argus_cuda_zero(fresh.back()->data(), page_size, stream);
+        }
+    }
+    if (store.content_revision == std::numeric_limits<uint64_t>::max()) { throw std::runtime_error("ARGUS store generation exhausted"); }
+    for (size_t i = 0; i < pages.size(); ++i) {
+        Page & descriptor = page_at(store, pages[i]);
+        if (fresh[i]) {
+            delete descriptor.resident;
+            descriptor.resident = fresh[i].release();
+            ++descriptor.placement_revision;
+        }
+        ++descriptor.content_revision;
+        descriptor.digest_pending = true;
+        descriptor.active = 3;
+        ++store.content_revision;
+        store.last_written_page = pages[i];
+    }
+    committed_pages += pages.size();
+    for (size_t i = 0; i < count; ++i) {
+        const size_t position = base + size_t(rows[i]) * row;
+        destinations[i] = static_cast<char *>(page_at(store, position / page_size).resident->data()) + position % page_size;
+    }
 }
 #endif
