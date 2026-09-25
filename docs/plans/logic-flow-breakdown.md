@@ -1,163 +1,129 @@
-# ARGUS Logic & Architectural Flow Breakdown Report
-**Tarih:** 2026-09-04  
-**Denetim Türü:** `/logic-flow-audit` (Uçtan Uca Mantık ve Mimari Kırılım Denetimi)  
-**Odak Soru:** *"Biz hani KV cache'i çok iyi yönetiriz kayıba yakın diye, ama bu doğru mu yanlış mı? Projenin vizyonu ve kod gerçekliği nedir?"*
+# ARGUS Logic & Flow Breakdown — llama.cpp yolu, v0.7-dev
+**Tarih:** 2026-09-25 · **Denetim:** `/logic-audit` · **Eşlik eden rapor:** [control-audit.md](control-audit.md). Oradaki maddeler burada tekrar edilmedi; sadece referans verildi.
+**Önceki sürüm:** 2026-09-04 (Ollama/HF dünyası odaklı), `git show f00568c:docs/plans/logic-flow-breakdown.md`.
+
+**Soru:** Testler geçiyor ve çıktılar bit-exact. Peki KV sayfasının yolculuğu mantıklı mı? Bir sayfa doğduğu yerden okunduğu yere en kısa ve en doğru yoldan gidiyor mu?
 
 ---
 
-## 1. Uçtan Uca Sistem Çalışma Akış Grafı (Flow Graph)
-
-Sistem mimarisinde fiilen çalışan 2 bağımsız dünya (Ollama Gateway dünyası ve HuggingFace Data Plane dünyası) bulunmaktadır:
+## 1. Sistem akış grafı
 
 ```mermaid
 flowchart TD
-    subgraph DÜNYA_1["DÜNYA 1: Canlı Servis & Gateway Akışı (Ollama / Llama-Server)"]
-        A[Kullanıcı / Claude Code CLI] -->|HTTP POST /v1/messages| B[ClaudeGateway :8008]
-        B -->|MessageFormatAdapter: Anthropic -> OpenAI JSON| C[httpx Stream Client]
-        C -->|HTTP POST :8080/v1/chat/completions| D[llama-server / ollama C++ Process]
-        D -->|C++ GGML Motoru Kendi KV Cache'ini Yönetir| D
-        D -->|OpenAI SSE Chunks| C
-        C -->|MessageFormatAdapter: OpenAI -> Anthropic SSE| B
-        B -->|HTTP SSE Stream| A
-    end
+  subgraph GPU["GPU (model -ngl 99)"]
+    QKV[K_cur / V_cur hesaplanır<br/>F32]
+    ATT[attention kernel<br/>resident: cells-kc · staged: attention_tile]
+    PG[(GPU sayfaları<br/>ArgusTierBuffer 4 KiB)]
+  end
+  subgraph CPU["CPU (ggml worker 0)"]
+    SR[ARGUS set_rows<br/>ggml_disk_buffer.cpp:580]
+    ENC[from_float F32→F16<br/>staging 64 KiB]
+    WP[write_page / write_run<br/>checksum + verify]
+    POL[policy observe<br/>ggml_kv_policy.cpp:98]
+    RA[record_access<br/>32-cell taklidi]
+  end
+  subgraph DISK["Disk (O_DIRECT, unlinked)"]
+    DP[(çift slot sayfa)]
+  end
 
-    subgraph DÜNYA_2["DÜNYA 2: Python / Araştırma Data Plane Akışı (HuggingFace)"]
-        E[HF Model forward] --> F[PagedDynamicQuantizedCache.update]
-        F --> G[PagedDynamicKVCache.push_new_tokens]
-        G --> H{Bellek Politikası & Eşikler}
-        H -->|Hot Tokens| I[FP16 Active Pages]
-        H -->|Demotion| J[FP8 / INT8 / INT4 / INT2 / 1-Bit / JL Tiers]
-        H -->|VRAM OOM| K[HostSpillManager -> CPU Pinned RAM]
-        
-        L[Attention İsteği] --> M[get_all_keys_values]
-        M -->|TÜM Sıkıştırılmış Sayfaları FP16'a Geri Aç!| N[Büyük Bitişik FP16 K/V Tensörü]
-        N --> O[F.scaled_dot_product_attention]
-    end
-
-    DÜNYA_1 -.->|KOPUKLUK: Gateway Dünya 2'deki ARGUS Veri Tabanını HİÇ ÇAĞIRMAZ!| DÜNYA_2
+  QKV -- "sched split: D2H" --> SR --> ENC --> WP
+  WP -- "gpu_control: H2D + D2H verify" --> PG
+  WP -- "diğer modlar: pwrite + pread verify<br/>resident silinir" --> DP
+  PG -- "pointer table (prefill)" --> ATT
+  DP -- "cold: read_page → H2D" --> ATT
+  PG -- "decode Q=1: sayfa başına D2D + sync" --> ATT
+  ATT --> RA --> POL
+  POL -- "move_page: read + H2D + D2H verify" --> PG
+  POL -- "evict (LFU)" --> DP
 ```
 
----
-
-## 2. "KV Cache'i Kayıpsıza Yakın Yönetiyoruz" İddiası: Vizyon vs. Kod Gerçekliği
-
-Kullanıcının sorduğu en kritik soruya bilimsel ve kod bazlı yanıt:
-
-| Değerlendirme Alanı | Vizyon & İddia | Kod & Ölçüm Seviyesindeki Çıplak Gerçek | Durum |
-| :--- | :--- | :--- | :--- |
-| **1. Ollama / Llama-Server Entegrasyonu** | "ARGUS, Ollama arkasında KV cache'i akıllıca sıkıştırıp yönetiyor." | **ARGUS Ollama/llama-server içinde 1 BAYT BİLE KV CACHE YÖNETMİYOR.** Önbellek tamamen `llama.cpp`'nin dahili C++ kodunda yönetilir. ARGUS sadece dışarıda duran bir HTTP JSON çeviricisidir (`README.md:112`). | **YANLIŞ / İLLÜZYON** |
-| **2. FP8 / INT8 Katman Kalitesi** | "Kayıpsıza yakın sıkıştırma." | **DOĞRU.** Ölçülen perplexity farkı **-0.0176**'dır. FP8/INT8 matematiksel olarak %98+ doğrulukla neredeyse kayıpsız çalışır (`docs/measurements/downstream-2026-08-14.json`). | **DOĞRULANDI** |
-| **3. INT4 / INT2 / 1-Bit / JL Katman Kalitesi** | "Geometrik ve tensörel kayıpsız depolama." | **YANLIŞ.** INT4'te **%15**, JL projeksiyonunda **%41.3**, INT2'de **%56.5 - %75** bilgi kaybı vardır! 1-bit ise tüm genliği silip sadece işareti tutar. Model bu katmanlara indiğinde akıl yürütme çöker. | **AĞIR KAYIPLI** |
-| **4. Bellek (VRAM) Tasarrufu** | "16K context'te VRAM'i devasa düşürür." | **KISMİ DOĞRU.** 16K context'te Qwen2.5-0.5B modelinde net VRAM tasarrufu **131.95 MiB (%7.7)** olarak ölçülmüştür. 4K altında ise ek metadata yüzünden VRAM kazancı %0'dır. | **SINIRLI DOĞRU** |
-| **5. Token Üretim Hızı (Latency)** | "Hızlı ve akıcı üretim." | **YANLIŞ.** HuggingFace her token üretiminde bitişik FP16 tensör istediği için ARGUS her adımda tüm sayfaları tek tek dequantize edip birleştirir. 16K context'te decode süresi baseline'dan **4.23 kat daha yavaştır** (18.8 ms -> 79.8 ms/tok). | **ÇOK YAVAŞ** |
+**Okuma kılavuzu:** GPU'da doğan bir K/V satırı prefill'de en az 4 sınır geçiyor: D2H, CPU encode, H2D ve verify için tekrar D2H. Policy-on modunda buna disk turu da ekleniyor: pwrite, pread, sonra cold read, sonra promote. Aşağıdaki kırılımlar bu yolculuğun neden bu şekilde olduğunu ve nerede kendisiyle çeliştiğini gösteriyor.
 
 ---
 
-## 3. P0 - Kritik Mimari Mantık Kırılımları (Systemic Logic Breakdowns)
+## 2. P0 — Kritik mantık kırılımları
 
-### [LOGIC-P0.1] HybridQwenCache İçinde Atomik Olmayan Rollback (Desenkronize State Split-Brain)
-- **Dosya & Satır:** [`argus_cache/models/hybrid_cache.py:188-207`](file:///home/zwannfrederick/Masaüstü/Sektor/Coding/mamba fix/argus_cache/models/hybrid_cache.py#L188-L207)
-- **Mantıksal Saçmalık:**
-  - `snapshot()` fonksiyonu sadece `recurrent_states` ve `conv_states` sözlüklerini kopyalıyor ve hash'ini alıyor.
-  - Modelin 16 adet full-attention katmanını tutan `self.attn_caches` (ARGUS `PagedDynamicKVCache`) **asla snapshot'a dahil edilmiyor!**
-  - `restore()` çağrıldığında recurrent katmanlar eski token pozisyonuna geri sarılırken, ARGUS KV önbelleği yeni üretilen tokenlarla ileride kalıyor!
-- **Gerçek Hayattaki Kırılım:** Bir nesil iptal edildiğinde veya dallanma (branching/speculative decode) yapıldığında modelin recurrent katmanları token $N$'de iken attention katmanları token $N+K$'da kalır. Model tamamen saçmalar veya matris boyutu uyumsuzluğundan çöker.
-- **Onarım Reçetesi:** `snapshot()` ve `restore()` metodlarına `attn_caches` katmanlarının token boyutunu / sayfa indeksini geri alan rollback mekanizması eklenmeli.
+### L0.1 Yazma, terfiyi siliyor: en sıcak sayfa her token'da en yavaş katmana düşüyor
+- **Akışın başladığı yer:** decode'da her token katman başına bir satır ekliyor (`set_rows`, `ggml_disk_buffer.cpp:580`). Satır sayfanın ortasına düştüğü için `transfer()` read-modify-write yapıyor (`:374`, `:381–382`).
+- **Koptuğu yer:** `write_page` disk yolunda (`ggml_disk_buffer.cpp:221–240`) yeni içeriği diske yazıp doğruluyor, sonra `delete descriptor.resident; descriptor.resident = nullptr;` çalışıyor (`:233–236`). Policy o sayfayı GPU'ya terfi ettirmiş olsa bile bu yeniden yazımla sayfa diske düşüyor.
+- **Sonraki adım:** Bir sonraki attention bu sayfayı cold olarak okuyor (`argus_disk_read_resident`, `:1003`, `read_page`). Ardından policy onu tekrar terfi ettiriyor (`ggml_kv_policy.cpp:108–115`): `access_count` sıfırlanmadığı için "iki okuma" eşiği anında geçiliyor. Terfi de bir disk okuması, H2D kopyası ve doğrulama için D2H kopyası demek (`move_page`, `:817–842`).
+- **Neden hata vermiyor:** Her adım doğru ve doğrulanmış; sadece sonuç anlamsız. Bir sonraki okumanın kesin olduğu kuyruk sayfası, token başına ve katman başına disk → GPU ping-pong yapıyor.
+- **Gerçek kırılım:** Dar bütçeli policy-on decode ölçümü 0.991 tok/s ve 10.979 s disk-read beklemesi ([v060-4k-attribution](../measurements/v060-4k-attribution-2026-09-17.md)). v0.7 kampanyası bu modu hiç ölçmedi.
+- **Reçete:** Yazma yerleşimi = mevcut yerleşim. Sayfa bir tier'da resident ise yeni içeriği o tier'a yazıp orada doğrulamak. Disk kopyası isteniyorsa arka planda backing copy olarak güncellemek; `placement_revision` değişmez.
 
----
-
-### [LOGIC-P0.2] Çift Önbellek Paradoksu (Double Memory Allocation During Attention)
-- **Dosya & Satır:** [`argus_cache/core/memory_manager.py:1636-1675`](file:///home/zwannfrederick/Masaüstü/Sektor/Coding/mamba fix/argus_cache/core/memory_manager.py#L1636-L1675)
-- **Mantıksal Saçmalık:**
-  - ARGUS'un varoluş amacı VRAM tasarrufu yapmaktır.
-  - Ancak model dikkat (attention) hesaplayacağı anda `get_all_keys_values()` çağrılır.
-  - Fonksiyon tüm sıkıştırılmış soğuk sayfaları tekrar açıp tek bir devasa bitişik FP16 tensöründe (`k_out`, `v_out`) toplar.
-  - Tam o anda VRAM'de **HEM sıkıştırılmış sayfalar HEM DE tam boyutlu FP16 tensörü aynı anda var olur!**
-- **Gerçek Hayattaki Kırılım:** Uzun bağlamlarda tam attention adımında tepe bellek (peak VRAM) fırlar ve tasarruf edilen bellek çalışma anında geçici olarak geri tükenir.
-- **Onarım Reçetesi:** Kalıcı FP16 tensörü üretilmemeli; Stage S6'daki `DirectPagedAttentionEngine` gibi blok blok işleyen online-softmax mimarisine geçilmeli.
+### L0.2 Isı ters çalışıyor: LFU, kesin okunacak sayfayı kurban seçiyor
+- **Kanıt:** Kurban seçimi sadece `access_count` minimumuna bakıyor (`ggml_kv_policy.cpp:36–42`). Tam causal attention'da her görünür sayfa her adımda okunuyor, dolayısıyla `access_count` fiilen sayfanın **yaşı** oluyor. En düşük sayıya sahip sayfa en yeni sayfa, yani bir sonraki token'ın da kesin okuyacağı kuyruk sayfası.
+- **Ek kırılım:** `write_page` ve `write_run` içerik değiştiğinde (`content_revision++`) `access_count`'u sıfırlamıyor. Slot yeniden kullanımında ya da crop sonrasında yeni içerik eski içeriğin ısısını miras alıyor. `content_revision` ile ısı arasında bir split-brain var.
+- **Ölü veri:** `last_access_step` her okumada yazılıyor (`:352`) ve descriptor'a ihraç ediliyor (`:673`), ama policy onu hiç kullanmıyor; sadece census istatistiklerinde okunuyor. Recency toplanıyor ve atılıyor.
+- **Reçete:** İçerik değişince ısıyı sıfırlamak. Kurbanı `last_access_step` (LRU) ile seçmek ya da kuyruğa en yakın N sayfayı korumak. İkisi de mevcut alanlarla birkaç satırlık bir değişiklik.
 
 ---
 
-## 4. P1 - Kopuk ve Ölü Akışlar (Phantom & Dead-End Flows)
+## 3. P1 — Kopuk ve ölü akışlar
 
-### [LOGIC-P1.1] 529 Satırlık Triton Fused Paged Attention Kernel'ının Ölü Kalması
-- **Dosya & Satır:** [`argus_cache/core/memory_manager.py:25`](file:///home/zwannfrederick/Masaüstü/Sektor/Coding/mamba fix/argus_cache/core/memory_manager.py#L25) ve [`argus_cache/core/triton_kernels.py:428`](file:///home/zwannfrederick/Masaüstü/Sektor/Coding/mamba fix/argus_cache/core/triton_kernels.py#L428)
-- **Mantıksal Saçmalık:**
-  - `memory_manager.py` başında `from .triton_kernels import triton_fused_paged_attention` import ediliyor.
-  - Ancak bu fonksiyon dosya boyunca **HİÇBİR YERDE ÇAĞRILMIYOR!**
-  - Kod onun yerine `_compiled_sdp_attention` fonksiyonunu çağırarak tüm sayfaları FP16'ya açıp standart PyTorch SDPA'sına gönderiyor.
-- **Gerçek Hayattaki Kırılım:** Geliştiriciler Triton kernel'ı ile GPU üzerinde doğrudan paged attention yapıldığını sanırken, arka planda standart yavaş PyTorch dispatch'i çalışıyor.
+### L1.1 v0.7 kampanyası bir teşhis modunu optimize ediyor
+- `gpu_control` kodda açıkça "Diagnostic GPU-authoritative storage; no disk fallback" (`ggml_disk_buffer.cpp:52`, `:186`) ve "cannot migrate out of GPU" (`:824`) olarak tanımlı.
+- v0.7'deki bütün M1–M4 hedefleri ve kabul kriterleri bu moda göre (`plans/argus-v0.7.0.md`, "Workload and method").
+- Ürün modları (policy-on: 9.18 s; disk: ölçülmedi) v0.7'de sadece regresyon kontrolü olarak koşuldu.
+- **Sonuç:** Kampanya kernel'i ve GPU-control yazma yolunu hızlandırıyor. Bu kazançların bir kısmı (kernel, E4) her moda taşınıyor, ama L0.1 ve L0.2 ürün modunun asıl kaybı ve kampanyanın dışında kalıyor.
+- **Reçete:** v0.7'nin sonraki ölçüm matrisine policy-on prefill ve decode'u birinci sınıf metrik olarak eklemek.
 
----
+### L1.2 Yeni sayfa her zaman soğuk doğuyor (write-time admission yok)
+- `gpu_control` dışındaki modlarda `write_page` her zaman diske yazıyor. Policy yerleşim kararını sadece okumadan sonra veriyor (`observe`, `access_count ≥ 2`).
+- Prefill'de yazılan her sayfa, tier bütçesi boş olsa bile önce disk turu yapıyor ve iki attention okumasından sonra terfi ediyor.
+- **Reçete:** Yazma anında hedef tier'ın bütçesi varsa oraya yazmak (admission). Policy sadece bütçe dolunca devreye girmeli.
 
-### [LOGIC-P1.2] Host Spill Sonrası Zorunlu Geri Kopyalama (Zero-Copy İllüzyonu)
-- **Dosya & Satır:** [`argus_cache/core/host_spill.py:35`](file:///home/zwannfrederick/Masaüstü/Sektor/Coding/mamba fix/argus_cache/core/host_spill.py#L35) ve [`argus_cache/core/memory_manager.py:1626`](file:///home/zwannfrederick/Masaüstü/Sektor/Coding/mamba fix/argus_cache/core/memory_manager.py#L1626)
-- **Mantıksal Saçmalık:**
-  - `host_spill.py` dokümantasyonunda "GPU Triton çekirdekleri sayfaları PCIe üzerinden doğrudan okur, cudaMemcpy gerekmez" deniyor.
-  - Ancak `memory_manager.py:1626` içinde `if self.is_swapped_out: self.swap_in_to_device()` koşulu var!
-  - Yani VRAM dolsun diye CPU'ya atılan sayfalar, attention hesaplanacağı an **anında tekrar GPU VRAM'e kopyalanıyor!**
-- **Gerçek Hayattaki Kırılım:** VRAM baskısı altında CPU'ya taşınan sayfalar attention çağrıldığında tekrar GPU'ya dolduğu için OOM engellenemiyor; üstelik PCIe veri aktarımı gecikmeyi katlıyor.
+### L1.3 İki dünya arasında köprü yok
+- Mottodaki heterojen hassasiyet (FP8/INT4/INT2/1-bit, JL projeksiyonu) sadece Python `PagedDynamicKVCache` + `manager.cpp` dünyasında var.
+- llama.cpp yolu Python `PageStore`'a bağlı değil (`integrations/llama.cpp/README.md`: "does not connect Python PageStore, implement heterogeneous precision").
+- Paketleme eksenleri de uyumsuz ([[argus-cpp-python-backend-incompatibility]], bu turda yeniden doğrulanmadı).
+- **Sonuç:** Projenin iki yarısı aynı kavramın iki ayrı implementasyonu. Birindeki gelişme diğerine akmıyor.
+- **Reçete:** Hangi dünyanın ürün olduğuna karar vermek (kanıtlar llama.cpp'yi gösteriyor) ve diğerini "legacy/HF deneyi" olarak etiketlemek. Hassasiyeti llama.cpp sayfa descriptor'una (`Page.codec` zaten var) taşımak ayrı bir tasarım konusu.
 
----
-
-## 5. P2 - Mimari Saçmalık ve Aşırı Katmanlama (Architectural Circus)
-
-### [LOGIC-P2.1] Claude Code -> Gateway -> Llama-Server 6 Aşamalı HTTP Matruşkası
-- **Akış:**
-  1. Claude Code CLI HTTP isteği üretir.
-  2. `claude_gateway.py` HTTP Server olarak isteği kabul eder.
-  3. `MessageFormatAdapter` Anthropic JSON şemasını OpenAI formatına parse eder.
-  4. `httpx.Client` ile localhost:8080'deki `llama-server`'a yeni bir HTTP POST açılır.
-  5. `llama-server` C++ içinde cevabı üretir ve OpenAI SSE formatında geri stream eder.
-  6. `claude_gateway.py` OpenAI chunk'larını tekrar parse edip Anthropic SSE formatına çevirerek Claude Code'a yazar.
-- **Mantıksal Değerlendirme:**
-  Bu katmanlama yerel ortamda Claude Code'un Anthropic formatı beklemesi ve llama-server'ın OpenAI formatı vermesi nedeniyle pratik bir köprüdür. Ancak "ARGUS motoru" değildir; saf bir protokol dönüştürücüsüdür.
+### L1.4 Policy'nin saati, staged yolun tile boyuyla tanımlı
+- Resident yol, policy kararları staged yolla birebir aynı kalsın diye 32 hücrelik okuma geçmişini taklit ediyor (`ggml_disk_buffer.cpp:1017–1023`).
+- Her `record_access` `access_step`'i artırıyor. "Zaman" token değil tile okuması; bu yüzden aynı recency farkı context uzunluğuyla ölçekleniyor.
+- Şu an zararsız, çünkü `access_step` kullanılmıyor (L0.2). Ama L0.2'nin LRU reçetesi uygulanırsa bu saat anlamsız hale gelir. Önce saatin çağrı (token) başına bir kez ilerlemesi gerekir.
+- Control-audit P0.1'deki decode geçişi (Q=1'in resident yola alınması) bu taklidi de miras alacak.
 
 ---
 
-## 6. P3 - Zamansal Kırılganlık ve Şans Bağımlılığı
+## 4. P2 — Mimari saçmalık ve gereksiz dolambaç
 
-### [LOGIC-P3.1] Dynamic Attention Wrapper Cache-Hit Şans Yarışı
-- **Dosya & Satır:** [`argus_cache/models/attention_wrapper.py:140-180`](file:///home/zwannfrederick/Masaüstü/Sektor/Coding/mamba fix/argus_cache/models/attention_wrapper.py#L140-L180)
-- **Mantıksal Kırılganlık:**
-  - `pipeline_profile == "balanced"` seçildiğinde cache `AdaptiveCachePolicy` ile yönetilir.
-  - Eğer istek sırasında VRAM'de küçük bir dalgalanma olursa (arka planda başka bir uygulamanın 50 MB VRAM alması), policy aniden `ACTIVE` moddan `FP8` moduna geçer.
-  - Ortada devam eden bir decode akışında bir katman FP16 kalırken sonraki katman FP8'e dönüşür. Katmanlar arası asimetrik gecikme sıçramaları meydana gelir.
+### L2.1 Yazma yolu: GPU'da doğan veri host'a iniyor ve geri çıkıyor
+- **Zincir:** `K_cur` GPU'da hesaplanıyor. ARGUS `set_rows`, host buffer type'ına bağlı bir CPU custom op olduğu için (`DiskSupport`, `:575–578`; `argus_ggml_disk_set_rows`, `:765–778`) scheduler katman başına bir CPU split'i ve D2H kopyası ekliyor.
+- CPU `from_float` ile F16'ya kodluyor (`:606–607`). `write_run` pinned staging'den H2D kopyalıyor, doğrulama için D2H okuyor ve CPU'da CRC hesaplıyor (`:264–287`).
+- **Ölçülmüş bedel:** nsys'e göre ARGUS'ta GPU 1.049 s boşta, stock'ta 0.470 s (+0.58 s). Plandaki ifadeyle: "GPU idle in ARGUS is the CPU critical path between GPU work, dominated by `set_rows` page writes" (`plans/argus-v0.7.0.md`, nsys bölümü). E2 bu yolu ucuzlattı ama yolun şeklini değiştirmedi.
+- **Reçete:** GPU-resident sayfalar için GPU tarafında bir `set_rows`: attention'ın kullandığı pointer tablosuyla satırları doğrudan sayfaya yazan bir kernel; doğrulama gerekiyorsa digest'i de GPU'da hesaplayan. Bu, katman başına CPU split'ini ve iki kopyayı kaldırır. Prefill'deki boşta GPU süresine vuran en büyük yapısal kaldıraç bu. Doğrulama sözleşmesine dokunduğu için ayrı bir kampanya olmalı.
 
----
+### L2.2 Staged decode yolu: GPU'dan GPU'ya sayfa sayfa bounce
+Control-audit P0.1'de. Akış açısından not: staged yol resident sayfalar için D2D yapıyor (`:891–893`), ama her çağrıda bir `Bounce` açıyor ve tile başına bir kez senkronize oluyor. Pointer tablosu zaten var olduğu halde veri kopyalanıyor.
 
-## 7. Ponytail Sadeleştirme ve İyileştirme Reçetesi (Doğru Mimari Yönü)
-
-Projenin vizyonu ile kodun gerçeğini dürüstçe birleştiren en sade, en sağlam yol haritası:
-
-1. **İllüzyonu Kaldır & Rolleri Netleştir:**
-   - Ollama / Llama-Server servisi verildiğinde ARGUS'un bir KV önbellek motoru değil, **"Local Agent Gateway"** olduğu dürüstçe belgelenmeli.
-   - Gerçek KV önbellek sıkıştırmasının yalnızca HuggingFace / PyTorch data-plane'inde çalıştığı açıkça ayrılmalı.
-
-2. **Aşırı Katmanları (INT2, 1-Bit, JL) Üretimden Çıkar:**
-   - %40 ile %75 arası bilgi kaybına neden olan 1-Bit, INT2 ve JL projeksiyon katmanları sadece akademik araştırma klasöründe tutulmalı; varsayılan servis pipeline'ında **ASLA** kullanılmamalıdır.
-   - Üretim için altın standart pipeline: **`FP16 (Active) -> GGML q8_0 (Near-lossless) -> GGML q4_0`**.
-
-3. **Tam Rekonstrüksiyonu Bırak, Direct Paged Attention'a Odaklan:**
-   - Her token'da tüm cache'i FP16'ya açıp 4.2x gecikme ödemek yerine, Stage S6'daki `DirectPagedAttentionEngine` GPU üzerinde doğrudan tile bazlı çalışacak şekilde Triton/CUDA çekirdeğine dönüştürülmeli.
-
-4. **HybridQwenCache Rollback Senkronizasyonunu Tamamla:**
-   - `snapshot()` ve `restore()` metodlarına `attn_caches` katmanlarının token boyutlarını geri alan mantık eklenmeli.
+### L2.3 Her ekleme için read-modify-write
+Decode'da 256 B'lık tek satır için tam bir 4 KiB sayfa okunuyor, birleştiriliyor, yazılıyor ve doğrulanıyor (`transfer`, `:381–383`). Sayfa GPU'daysa bu read, write ve verify'ın üçü de host üzerinden gidiyor. L2.1'deki GPU `set_rows` bunu da çözer.
 
 ---
 
-## 8. Uygulanan Mantıksal Onarımlar ve Doğrulama Durumu (2026-09-04)
+## 5. P3 — Zamansal kırılganlıklar ve gizli yarış koşulları
 
-Tüm P0 ve P1 kırılımları ile ilgili mantıksal düzeltmeler uygulanmış ve test edilmiştir:
+| # | Bulgu | Yer | Bugün | Ne zaman patlar |
+|---|---|---|---|---|
+| L3.1 | `registry_mutex` ve iki store mutex'i kernel süresince ve `cudaStreamSynchronize` boyunca tutuluyor | `ggml_disk_buffer.cpp:961–965` (ponytail notu var) | Tek stream'de doğru | Multi-sequence veya çoklu context geldiğinde bütün attention'lar seri çalışır |
+| L3.2 | `set_rows` her exception'da `GGML_ABORT` çağırıyor | `:614–616` | Veri tutarlılığı korunuyor (dosya unlinked) | Bütçe dolması bir runtime durumu, bug değil. Plugin için host sürecini öldürmek aşırı (control-audit PL4) |
+| L3.3 | `prepare` zorunlu tahliye döngüsü her kurban için bütün sayfaları tarıyor | `ggml_kv_policy.cpp:58–68`, `:87–89` | 4K'da ≈0 | Büyük context'te O(n²) (ponytail notu var) |
+| L3.4 | Revizyon kontrolü "önce oku, sonra doğrula" şeklinde | `ggml_cuda_attention.cu:584`, `:590`, `:643` | Tek thread'li graph'ta doğru | Bir yazma başka bir thread'den gelirse attention bayat veriyle biter ve sonra throw eder. Kurtarma yok, sadece tespit var |
+| L3.5 | Policy `move` exception'ları sayarak yutuyor | `ggml_kv_policy.cpp:44–51` | Sayaç var (`policy_rejected`), sessiz değil | Kabul edilebilir; nedenlerin ayrı sayılması teşhisi kolaylaştırır |
 
-| Madde No | Kırılım Tanımı | Uygulanan Onarım | Doğrulama & Durum |
-| :--- | :--- | :--- | :--- |
-| **LOGIC-P0.1** | HybridQwenCache Atomik Olmayan Rollback (Split-Brain) | `PagedDynamicKVCache` içine `snapshot()` ve `restore()` eklendi; `HybridQwenCache` snapshot/restore döngüsüne bağlandı. | **[GİDERİLDİ]** `tests/test_hybrid_qwen_cache.py` (4/4 passed) |
-| **LOGIC-P0.2 & P1.2** | Host Spill Sonrası GPU OOM Re-trigger | `_get_all_keys_values_unlocked()` içinde `is_swapped_out` olan sayfaların cihazı CPU'da kilitlenerek GPU'ya zorla swap-in olması engellendi. | **[GİDERİLDİ]** `tests/test_host_spill.py` & `tests/test_kv_cache.py` passed |
-| **LOGIC-P1.1** | Ölü Triton Fused Paged Attention Kernel'ı | `PagedDynamicKVCache.compute_fused_paged_attention()` metodu yazılarak kernel canlı sisteme entegre edildi. Sinks -> anchors -> compressed -> active -> buffer kronolojik sırası kurularak 0.0 hata ile doğrulandı. | **[GİDERİLDİ]** `tests/test_kv_cache.py` (5/5 passed) |
-| **GATEWAY-R1** | Claude Gateway Thinking/Reasoning Yutma Sorunu | Qwen 3.6 / DeepSeek düşünce token'ları (`reasoning_content`) hem SSE streaming (`thinking_delta`) hem de non-streaming (`thinking` blokları) formatında Anthropic Messages standardına dönüştürüldü. | **[GİDERİLDİ]** `tests/test_claude_gateway.py` (18/18 passed) |
-| **GATEWAY-STREAM-ERR** | Gateway Streaming'de Sessiz Hata Yutma (Silent Error Swallowing) | Streaming akışında `upstream_stream.status_code` kontrolü yapılmadan peşin 200 gönderilmesi ve backend hatalarının boş mesaj gibi yutulması engellendi. Gerçek HTTP durum kodu ve hata JSON'ı doğrudan iletiliyor. | **[GİDERİLDİ]** `argus_cache/adapters/claude_gateway.py` |
-| **WAYBAR-PHANTOM** | Waybar Arka Plan Hayalet Döngüsü (Kendi Kendine Terminal Açılması) | `toggle()` içinde arka planda başlatılan 120 saniyelik `wait_then_open_claude` alt süreci iptal edildi. Servis açılıp kapanırken sahipsiz loop'ların terminal popupları açması engellendi; Claude başlatma orta tıklamaya bağlandı. | **[GİDERİLDİ]** `scripts/argus_waybar.sh` & `~/.config/waybar/config` |
-| **MTP + N-GRAM** | Qwen 3.6 35B A3B Maksimum Hız Entegrasyonu | `unsloth/Qwen3.6-35B-A3B-MTP-GGUF` (22.6 GB) indirildi; `--spec-type draft-mtp,ngram-mod` ve `--spec-draft-n-max 2` aktif edildi. | **[ÖLÇÜLDÜ & AKTİF]** 24.29 tok/s, %95.4 acceptance rate |
+---
 
+## 6. Ponytail uyumlu cerrahi reçete (öncelik sırasıyla, onay bekliyor)
 
+| Sıra | Değişiklik | Boyut | Doğrulama |
+|---|---|---|---|
+| 1 | **L0.2:** yazımda `access_count = 0`; kurbanı `last_access_step` ile seçmek; saati çağrı başına ilerletmek (L1.4) | ~10 satır, mevcut alanlar | Policy counter testleri; policy-on 4K prefill ve decode A/B |
+| 2 | **L0.1:** resident sayfaya yazmak onu diske düşürmesin. Resident tier'a yazıp doğrulamak; disk kopyası backing copy olarak kalır | `write_page` içinde bir dal | `test_ggml_disk_buffer` short-write ve corrupt-page testleri ile policy off/on eşitliği; dar bütçeli decode ölçümü (0.991 tok/s baseline) |
+| 3 | **L1.2:** yazma anında admission (hedef tier bütçesi varsa) | `write_page`'e yerleşim girdisi | Policy census; `peak_*` bütçeleri |
+| 4 | **L2.1:** GPU-side `set_rows` (GPU-resident sayfalar için) | Yeni kernel; doğrulama sözleşmesi kararı gerekli | Hash `a152ed56`; nsys GPU idle |
+| 5 | **L1.1:** v0.7 ölçüm matrisine policy-on prefill ve decode eklemek | Plan değişikliği | — |
+
+1–3. adımlar ürün modunun (policy-on) mantık hatalarını düzeltiyor ve küçükler. 4. adım GPU-control dahil bütün modlarda boşta GPU süresine vuruyor. Control-audit P0.1 (decode'u resident yola almak) ile birlikte, v0.7 sonrası en büyük üç kaldıraç: decode yolu, yazma yolunun yeri ve policy'nin ısı modeli.
