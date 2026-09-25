@@ -40,3 +40,4 @@ screenshots/
 neo-mobile/credentials.json
 *.keystore
 *.jks
+.pytest-cache/

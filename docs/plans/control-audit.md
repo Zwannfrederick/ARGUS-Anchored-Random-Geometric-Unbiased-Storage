@@ -63,7 +63,7 @@ A ve B aynı kavramı (sayfalı KV) iki kez uyguluyor ve ortak kod paylaşmıyor
 
 ## 2. P0 — Kritik hatalar ve performans kök nedenleri
 
-### P0.1 Decode staged yolu: GPU'daki veri GPU'ya sayfa sayfa kopyalanıyor
+### P0.1 Decode staged yolu: GPU'daki veri GPU'ya sayfa sayfa kopyalanıyor — **YAPILDI (E5, `077c816`)**: GPU-control decode 7.53 → 39.31 tok/s
 **Dosyalar:** `argus_cache/csrc/ggml_cuda_attention.cu:550`, `:598–635` · `argus_cache/csrc/ggml_disk_buffer.cpp:101`, `:873–911`
 
 **Kanıt:**
@@ -86,7 +86,7 @@ A ve B aynı kavramı (sayfalı KV) iki kez uyguluyor ve ortak kod paylaşmıyor
 
 **Doğrulama:** `tests/cpp/test_ggml_cuda_mechanism.cpp`'ye Q=1 durumu, `test_cuda_*` suite'i ve 4K decode A/B.
 
-### P0.2 `log_event`: sınırsız liste artı cwd'ye dosya yazma artı yutulan hata
+### P0.2 `log_event`: sınırsız liste artı cwd'ye dosya yazma artı yutulan hata — **YAPILDI**: `EVENT_LOG_LIMIT`, trace `ARGUS_TRACE_PATH` ile opt-in, hata loglanıyor
 **Dosya:** `argus_cache/core/memory_manager.py:882–902`
 
 - Her `create/demote/resurrect` olayı `self.event_log.append(...)` ile büyüyor ve **hiç kırpılmıyor**. Uzun bir generation'da bu bir bellek sızıntısı.
@@ -95,14 +95,14 @@ A ve B aynı kavramı (sayfalı KV) iki kez uyguluyor ve ortak kod paylaşmıyor
 
 **Çözüm:** Listeyi `collections.deque(maxlen=N)` yapmak. Dosya yazımını opt-in bir env var ya da `logging` handler'ı arkasına almak, varsayılan olarak kapatmak.
 
-### P0.3 `Page.get` içindeki `catch (...) {}` her hatayı `default` değere çeviriyor
+### P0.3 `Page.get` içindeki `catch (...) {}` her hatayı `default` değere çeviriyor — **YAPILDI**: yakalayıcı kaldırıldı
 **Dosya:** `argus_cache/csrc/bindings.cpp:157`
 
 `py::cast` hataları, tip uyuşmazlıkları ve undefined tensor erişimleri sessizce `None` döndürüyor. Çağıran kod bunu "alan yok" olarak yorumluyor. Bu, hatayı maskeleyen bir varsayılan.
 
 **Çözüm:** Sadece bilinen "anahtar yok" durumunda `default` dönmek, diğer hataları yeniden fırlatmak.
 
-### P0.4 Varsayılan `pytest` koşusu gerçek bir modeli yüklüyor
+### P0.4 Varsayılan `pytest` koşusu gerçek bir modeli yüklüyor — **YAPILDI**: `ARGUS_TEST_LIVE=1` opt-in; düz `pytest` 25 s
 **Dosya:** `tests/test_adapters.py:339–425`
 
 Canlı Ollama testleri sadece "sunucu ayakta mı" koşuluna bağlı. Bu makinede `ollama serve` bir sistem servisi, dolayısıyla her tam `pytest` çağrısı 22 GB'lık bir modeli yüklüyor. Bu turda suite 10 dakikadan fazla takıldı ve kullanıcının işini yavaşlattı.

@@ -117,44 +117,43 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
             else self.extra_fields[key] = value;
         })
         .def("get", [](Page& self, const std::string& key, py::object default_val) -> py::object {
-            try {
-                if (key == "page_id") return py::cast(self.page_id);
-                if (key == "pool_slot" || key == "pool_idx") return py::cast(self.pool_slot);
-                if (key == "page_size") return py::cast(self.page_size);
-                if (key == "importance_score") return py::cast(self.importance_score);
-                if (key == "attention_sum") return py::cast(self.attention_sum);
-                if (key == "last_step_accessed") return py::cast(self.last_step_accessed);
-                if (key == "tier_name") return py::cast(self.tier_name);
-                if (key == "orig_dtype" || key == "dtype") return py::cast(self.orig_dtype);
-                if (key == "key") return self.key_tensor.defined() ? py::cast(self.key_tensor) : default_val;
-                if (key == "value") return self.value_tensor.defined() ? py::cast(self.value_tensor) : default_val;
-                if (key == "key_compressed") {
-                    if (!self.compressed_key.defined()) return default_val;
-                    py::dict d;
-                    d["q"] = self.compressed_key;
-                    d["scales"] = torch::tensor(self.key_scale);
-                    d["min_vals"] = torch::tensor(self.key_min);
-                    return d;
-                }
-                if (key == "value_compressed") {
-                    if (!self.compressed_value.defined()) return default_val;
-                    py::dict d;
-                    d["q"] = self.compressed_value;
-                    d["scales"] = torch::tensor(self.value_scale);
-                    d["min_vals"] = torch::tensor(self.value_min);
-                    return d;
-                }
-                if (key == "key_q" || key == "key_packed" || key == "key_proj")
-                    return self.compressed_key.defined() ? py::cast(self.compressed_key) : default_val;
-                if (key == "value_q" || key == "value_packed" || key == "value_proj")
-                    return self.compressed_value.defined() ? py::cast(self.compressed_value) : default_val;
-                if (key == "key_scale" || key == "key_scales") return py::cast(self.key_scale);
-                if (key == "value_scale" || key == "value_scales") return py::cast(self.value_scale);
-                if (key == "key_min") return py::cast(self.key_min);
-                if (key == "value_min") return py::cast(self.value_min);
-                auto it = self.extra_fields.find(key);
-                if (it != self.extra_fields.end()) return it->second;
-            } catch (...) {}
+            // Missing keys fall through to default_val; conversion failures are real errors.
+            if (key == "page_id") return py::cast(self.page_id);
+            if (key == "pool_slot" || key == "pool_idx") return py::cast(self.pool_slot);
+            if (key == "page_size") return py::cast(self.page_size);
+            if (key == "importance_score") return py::cast(self.importance_score);
+            if (key == "attention_sum") return py::cast(self.attention_sum);
+            if (key == "last_step_accessed") return py::cast(self.last_step_accessed);
+            if (key == "tier_name") return py::cast(self.tier_name);
+            if (key == "orig_dtype" || key == "dtype") return py::cast(self.orig_dtype);
+            if (key == "key") return self.key_tensor.defined() ? py::cast(self.key_tensor) : default_val;
+            if (key == "value") return self.value_tensor.defined() ? py::cast(self.value_tensor) : default_val;
+            if (key == "key_compressed") {
+                if (!self.compressed_key.defined()) return default_val;
+                py::dict d;
+                d["q"] = self.compressed_key;
+                d["scales"] = torch::tensor(self.key_scale);
+                d["min_vals"] = torch::tensor(self.key_min);
+                return d;
+            }
+            if (key == "value_compressed") {
+                if (!self.compressed_value.defined()) return default_val;
+                py::dict d;
+                d["q"] = self.compressed_value;
+                d["scales"] = torch::tensor(self.value_scale);
+                d["min_vals"] = torch::tensor(self.value_min);
+                return d;
+            }
+            if (key == "key_q" || key == "key_packed" || key == "key_proj")
+                return self.compressed_key.defined() ? py::cast(self.compressed_key) : default_val;
+            if (key == "value_q" || key == "value_packed" || key == "value_proj")
+                return self.compressed_value.defined() ? py::cast(self.compressed_value) : default_val;
+            if (key == "key_scale" || key == "key_scales") return py::cast(self.key_scale);
+            if (key == "value_scale" || key == "value_scales") return py::cast(self.value_scale);
+            if (key == "key_min") return py::cast(self.key_min);
+            if (key == "value_min") return py::cast(self.value_min);
+            auto it = self.extra_fields.find(key);
+            if (it != self.extra_fields.end()) return it->second;
             return default_val;
         }, py::arg("key"), py::arg("default_val") = py::none())
         .def("__contains__", [](Page& self, const std::string& key) -> bool {

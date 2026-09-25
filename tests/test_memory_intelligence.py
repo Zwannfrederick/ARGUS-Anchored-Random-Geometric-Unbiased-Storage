@@ -244,14 +244,28 @@ def test_attention_locality_predictor():
     print(f"Locality Stride Bonus Verified! Importance scores: Step 9={score_9:.2f} -> Step 13 (Predicted)={score_13:.2f}")
     print("Attention Locality Predictor test passed!")
 
+def test_event_log_is_bounded_and_trace_file_is_opt_in(tmp_path, monkeypatch):
+    from argus_cache.core.memory_manager import EVENT_LOG_LIMIT
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("ARGUS_TRACE_PATH", raising=False)
+    cache = PagedDynamicKVCache(page_size=8, max_active_pages=1, max_fp8_pages=1, sink_tokens=0)
+    for i in range(EVENT_LOG_LIMIT + 10):
+        cache.log_event("create", i)
+    assert len(cache.event_log) <= EVENT_LOG_LIMIT
+    assert cache.event_log[-1]["page_id"] == EVENT_LOG_LIMIT + 9
+    assert list(tmp_path.iterdir()) == []  # the library writes nothing into the caller's cwd
+
+
 def test_deterministic_trace_replay():
     print("Testing Deterministic Lifecycle Trace Replay...")
     import json
-    
-    trace_file = "tests/argus_attention_trace.jsonl"
-    if os.path.exists(trace_file):
-        os.remove(trace_file)
-        
+    import tempfile
+
+    trace_dir = tempfile.TemporaryDirectory()
+    trace_file = os.path.join(trace_dir.name, "trace.jsonl")
+    previous = os.environ.get("ARGUS_TRACE_PATH")
+    os.environ["ARGUS_TRACE_PATH"] = trace_file
+
     cache = PagedDynamicKVCache(
         page_size=8,
         max_active_pages=1,
@@ -285,9 +299,11 @@ def test_deterministic_trace_replay():
     assert events[1]['page_id'] == page1_id
     
     print("Deterministic Trace Replay verified!")
-    # Cleanup trace file
-    if os.path.exists(trace_file):
-        os.remove(trace_file)
+    if previous is None:
+        os.environ.pop("ARGUS_TRACE_PATH")
+    else:
+        os.environ["ARGUS_TRACE_PATH"] = previous
+    trace_dir.cleanup()
 
 if __name__ == "__main__":
     test_argus_config()

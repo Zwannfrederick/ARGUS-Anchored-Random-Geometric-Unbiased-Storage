@@ -1,3 +1,5 @@
+import json
+import os
 import torch
 import argus_cpp_backend
 import weakref
@@ -245,6 +247,9 @@ class ArgusConfig:
         self.force_qos = force_qos
 
 from .logger import argus_log
+
+# In-memory lifecycle events kept per cache; older events are dropped.
+EVENT_LOG_LIMIT = 4096
 
 def calculate_tensor_entropy(tensor):
     """
@@ -510,6 +515,8 @@ class PagedDynamicKVCache:
         # Generation step tracking for recency scoring
         self.generation_step = 0
         self.event_log = []
+        # Opt-in JSONL lifecycle trace; the library writes no files unless asked.
+        self._trace_path = os.environ.get("ARGUS_TRACE_PATH")
         
         # Outlier-Aware: Attention Sinks (First N tokens kept in FP16 permanently)
         self.sink_tokens = self.pipeline_config.sink_tokens
@@ -880,26 +887,22 @@ class PagedDynamicKVCache:
 
 
     def log_event(self, event_type, page_id, **kwargs):
-        import json
         event = {
             'event': event_type,
             'page_id': page_id,
             'step': self.generation_step,
-            'timestamp': getattr(self, 'generation_step', 0)
+            'timestamp': self.generation_step
         }
         event.update(kwargs)
-        if not hasattr(self, 'event_log'):
-            self.event_log = []
         self.event_log.append(event)
-        
-        # Real-time structured lifecycle tracing (ignored by git via tests/*.jsonl)
-        try:
-            import os
-            os.makedirs("tests", exist_ok=True)
-            with open("tests/argus_attention_trace.jsonl", "a") as f:
-                f.write(json.dumps(event) + "\n")
-        except Exception:
-            pass
+        if len(self.event_log) > EVENT_LOG_LIMIT:
+            del self.event_log[:len(self.event_log) - EVENT_LOG_LIMIT]
+        if self._trace_path:
+            try:
+                with open(self._trace_path, "a") as f:
+                    f.write(json.dumps(event) + "\n")
+            except OSError as error:
+                argus_log("WARNING", f"ARGUS_TRACE_PATH write failed: {error}")
 
     @property
     def k_buffer(self):

@@ -344,6 +344,13 @@ def _ollama_running() -> bool:
         return False
 
 
+# Opt-in only: a reachable Ollama is a system service on a developer machine, and
+# these tests load a real model into it. Plain `pytest` must not do that.
+LIVE_OLLAMA = os.environ.get("ARGUS_TEST_LIVE") == "1" and _ollama_running()
+live_ollama = pytest.mark.skipif(
+    not LIVE_OLLAMA, reason="set ARGUS_TEST_LIVE=1 with an Ollama server on localhost:11434")
+
+
 #: Cold-loading a 20 GB model costs the better part of a minute before any
 #: token is produced, which exceeds the adapter's 60 s default. That is a
 #: property of the machine's model, not of the adapter, so the live tests state
@@ -369,14 +376,14 @@ def _live_model() -> str:
         return "qwen2.5:0.5b"
 
 
-@pytest.mark.skipif(not _ollama_running(), reason="no Ollama server on localhost:11434")
+@live_ollama
 def test_ollama_live_version_probe():
     adapter = OllamaAdapter(model=_live_model(), timeout=LIVE_TIMEOUT)
     adapter.initialize()
     assert adapter.server_version
 
 
-@pytest.mark.skipif(not _ollama_running(), reason="no Ollama server on localhost:11434")
+@live_ollama
 def test_ollama_live_generate_reports_real_timings():
     with OllamaAdapter(
         model=_live_model(), num_ctx=2048, timeout=LIVE_TIMEOUT
@@ -390,7 +397,7 @@ def test_ollama_live_generate_reports_real_timings():
     assert result.wall_seconds >= result.eval_seconds
 
 
-@pytest.mark.skipif(not _ollama_running(), reason="no Ollama server on localhost:11434")
+@live_ollama
 def test_ollama_live_missing_model_is_rejected():
     """The adapter must fail with an actionable message, not a raw 404 --
     a missing model is the most common live failure and the fix is one
@@ -400,7 +407,7 @@ def test_ollama_live_missing_model_is_rejected():
         adapter.initialize()
 
 
-@pytest.mark.skipif(not _ollama_running(), reason="no Ollama server on localhost:11434")
+@live_ollama
 def test_ollama_live_telemetry_reports_loaded_model():
     with OllamaAdapter(model=_live_model(), timeout=LIVE_TIMEOUT) as ollama:
         ollama.generate("hi", max_tokens=4)
@@ -412,7 +419,7 @@ def test_ollama_live_telemetry_reports_loaded_model():
     assert telemetry["loaded_models"], "server reported no loaded model"
 
 
-@pytest.mark.skipif(not _ollama_running(), reason="no Ollama server on localhost:11434")
+@live_ollama
 def test_ollama_live_repeated_cycles_are_stable():
     adapter = OllamaAdapter(model=_live_model(), timeout=LIVE_TIMEOUT)
     for _ in range(3):

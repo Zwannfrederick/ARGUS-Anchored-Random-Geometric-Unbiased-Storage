@@ -340,12 +340,13 @@ def test_attention_locality_logging():
     assert any(e['event'] == 'demote' for e in events)
     
     # Write to structured trace log file
-    trace_path = "tests/argus_attention_trace.jsonl"
-    with open(trace_path, "w") as f:
-        for event in events:
-            f.write(json.dumps(event) + "\n")
-            
-    assert os.path.exists(trace_path)
+    import tempfile
+    with tempfile.TemporaryDirectory() as trace_dir:
+        trace_path = os.path.join(trace_dir, "argus_attention_trace.jsonl")
+        with open(trace_path, "w") as f:
+            for event in events:
+                f.write(json.dumps(event) + "\n")
+        assert os.path.exists(trace_path)
     print(f"Successfully wrote {len(events)} trace events to {trace_path}!")
     print("Attention Locality Logging check passed!")
 
