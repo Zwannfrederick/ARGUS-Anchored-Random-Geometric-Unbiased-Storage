@@ -7,6 +7,13 @@ the model's own weights share the machine's bandwidth deliberately, with **light
 use**: disk may hold KV, but never so much that it chokes the system. Speed matters,
 capacity matters more.
 
+**The machine stays usable while the model runs.** Most products are now built on LLMs,
+and running one locally with a long context either fails for memory or makes the whole
+computer crawl. ARGUS succeeds only if both hold: the long context runs, and the user's
+other work (editor, browser, builds) does not feel the model running. That is a
+measured property, not an impression: no swap activity, low iowait, CPU and RAM
+headroom left to the rest of the system, and desktop responsiveness during the run.
+
 The v0.7 question was "how close to stock at 4K"; at 4K the KV fits in VRAM and ARGUS
 has nothing to win. The v0.8 question is:
 
@@ -95,7 +102,10 @@ prompt cache) competes with 22.6 GB of Qwen3.6 weights for 31.9 GB of RAM. NVMe
 sequential read (`O_DIRECT`) joins the census, for the session-store arithmetic. Every
 run also records, in the same artifact: attention wall time per
 decoded token, the number of populated KV cells, **physical DRAM bytes read** (memory
-controller counters `uncore_imc_free_running_*/data_read`), and CPU utilization. Runs
+controller counters `uncore_imc_free_running_*/data_read`), CPU utilization, and the
+**coexistence record**: swap-in/out and major faults (`vmstat`), iowait, free RAM
+headroom, and the wake-up latency of a small periodic probe task running beside the
+model (a stand-in for desktop responsiveness). Runs
 only on a cleared machine (IDEs, Gradle, browsers, emulator closed): swap and reclaim
 noise would contaminate the scaling curve. Also: free VRAM next to each model, and RAM bandwidth while experts are
 read. Also records which v0.7 limits bite on these models (head dim 256, hybrid
@@ -154,6 +164,8 @@ demotes instead of drops, and one budget shared with the planner (P1).
 - The longest filled context that runs on this machine without heavy disk use, per
   model, in exact and capacity mode, with quality numbers for the latter and disk
   bytes and iowait for both.
+- The machine stays usable during those runs: no swap activity, no sustained iowait,
+  and probe wake-up latency close to the idle machine's.
 - Every number reproducible from a script in `docs/measurements/v080-*`.
 
 ## Carried from the v0.7 backlog
