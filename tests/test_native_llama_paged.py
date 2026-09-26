@@ -119,6 +119,46 @@ def test_llama_server_stock_host_and_paged_outputs_match(tmp_path):
     assert result.returncode == 0, result.stderr[-3000:]
 
 
+def test_unsupported_model_falls_back_to_stock_kv_at_load(tmp_path):
+    """Two KV streams (-np 2) are outside ARGUS attention: the server must start on
+    llama.cpp's own KV cache and say so, instead of failing at graph build."""
+    import socket
+    import time
+    import urllib.request
+
+    server = BUILD / "llama-server"
+    if not server.exists():
+        pytest.skip("llama-server was not built")
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    env = {**os.environ, "ARGUS_KV_DIR": str(_storage()), "ARGUS_KV_MAX_BYTES": str(1 << 30),
+           "ARGUS_KV_RESIDENT_BYTES": "4194304", "ARGUS_KV_STAGING_BYTES": "4194304"}
+    log = tmp_path / "server.log"
+    with log.open("w") as sink:
+        process = subprocess.Popen([server, "-m", MODEL, "-c", "1024", "-np", "2", "-nkvo", "-fa", "on", "-ngl", "0",
+                                    "--port", str(port)], env=env, stdout=sink, stderr=subprocess.STDOUT)
+    try:
+        for _ in range(120):
+            if process.poll() is not None:
+                break
+            try:
+                urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=1)
+                break
+            except OSError:
+                time.sleep(0.5)
+        assert process.poll() is None, log.read_text()[-2000:]
+        request = urllib.request.Request(f"http://127.0.0.1:{port}/completion", headers={"Content-Type": "application/json"},
+                                         data=json.dumps({"prompt": "Once upon a time", "n_predict": 8, "temperature": 0}).encode())
+        assert json.load(urllib.request.urlopen(request, timeout=60))["content"]
+    finally:
+        process.terminate()
+        process.wait(timeout=30)
+    text = log.read_text()
+    assert "ARGUS KV disabled (multiple KV streams is unsupported)" in text
+    assert "ARGUS_DISK allocate" not in text
+
+
 @pytest.mark.skipif(os.environ.get("ARGUS_TEST_CUDA") != "1", reason="set ARGUS_TEST_CUDA=1 for real CUDA mechanism checks")
 def test_cuda_tier_migration_and_attention(tmp_path):
     import shutil

@@ -17,6 +17,15 @@ attention remains GGML's. The direct disk mode below is the budgeted path.
 Other memory implementations may not use `llama_kv_cache`; no support is claimed
 without observing allocation and real inference using the buffer.
 
+## Unsupported models fall back at load
+
+ARGUS takes the KV cache only for the attention it implements. When the KV cache is
+created, a model with MLA, attention sinks, KQ bias, attention soft-capping, ALiBi or
+Grok attention, or a context with several KV streams (`-np > 1` without a unified
+cache), keeps llama.cpp's own KV cache and logs
+`ARGUS KV disabled (<feature> is unsupported)`. Configuration errors (`-nkvo`
+missing, disk KV without `-fa on`) still refuse to start.
+
 ## Experimental block attention
 
 Setting `ARGUS_KV_RESIDENT_BYTES` selects ARGUS CPU block attention over the

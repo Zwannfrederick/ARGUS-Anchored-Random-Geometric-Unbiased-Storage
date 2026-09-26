@@ -27,12 +27,38 @@
  
  #include "llama-impl.h"
  #include "llama-io.h"
-@@ -220,6 +224,18 @@
+@@ -162,6 +166,25 @@
+ 
+     const bool is_mla = hparams.is_mla();
+ 
++#ifdef LLAMA_ARGUS_HOST
++    // ARGUS owns KV only for attention it implements. Decide per model, here: once the
++    // cache lives in an ARGUS buffer, graph build can no longer hand it back to llama.cpp.
++    const char * argus_skip = nullptr;
++    if (std::getenv("ARGUS_KV_DIR") && !hparams.no_alloc) {
++        bool sinks = false, kq_bias = false;
++        for (const auto & layer : model.layers) {
++            sinks = sinks || layer.attn_sinks;
++            kq_bias = kq_bias || layer.attn_rel_b || layer.attn_rel_b_enc || layer.attn_rel_b_cross;
++        }
++        argus_skip = is_mla ? "MLA" : sinks ? "attention sinks" : kq_bias ? "KQ bias" :
++            hparams.attn_soft_cap ? "attention soft-capping" : hparams.f_max_alibi_bias != 0.0f ? "ALiBi" :
++            model.arch == LLM_ARCH_GROK ? "Grok attention" : n_stream > 1 ? "multiple KV streams" : nullptr;
++        if (argus_skip) {
++            LLAMA_LOG_WARN("%s: ARGUS KV disabled (%s is unsupported): using llama.cpp's own KV cache\n", __func__, argus_skip);
++        }
++    }
++#endif
++
+     for (uint32_t il = 0; il < n_layer; il++) {
+         if (!hparams.has_kv(il)) {
+             LLAMA_LOG_DEBUG("%s: layer %3d: does not have KV cache\n", __func__, il);
+@@ -220,6 +243,18 @@
              dev_name = ggml_backend_dev_name(dev);
          }
  
 +#ifdef LLAMA_ARGUS_HOST
-+        if (std::getenv("ARGUS_KV_DIR") && !hparams.no_alloc) {
++        if (std::getenv("ARGUS_KV_DIR") && !hparams.no_alloc && !argus_skip) {
 +            if (offload) {
 +                throw std::runtime_error("ARGUS host KV requires --no-kv-offload (-nkvo)");
 +            }
@@ -46,7 +72,7 @@
          LLAMA_LOG_DEBUG("%s: layer %3d: dev = %s\n", __func__, il, dev_name);
  
          ggml_context * ctx = ctx_for_buft(buft);
-@@ -1186,6 +1202,11 @@
+@@ -1186,6 +1221,11 @@
  }
  
  bool llama_kv_cache::get_can_shift() const {
@@ -58,7 +84,7 @@
      // Step35 uses per-layer RoPE dims; K-shift assumes a single global n_rot.
      if (model.arch == LLM_ARCH_STEP35) {
          return false;
-@@ -1347,6 +1368,9 @@
+@@ -1347,6 +1387,9 @@
      }
  
      // store the current K values into the cache
@@ -68,7 +94,7 @@
      return ggml_set_rows(ctx, k, k_cur, k_idxs);
  }
  
-@@ -1382,6 +1406,9 @@
+@@ -1382,6 +1425,9 @@
              v = ggml_reshape_2d(ctx, v, n_embd_gqa, kv_size*n_stream);
          }
  
