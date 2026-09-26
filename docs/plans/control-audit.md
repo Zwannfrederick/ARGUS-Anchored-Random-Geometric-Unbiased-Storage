@@ -219,3 +219,21 @@ Mottodaki hedef: "inference server değil, altındaki katman". Bir KV-cache yön
 5. **PL4 fallback** ve **PL2 config struct:** plugin olmanın ilk iki adımı. v0.8 tasarım konusu.
 6. **P1 dosya bölmeleri:** davranış değiştirmeyen refactor, testler yeşil kalacak şekilde. Önce `ggml_disk_buffer.cpp`.
 7. **PL1 ve PL6 paket ayrımı:** release öncesi.
+
+---
+
+## Durum güncellemesi (2026-09-26)
+
+| Madde | Durum | Commit |
+|---|---|---|
+| P0.1 decode staged yolu | **Yapıldı** (E5): GPU-control decode 7.5 → 39 tok/s | `077c816` |
+| P0.2 `log_event` | **Yapıldı** | `ba81a2a` |
+| P0.3 `Page.get` içindeki `catch (...)` | **Yapıldı** | `ba81a2a` |
+| P0.4 canlı testler | **Yapıldı** (`ARGUS_TEST_LIVE=1`) | `ba81a2a` |
+| L0.1 yeniden yazımda terfinin düşmesi, L0.3 scratch churn'ü | **Yapıldı** (E6); L0.2 geri çekildi | `e4eb49a` |
+| L2.1 CPU tarafında `set_rows` | **Yapıldı** (E7a/E7b): policy-on prefill 8 → 2 s, decode 19 → 40 tok/s | `6eb150b`, `5503f90` |
+| P1 `ggml_disk_buffer.cpp` 1000 satır tavanı | **Yapıldı**: 778 + 548 satır + iç header | `47e5a75` |
+| PL4 desteklenmeyen modelde sürecin düşmesi | **Yapıldı**: yükleme anında stock KV'ye fallback | `760a243` |
+| PL1/PL2/PL3/PL6 paket, config struct, çoklu instance, kapsam | Açık (v0.8 tasarım konusu) | — |
+| `memory_manager.py` (1972) ve `manager.cpp` (1055) tavanı | Açık | — |
+| Release gate | Push öncesi sessiz makinede final baseline (M4, policy-on outlier) | — |
