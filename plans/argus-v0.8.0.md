@@ -14,6 +14,16 @@ other work (editor, browser, builds) does not feel the model running. That is a
 measured property, not an impression: no swap activity, low iowait, CPU and RAM
 headroom left to the rest of the system, and desktop responsiveness during the run.
 
+**Offload is not management.** Runtimes that "also use RAM" treat KV as passive bytes:
+when VRAM is full, the excess spills to RAM and is pulled back when needed, behind one
+switch (and in recent releases that path is reported unstable). ARGUS manages the KV
+cache: for every page it decides where it lives, at what precision, where its attention
+is computed, and where it goes when evicted, within one budget that covers VRAM, RAM,
+disk and the model's own weights, without starving the rest of the machine. The census
+shows why offload feels slow: it either drags KV back across a 3.14 GB/s link every
+token, or leaves it in RAM to a CPU kernel that reads the same bytes 8 times.
+Management computes where the data is and reads each byte once.
+
 The v0.7 question was "how close to stock at 4K"; at 4K the KV fits in VRAM and ARGUS
 has nothing to win. The v0.8 question is:
 
