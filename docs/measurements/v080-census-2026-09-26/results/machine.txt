@@ -1,0 +1,16 @@
+2026-09-26T15:01:34+03:00
+7.2.3-zen1-2-zen
+git 78dc30ef8fb45632da734d9008da51b77c3db1de dirty=2
+Model adı:                               11th Gen Intel(R) Core(TM) i5-11300H @ 3.10GHz
+CPU(s) scaling MHz:                      94%
+               total        used        free      shared  buff/cache   available
+Mem:           31869       19711        2980         914       10978       12157
+Swap:           4607        4291         316
+ 15:01:34 up  4:05,  1 user,  load average: 3,87, 2,89, 2,44
+name, driver_version, memory.used [MiB], pcie.link.gen.max, pcie.link.width.max
+NVIDIA GeForce RTX 3050 Ti Laptop GPU, 610.57.04, 29 MiB, 3, 16
+pid, process_name, used_gpu_memory [MiB]
+2619, /usr/lib/electron43/electron --type=gpu-process --enable-gpu-rasterization --ozone-platform=wayland --render-node-override=/dev/dri/renderD129 --enable-crash-reporter=d5982ef6-7e5c-4679-8b05-e36091fdd572?no_channel --user-data-dir=/home/zwannfrederick/.config/vesktop --gpu-preferences=WAAAAAAAAAAgAQAMAAAAAAAAAAAAAGAAQAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAgAAAAAAAAAAAAAAAAAAACAAAAAAAAAAIAAAAAAAAAAAAAAAAAAAAAgAAAAAAAAACAAAAAAAAAAIAAAAAAAAAA== --shared-files --field-trial-handle=3?i?853561395886659708?11351165654404174989?262144 --enable-features=GlobalShortcutsPortalPreferredTrigger?PdfUseShowSaveFilePicker?UseOzonePlatform?WaylandWindowDecorations --disable-features=DropInputEventsWhilePaintHolding?HardwareMediaKeyHandling?LocalNetworkAccessChecks?MediaSessionService?ScreenAIOCREnabled?SpareRendererForSitePerProcess?TraceSiteInstanceGetProcessCreation?WaylandWpColorManagerV1?WinRetrieveSuggestionsOnlyOnDemand --variations-seed-version --pseudonymization-salt-handle=7?i?13281589754155149019?5351172429264486894?4 --trace-process-track-uuid=3190708988185955192, 3 MiB
+pcie.link.gen.current, pcie.link.width.current
+3, 4
+ 15:02:20 up  4:06,  1 user,  load average: 4,54, 3,21, 2,57

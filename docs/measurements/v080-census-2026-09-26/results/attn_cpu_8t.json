@@ -1,0 +1,11 @@
+[
+  {"backend": "cpu", "threads": 8, "type": "f16", "n_kv": 16384, "kv_bytes": 33554432, "median_ms": 4.973, "min_ms": 4.635, "gbps": 6.75},
+  {"backend": "cpu", "threads": 8, "type": "f16", "n_kv": 65536, "kv_bytes": 134217728, "median_ms": 26.137, "min_ms": 24.890, "gbps": 5.14},
+  {"backend": "cpu", "threads": 8, "type": "f16", "n_kv": 131072, "kv_bytes": 268435456, "median_ms": 51.116, "min_ms": 50.580, "gbps": 5.25},
+  {"backend": "cpu", "threads": 8, "type": "q8_0", "n_kv": 16384, "kv_bytes": 17825792, "median_ms": 5.641, "min_ms": 5.494, "gbps": 3.16},
+  {"backend": "cpu", "threads": 8, "type": "q8_0", "n_kv": 65536, "kv_bytes": 71303168, "median_ms": 22.379, "min_ms": 21.285, "gbps": 3.19},
+  {"backend": "cpu", "threads": 8, "type": "q8_0", "n_kv": 131072, "kv_bytes": 142606336, "median_ms": 44.852, "min_ms": 43.605, "gbps": 3.18},
+  {"backend": "cpu", "threads": 8, "type": "q4_0", "n_kv": 16384, "kv_bytes": 9437184, "median_ms": 6.112, "min_ms": 5.818, "gbps": 1.54},
+  {"backend": "cpu", "threads": 8, "type": "q4_0", "n_kv": 65536, "kv_bytes": 37748736, "median_ms": 24.368, "min_ms": 22.637, "gbps": 1.55},
+  {"backend": "cpu", "threads": 8, "type": "q4_0", "n_kv": 131072, "kv_bytes": 75497472, "median_ms": 55.200, "min_ms": 45.366, "gbps": 1.37}
+]

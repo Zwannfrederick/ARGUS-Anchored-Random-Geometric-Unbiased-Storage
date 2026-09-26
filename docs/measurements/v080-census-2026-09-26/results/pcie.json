@@ -1,0 +1,10 @@
+{
+  "single_direction_gbps": [
+    {"bytes": 4096, "h2d_pinned": 0.65, "d2h_pinned": 0.83, "h2d_pageable": 1.00, "d2h_pageable": 0.37},
+    {"bytes": 65536, "h2d_pinned": 2.54, "d2h_pinned": 2.78, "h2d_pageable": 2.13, "d2h_pageable": 1.27},
+    {"bytes": 1048576, "h2d_pinned": 3.10, "d2h_pinned": 3.25, "h2d_pageable": 2.76, "d2h_pageable": 1.53},
+    {"bytes": 16777216, "h2d_pinned": 2.88, "d2h_pinned": 3.27, "h2d_pageable": 3.07, "d2h_pageable": 2.76},
+    {"bytes": 268435456, "h2d_pinned": 3.14, "d2h_pinned": 3.29, "h2d_pageable": 3.12, "d2h_pageable": 2.91}
+  ],
+  "bidirectional_pinned_total_gbps": 5.62
+}
