@@ -20,7 +20,8 @@ trap "pkill -CONT -f '^/home/zwannfrederick/.local/bin/codebase-memory-mcp' || t
   lscpu | grep -E 'Model name|^CPU\(s\)|Thread|Core'
   free -m; uptime
   nvidia-smi --query-gpu=name,driver_version,memory.used,pcie.link.gen.max,pcie.link.width.max --format=csv
-  nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv
+  # Process names only: full command lines can carry per-user identifiers.
+  nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv,noheader | awk -F', ' '{n=$2; sub(/ .*/, "", n); print $1", "n", "$3}'
 } > "$out/machine.txt"
 
 "$tools/pcie" > "$out/pcie.json" &

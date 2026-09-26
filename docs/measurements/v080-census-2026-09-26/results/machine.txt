@@ -10,7 +10,7 @@ Swap:           4607        4291         316
 name, driver_version, memory.used [MiB], pcie.link.gen.max, pcie.link.width.max
 NVIDIA GeForce RTX 3050 Ti Laptop GPU, 610.57.04, 29 MiB, 3, 16
 pid, process_name, used_gpu_memory [MiB]
-2619, /usr/lib/electron43/electron --type=gpu-process --enable-gpu-rasterization --ozone-platform=wayland --render-node-override=/dev/dri/renderD129 --enable-crash-reporter=d5982ef6-7e5c-4679-8b05-e36091fdd572?no_channel --user-data-dir=/home/zwannfrederick/.config/vesktop --gpu-preferences=WAAAAAAAAAAgAQAMAAAAAAAAAAAAAGAAQAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAgAAAAAAAAAAAAAAAAAAACAAAAAAAAAAIAAAAAAAAAAAAAAAAAAAAAgAAAAAAAAACAAAAAAAAAAIAAAAAAAAAA== --shared-files --field-trial-handle=3?i?853561395886659708?11351165654404174989?262144 --enable-features=GlobalShortcutsPortalPreferredTrigger?PdfUseShowSaveFilePicker?UseOzonePlatform?WaylandWindowDecorations --disable-features=DropInputEventsWhilePaintHolding?HardwareMediaKeyHandling?LocalNetworkAccessChecks?MediaSessionService?ScreenAIOCREnabled?SpareRendererForSitePerProcess?TraceSiteInstanceGetProcessCreation?WaylandWpColorManagerV1?WinRetrieveSuggestionsOnlyOnDemand --variations-seed-version --pseudonymization-salt-handle=7?i?13281589754155149019?5351172429264486894?4 --trace-process-track-uuid=3190708988185955192, 3 MiB
+2619, /usr/lib/electron43/electron, 3 MiB
 pcie.link.gen.current, pcie.link.width.current
 3, 4
  15:02:20 up  4:06,  1 user,  load average: 4,54, 3,21, 2,57
