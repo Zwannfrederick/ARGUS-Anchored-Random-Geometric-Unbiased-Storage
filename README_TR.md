@@ -47,20 +47,26 @@ English: [README.md](README.md)
 
 ## Bir bakışta durum
 
-"Kanıtlandı" yazan her satır, onu kanıtlayan artifact'e bağlanır. "Ölçülmedi"
-yazan satırlar yayın bekleyen işler değil, açık konulardır.
+Burada tahmin yok. Her sayı açıp bakabileceğiniz kayıtlı bir koşudur; her
+davranışın arkasında, o davranış bozulursa kırılan bir test vardır; ölçülmemiş
+olan her şey **Ölçülmedi** diye yazar. "Ölçülmedi" satırları yayın bekleyen işler
+değil, açık konulardır.
 
 | İddia | Durum | Kanıt |
 |---|---|---|
 | llama.cpp'de KV ayırma, yazma ve attention okumaları ARGUS'a ait | Kanıtlandı | [host ownership](docs/measurements/v050-llama-host-ownership-2026-09-15.json) |
-| Her ARGUS attention yolu kendi staged referansıyla bit-exact | Kanıtlandı: float vektör eşitliği, adversarial mask'ler, mutation kontrolü; 4K çıktı hash'i her modda `a152ed56` | [v0.7 planı](plans/argus-v0.7.0.md) |
+| Her ARGUS attention yolu kendi staged referansıyla bit-exact | Kanıtlandı: float vektör eşitliği, adversarial mask'ler, mutation kontrolü; 4K çıktı hash'i her modda `a152ed56` | [yol eşitliği testleri](tests/cpp/test_ggml_cuda_mechanism.cpp), [hash'ler](docs/measurements/v070-e10-2026-09-26/final-baseline.json), [v0.7 planı](plans/argus-v0.7.0.md) |
 | Çıktı stock llama.cpp ile byte-byte aynı | **Sadece aritmetik aynıyken.** v0.5 UI-Mate koşusunda kanıtlandı; stock'un tensor-core FlashAttention kullandığı v0.7 4K benchmark'ında **aynı değil** | [UI-Mate parity](docs/measurements/v050-ui-mate-reference-parity-2026-09-16.json), [not](#stock-karşılaştırmasını-okumak) |
 | KV sayfaları GPU ↔ pinned ↔ pageable ↔ disk arasında kaynağı koruyarak taşınır | Kanıtlandı | [CUDA mechanism](docs/measurements/v050-cuda-mechanism-2026-09-16.json) |
+| GPU'da yazılan KV satırları llama.cpp'nin CPU kodlamasıyla byte-byte aynı | Kanıtlandı: GGML'in kendi `from_float`'ı ile karşılaştırılır | [`check_gpu_set_rows`](tests/cpp/test_ggml_cuda_mechanism.cpp) |
+| Bozulmuş disk sayfası reddedilir, asla sunulmaz | Kanıtlandı: hasarlı slot, byte'lar attention'a ulaşmadan okumayı düşürür | [disk buffer testi](tests/cpp/test_ggml_disk_buffer.cpp) |
+| Arka plan write-back yalnızca doğrulanmış slotları yayımlar | Kanıtlandı: yazılır, geri okunur, checksum kontrol edilir; bu arada değişen sayfa dirty kalır | [`check_gpu_write_back`](tests/cpp/test_ggml_cuda_mechanism.cpp), [E7b](docs/measurements/v070-e7b-write-back-2026-09-25.md) |
+| Attention kernel'leri kuyruktayken sayfalar taşınabilir | Test edilen sürücüde kanıtlandı: düşmanca test, sayfalar taşınırken kernel'leri 512 MiB'lık kopyanın arkasında kuyruğa sokar; `cudaFree`'nin kuyruktaki işi beklediği probe ile ölçüldü | [`check_policy_table`](tests/cpp/test_ggml_cuda_mechanism.cpp), [probe](docs/measurements/v070-e10-2026-09-26/cudafree-sync-probe.cu) |
 | Placement policy kararları attention yolundan bağımsız, birebir aynı | Kanıtlandı: staged, resident ve sayfa tablosu yollarında; 4 MiB ve 256 KiB bütçelerde | [E6](docs/measurements/v070-e6-policy-logic-2026-09-25.md), [E10](plans/argus-v0.7.0.md) |
 | 4K prefill, stock'a göre | **Daha yavaş:** 1.29x (GPU-control), 1.36x (policy-on) | [final baseline](docs/measurements/v070-e10-2026-09-26/) |
 | 4K decode, stock'a göre | **Daha hızlı:** 55.6 / 48.2, stock 37.5 tok/s | [final baseline](docs/measurements/v070-e10-2026-09-26/) |
 | GPU bütçesinden büyük KV | Çalışıyor ama diske bağlı: 48 MiB KV için 2 MiB GPU → 47.6 s prefill, 1.0 tok/s | [E6](docs/measurements/v070-e6-policy-logic-2026-09-25.md) |
-| Desteklenmeyen modeller llama.cpp'nin kendi KV cache'ine düşer | Kanıtlandı: `-np 2` açılıyor ve cevap veriyor | `tests/test_native_llama_paged.py` |
+| Desteklenmeyen modeller llama.cpp'nin kendi KV cache'ine düşer | Kanıtlandı: `-np 2` açılıyor ve cevap veriyor | [`test_unsupported_model_falls_back_to_stock_kv_at_load`](tests/test_native_llama_paged.py) |
 | 262K'da uzun bağlam throughput'u | **Ölçülmedi** | — |
 | Başka model, GPU ve bağlam uzunlukları | **Ölçülmedi** | — |
 | INT4, INT2, 1-bit veya JL katmanlarında kalite (HuggingFace yolu) | **Ölçülmedi**; sadece FP8'e ulaşıldı | [Kalite](#kalite-huggingface-yolu) |
@@ -410,7 +416,7 @@ ARGUS disk store (C++/CUDA)              PagedDynamicKVCache (Python + C++)
 
 HuggingFace yolunun ilkesi şudur: mantıksal bir KV sayfası, fiziksel yerleşimi ve
 fiziksel hassasiyeti üç ayrı şeydir; sıkıştırma katmanları yeteneğe göre seçilen
-eklentilerdir. Ayrıntı: [`docs/architecture.md`](docs/architecture.md).
+eklentilerdir. Ayrıntı: [`docs/architecture_TR.md`](docs/architecture_TR.md).
 
 İki mimari sınır:
 - `AttentionAdapter`, model sözleşmelerini çekirdeğin dışında tutar.

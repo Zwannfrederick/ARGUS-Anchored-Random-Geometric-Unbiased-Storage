@@ -44,20 +44,26 @@ Türkçe belge: [README_TR.md](README_TR.md)
 
 ## Status at a glance
 
-Every "proven" row links to the artifact that proves it. Every "not measured" row
-is open, not pending publication.
+Nothing here is a projection. Every number is a recorded run you can open; every
+behaviour is backed by a test that fails if it stops being true; anything that has
+not been measured says **Not measured**. "Not measured" rows are open, not pending
+publication.
 
 | Claim | Status | Evidence |
 |---|---|---|
 | ARGUS owns llama.cpp KV allocation, writes and attention reads | Proven | [host ownership](docs/measurements/v050-llama-host-ownership-2026-09-15.json) |
-| Every ARGUS attention path is bit-exact with its staged reference | Proven (float-vector equality, adversarial masks, mutation-checked; 4K output hash `a152ed56` in every mode) | [v0.7 plan](plans/argus-v0.7.0.md) |
+| Every ARGUS attention path is bit-exact with its staged reference | Proven (float-vector equality, adversarial masks, mutation-checked; 4K output hash `a152ed56` in every mode) | [path parity tests](tests/cpp/test_ggml_cuda_mechanism.cpp), [hashes](docs/measurements/v070-e10-2026-09-26/final-baseline.json), [v0.7 plan](plans/argus-v0.7.0.md) |
 | Output is byte-identical to stock llama.cpp | **Only where the arithmetic matches** — proven on the v0.5 UI-Mate run; **not** on the v0.7 4K benchmark, where stock uses tensor-core FlashAttention | [UI-Mate parity](docs/measurements/v050-ui-mate-reference-parity-2026-09-16.json), [caveat](#reading-the-stock-comparison) |
 | KV pages migrate GPU ↔ pinned ↔ pageable ↔ disk, source-preserving | Proven | [CUDA mechanism](docs/measurements/v050-cuda-mechanism-2026-09-16.json) |
+| KV rows written on the GPU are byte-identical to llama.cpp's CPU encoding | Proven (compared against GGML's own `from_float`) | [`check_gpu_set_rows`](tests/cpp/test_ggml_cuda_mechanism.cpp) |
+| A corrupted disk page is refused, never served | Proven (a damaged slot fails the read before bytes reach attention) | [disk buffer test](tests/cpp/test_ggml_disk_buffer.cpp) |
+| Background write-back publishes only verified slots | Proven (written, read back, checksum-checked; a changed page stays dirty) | [`check_gpu_write_back`](tests/cpp/test_ggml_cuda_mechanism.cpp), [E7b](docs/measurements/v070-e7b-write-back-2026-09-25.md) |
+| Pages can move while attention kernels are still queued | Proven on the tested driver (adversarial test queues kernels behind a 512 MiB copy while pages move; `cudaFree` waiting for queued work is probed) | [`check_policy_table`](tests/cpp/test_ggml_cuda_mechanism.cpp), [probe](docs/measurements/v070-e10-2026-09-26/cudafree-sync-probe.cu) |
 | Placement policy keeps its decisions identical across attention paths | Proven (staged vs resident vs page-table paths, 4 MiB and 256 KiB budgets) | [E6](docs/measurements/v070-e6-policy-logic-2026-09-25.md), [E10](plans/argus-v0.7.0.md) |
 | 4K prefill vs stock | **Slower**: 1.29x (GPU control), 1.36x (policy on) | [final baseline](docs/measurements/v070-e10-2026-09-26/) |
 | 4K decode vs stock | **Faster**: 55.6 / 48.2 vs 37.5 tok/s | [final baseline](docs/measurements/v070-e10-2026-09-26/) |
 | KV larger than the GPU budget | Works, disk-bound: 2 MiB GPU tier for 48 MiB of KV → 47.6 s prefill, 1.0 tok/s | [E6](docs/measurements/v070-e6-policy-logic-2026-09-25.md) |
-| Unsupported models fall back to llama.cpp's own KV cache | Proven (`-np 2` starts and serves) | `tests/test_native_llama_paged.py` |
+| Unsupported models fall back to llama.cpp's own KV cache | Proven (`-np 2` starts and serves) | [`test_unsupported_model_falls_back_to_stock_kv_at_load`](tests/test_native_llama_paged.py) |
 | Long-context throughput at 262K | **Not measured** | — |
 | Other models, GPUs, context lengths | **Not measured** | — |
 | Quality under INT4, INT2, 1-bit or JL tiers (HuggingFace path) | **Not measured**; only FP8 was reached | [Quality](#quality-huggingface-path) |
