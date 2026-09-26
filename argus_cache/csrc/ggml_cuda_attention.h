@@ -93,6 +93,16 @@ bool argus_disk_gpu_rows_on_device(const ggml_tensor * target, void * stream,
 // borrowed: replacing a page drops the table, and freeing GPU memory synchronizes first.
 bool argus_disk_gpu_table(const ggml_tensor * k, const ggml_tensor * v, const void * const ** keys,
                           const void * const ** values, size_t * key_offset, size_t * value_offset);
+// Policy stores whose written K/V pages are all on the GPU (and whose whole store, page table
+// and scratch headroom fit the GPU budget): calls `launch` with page-address tables for k and
+// v and their first-byte offsets, without waiting, then records the table's read event and
+// the same access history as argus_disk_read_resident. False, touching nothing, otherwise or
+// if `launch` declines.
+bool argus_disk_policy_table_read(const ggml_tensor * k, const ggml_tensor * v, void * stream,
+        bool (*launch)(const void * const * keys, const void * const * values, size_t key_offset,
+                       size_t value_offset, void * context), void * context);
+// Stores `value` into a device pointer slot, in order on `stream`.
+void argus_cuda_store_pointer(void ** slot, void * value, void * stream);
 void * argus_cuda_event_create();
 void argus_cuda_event_record(void * event, void * stream);
 void argus_cuda_event_wait(void * event);

@@ -228,6 +228,13 @@ bool write_run(Store & store, size_t first, size_t count, const char * source) {
 }
 
 void destroy_flusher(Flusher * flusher) { delete flusher; }
+
+void publish_entry(Store & store, size_t index) {
+    if (store.gpu_control || !store.page_table) { return; }
+    const Page & page = store.pages[index];
+    void * address = page.resident && page.resident->tier() == ArgusTier::gpu ? page.resident->data() : nullptr;
+    argus_cuda_store_pointer(static_cast<void **>(store.page_table->data()) + index, address, store.table_stream);
+}
 } // namespace argus_disk
 using namespace argus_disk;
 
@@ -258,6 +265,7 @@ static void move_page(Store & store, size_t index, ArgusTier tier, ArgusDiskPage
     delete page.resident;
     page.resident = target.release();
     ++page.placement_revision;
+    publish_entry(store, index);
 }
 
 void argus_disk_move_page(const ggml_tensor * tensor, size_t start, ArgusTier tier, ArgusDiskPageRevision expected) {
@@ -520,7 +528,7 @@ bool argus_disk_gpu_rows(const ggml_tensor * target, const int64_t * rows, size_
         if (fresh[i]) {
             delete descriptor.resident;
             descriptor.resident = fresh[i].release();
-            store.page_table.reset();
+            if (store.gpu_control) { store.page_table.reset(); } else { publish_entry(store, pages[i]); }
             ++descriptor.placement_revision;
         }
         ++descriptor.content_revision;
@@ -614,6 +622,76 @@ bool argus_disk_gpu_table(const ggml_tensor * k, const ggml_tensor * v, const vo
     *values = tables[1];
     *key_offset = offsets[0];
     *value_offset = offsets[1];
+    return true;
+}
+
+// Builds a policy store's page table, only while every page, the table and the policy's
+// scratch headroom fit the GPU budget together: then the table can never displace a page,
+// and placement decisions stay exactly those of the borrowing path.
+static bool build_policy_table(Store & store, void * stream) {
+    const size_t count = rounded(store.bytes) / page_size;
+    size_t off_gpu = 0;
+    std::vector<void *> addresses(count);
+    for (size_t i = 0; i < count; ++i) {
+        const Page & page = store.pages[i];
+        const bool on_gpu = page.resident && page.resident->tier() == ArgusTier::gpu;
+        addresses[i] = on_gpu ? page.resident->data() : nullptr;
+        off_gpu += !on_gpu;
+    }
+    const size_t table_bytes = (count * sizeof(void *) + page_size - 1) / page_size * page_size;
+    const auto budget = argus_tier_budget(ArgusTier::gpu);
+    const size_t wanted = off_gpu * page_size + table_bytes + argus_kv_policy_headroom(ArgusTier::gpu);
+    if (budget.live > budget.limit || budget.limit - budget.live < wanted) { return false; }
+    auto table = std::make_unique<ArgusTierBuffer>(ArgusTier::gpu, count * sizeof(void *));
+    table->write(addresses.data(), count * sizeof(void *)); // synchronous: complete before any table read
+    store.page_table = std::move(table);
+    store.table_stream = stream;
+    if (!store.read_event) { store.read_event = argus_cuda_event_create(); }
+    return true;
+}
+
+bool argus_disk_policy_table_read(const ggml_tensor * k, const ggml_tensor * v, void * stream,
+        bool (*launch)(const void * const * keys, const void * const * values, size_t key_offset,
+                       size_t value_offset, void * context), void * context) {
+    if (!argus_kv_policy_enabled() || !argus_ggml_is_disk_tensor(k) || !argus_ggml_is_disk_tensor(v) ||
+        k->type != GGML_TYPE_F16 || v->type != GGML_TYPE_F16 || k->ne[2] <= 0 || k->ne[2] != v->ne[2] ||
+        ggml_nbytes(k) != size_t(k->ne[2]) * k->nb[2] || ggml_nbytes(v) != size_t(v->ne[2]) * v->nb[2]) {
+        return false;
+    }
+    std::lock_guard<std::mutex> registry_guard(registry_mutex);
+    auto & store = store_for((k->view_src ? k->view_src : k)->buffer);
+    if (&store != &store_for((v->view_src ? v->view_src : v)->buffer) || store.gpu_control) { return false; }
+    std::lock_guard<std::mutex> guard(store.mutex);
+    if (!store.page_table && !build_policy_table(store, stream)) { return false; }
+    if (store.table_stream != stream) { return false; }
+    const size_t starts[] = {checked_offset(store, k, 0, ggml_nbytes(k)), checked_offset(store, v, 0, ggml_nbytes(v))};
+    const ggml_tensor * tensors[] = {k, v};
+    size_t counts[2];
+    {
+        argus_profile::Scope timer(argus_profile::page_lookup);
+        for (int t = 0; t < 2; ++t) {
+            counts[t] = (starts[t] % page_size + ggml_nbytes(tensors[t]) + page_size - 1) / page_size;
+            for (size_t i = 0; i < counts[t]; ++i) {
+                const Page & page = store.pages[starts[t] / page_size + i];
+                if (page.codec != GGML_TYPE_F16) { return false; }
+                // A written page off the GPU needs cold scratch: that call takes the borrowing path.
+                if (has_content(page) && !(page.resident && page.resident->tier() == ArgusTier::gpu)) { return false; }
+            }
+        }
+    }
+    Store * stores[] = {&store, &store};
+    if (argus_profile::enabled()) { residency_census(stores, starts, counts); }
+    const auto * table = static_cast<const void * const *>(store.page_table->data());
+    // Unwritten pages publish null, which the kernel reads as zeros, as on the borrowing path.
+    if (!launch(table + starts[0] / page_size, table + starts[1] / page_size, starts[0] % page_size,
+                starts[1] % page_size, context)) { return false; }
+    argus_cuda_event_record(store.read_event, stream);
+    // The borrowing path's 32-cell read history, so policy decisions see identical access counts.
+    for (int64_t first = 0; first < k->ne[2]; first += 32) {
+        const size_t n = std::min<int64_t>(32, k->ne[2] - first);
+        record_access(store, starts[0] + first * k->nb[2], n * k->nb[2]);
+        record_access(store, starts[1] + first * v->nb[2], n * v->nb[2]);
+    }
     return true;
 }
 

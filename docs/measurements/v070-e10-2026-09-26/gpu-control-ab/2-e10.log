@@ -1,0 +1,1 @@
+{"mode": "argus-cuda-control", "context": 4096, "prefill_seconds": 1.6706079999999999, "decode_tokens_per_second": 55.2294969697416, "needle_found": true, "error": null}

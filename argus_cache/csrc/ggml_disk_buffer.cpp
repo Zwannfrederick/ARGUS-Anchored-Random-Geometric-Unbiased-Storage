@@ -224,6 +224,8 @@ void write_page(Store & store, size_t page, void * data) {
     // dropping it, or every decode append would send the tail page back through disk.
     // On any refresh failure the copy goes; the published disk page stays authoritative.
     if (descriptor.resident) {
+        // An in-place host write is not ordered with table reads still queued on the stream.
+        if (store.read_event && descriptor.resident->tier() == ArgusTier::gpu) { argus_cuda_event_wait(store.read_event); }
         try {
             descriptor.resident->write(data, page_size);
             descriptor.resident->read(data, 0, page_size);
@@ -231,6 +233,7 @@ void write_page(Store & store, size_t page, void * data) {
         } catch (...) {
             delete descriptor.resident;
             descriptor.resident = nullptr;
+            publish_entry(store, page);
             throw;
         }
     }
@@ -404,6 +407,7 @@ void release(ggml_backend_buffer_t buffer) {
 #ifdef ARGUS_CUDA
     destroy_flusher(store->flusher); // joins before the pages it reads can go
     if (store->write_event) { argus_cuda_event_destroy(store->write_event); }
+    if (store->read_event) { argus_cuda_event_destroy(store->read_event); }
     // Registry users finish before this allocation's pages can be destroyed.
     std::unique_lock<std::mutex> registry_guard(registry_mutex);
     Store ** link = &registry;

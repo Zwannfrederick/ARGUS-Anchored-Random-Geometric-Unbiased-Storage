@@ -55,6 +55,10 @@ struct Store {
     std::unique_ptr<ArgusTierBuffer> page_table;
     std::unique_ptr<ArgusTierBuffer> append_error; // pinned flag: a device append met a row outside its tensor
     void * write_event = nullptr;                    // after the last device append; host reads wait for it
+    // Policy stores: page_table holds each page's GPU address or null, updated only by
+    // publish_entry on table_stream, so kernels queued earlier keep the entries they saw.
+    void * table_stream = nullptr;
+    void * read_event = nullptr; // after the last attention that read the table
 #endif
     std::mutex mutex;
     // Disk-slot I/O. `active` changes only with both locks held (taken in this order), so the
@@ -95,5 +99,9 @@ ArgusDiskPageDescriptor page_descriptor(const Store & store, size_t index);
 bool write_run(Store & store, size_t first, size_t count, const char * source);
 void flush_page(Store & store, size_t index);
 void destroy_flusher(Flusher * flusher);
+// Policy stores with a page table: republish one page's GPU address (or null), in order on
+// table_stream. Call after every change of a page's GPU residency. A replaced GPU page may
+// then be freed: cudaFree waits for all queued device work, including earlier table reads.
+void publish_entry(Store & store, size_t index);
 #endif
 } // namespace argus_disk

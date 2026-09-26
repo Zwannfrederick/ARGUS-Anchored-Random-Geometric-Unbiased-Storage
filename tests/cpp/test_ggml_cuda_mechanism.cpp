@@ -39,7 +39,10 @@ static ggml_cuda_custom_compute_t compute = nullptr;
 extern "C" void ggml_backend_cuda_register_custom_op(ggml_custom_op_t,
         ggml_cuda_custom_compute_t callback, ggml_backend_buffer_type_t) { compute = callback; }
 
-static void require(bool value) { if (!value) { throw std::runtime_error("CUDA mechanism assertion failed"); } }
+static void require_at(bool value, int line) {
+    if (!value) { throw std::runtime_error("CUDA mechanism assertion failed at line " + std::to_string(line)); }
+}
+#define require(value) require_at((value), __LINE__)
 
 template<class F> void refuses(F f) {
     bool refused = false;
@@ -326,6 +329,153 @@ static void check_gpu_write_back() {
     ggml_free(kv_ctx);
     setenv("ARGUS_KV_POLICY", "off", 1);
     std::puts("gpu write-back: dirty pages flush, demotion flushes, short writes retry, budget fallback");
+}
+
+// Policy stores whose written pages are all on the GPU: attention reads the store's device
+// page table without waiting. Entries change only through stream-ordered publication.
+// Every case below runs while the attention kernel is still queued behind a long copy.
+static void check_policy_table() {
+    using namespace argus_profile;
+    setenv("ARGUS_KV_GPU_BYTES", "4194304", 1);
+    setenv("ARGUS_KV_PINNED_BYTES", "65536", 1);
+    setenv("ARGUS_KV_POLICY", "on", 1);
+    const int width = 128, cells = 80, tokens = 3;
+    auto * kv_ctx = ggml_init({1 << 20, nullptr, true});
+    auto * k = ggml_new_tensor_2d(kv_ctx, GGML_TYPE_F16, width, cells);
+    auto * v = ggml_new_tensor_2d(kv_ctx, GGML_TYPE_F16, width, cells);
+    auto * store = ggml_backend_alloc_ctx_tensors_from_buft(kv_ctx, argus_ggml_disk_buffer_type());
+    require(store);
+    auto * ctx = ggml_init({1 << 20, nullptr, true});
+    cudaStream_t stream;
+    require(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking) == cudaSuccess);
+    // Fill K and V through GPU appends: every page GPU-resident (and dirty).
+    auto * source = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, width, cells);
+    auto * indices = ggml_new_tensor_1d(ctx, GGML_TYPE_I64, cells);
+    ArgusTierBuffer source_gpu(ArgusTier::gpu, ggml_nbytes(source)), indices_gpu(ArgusTier::gpu, ggml_nbytes(indices));
+    std::vector<int64_t> all(cells);
+    for (int i = 0; i < cells; ++i) { all[i] = i; }
+    indices_gpu.write(all.data(), ggml_nbytes(indices));
+    source->data = source_gpu.data();
+    indices->data = indices_gpu.data();
+    std::mt19937 rng(11);
+    std::normal_distribution<float> normal;
+    std::vector<float> values(size_t(width) * cells);
+    const auto append = [&](ggml_tensor * target) {
+        for (auto & x : values) { x = normal(rng); }
+        source_gpu.write(values.data(), ggml_nbytes(source));
+        auto * node = argus_ggml_disk_set_rows(ctx, target, source, indices);
+        require(argus_ggml_is_cuda_set_rows(node));
+        compute(node, 0, stream);
+    };
+    append(k);
+    append(v);
+    for (size_t offset = 0; offset < ggml_nbytes(k); offset += 4096) {
+        require(argus_disk_page_descriptor(k, offset).placement == ArgusTier::gpu);
+        require(argus_disk_page_descriptor(v, offset).placement == ArgusTier::gpu);
+    }
+    const auto view = [&](ggml_tensor * t) {
+        return ggml_view_3d(ctx, t, 64, 2, cells, 64 * sizeof(ggml_fp16_t), 128 * sizeof(ggml_fp16_t), 0);
+    };
+    auto * q = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, 64, 4, tokens);
+    auto * mask = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, cells, tokens);
+    ArgusTierBuffer q_gpu(ArgusTier::gpu, ggml_nbytes(q)), mask_gpu(ArgusTier::gpu, ggml_nbytes(mask));
+    ArgusTierBuffer out_gpu(ArgusTier::gpu, 64 * 4 * tokens * sizeof(float));
+    std::vector<float> query(64 * 4 * tokens), bias(cells * tokens);
+    for (auto & x : query) { x = normal(rng); }
+    for (int t = 0; t < tokens; ++t) for (int c = 0; c < cells; ++c) { bias[t * cells + c] = c <= 60 + t ? 0.0f : -INFINITY; }
+    q_gpu.write(query.data(), ggml_nbytes(q));
+    mask_gpu.write(bias.data(), ggml_nbytes(mask));
+    q->data = q_gpu.data();
+    mask->data = mask_gpu.data();
+    auto * kv = argus_ggml_cuda_attention(ctx, q, view(k), view(v), mask, 0.125f);
+    auto * vv = argus_ggml_cuda_attention(ctx, q, view(v), view(v), mask, 0.125f);
+    kv->data = vv->data = out_gpu.data();
+    const auto run = [&](ggml_tensor * attention, const char * path) {
+        if (path) { setenv("ARGUS_KV_ATTENTION_PATH", path, 1); } else { unsetenv("ARGUS_KV_ATTENTION_PATH"); }
+        std::vector<float> out(64 * 4 * tokens);
+        compute(attention, 0, stream);
+        require(cudaStreamSynchronize(stream) == cudaSuccess);
+        out_gpu.read(out.data(), 0, out.size() * sizeof(float));
+        unsetenv("ARGUS_KV_ATTENTION_PATH");
+        return out;
+    };
+    // A long copy ahead of the attention keeps its kernel outstanding while the host acts.
+    struct Delay {
+        void * a = nullptr, * b = nullptr;
+        size_t bytes = size_t(1) << 29;
+        Delay() { require(cudaMalloc(&a, bytes) == cudaSuccess && cudaMalloc(&b, bytes) == cudaSuccess); }
+        ~Delay() { cudaFree(a); cudaFree(b); }
+        void on(cudaStream_t s) { require(cudaMemcpyAsync(b, a, bytes, cudaMemcpyDeviceToDevice, s) == cudaSuccess); }
+    } delay;
+    const auto outstanding = [&](ggml_tensor * attention, auto && act) {
+        std::vector<float> out(64 * 4 * tokens);
+        const auto fast = resident_accepted[prefill].load(), cold = resident_cold_pages[prefill].load();
+        delay.on(stream);
+        compute(attention, 0, stream); // table path: returns with the kernel still queued
+        // CUDA-event profiling times kernels on the borrowing path, which waits; the cases then run in order.
+        require(cuda_events() || cudaStreamQuery(stream) == cudaErrorNotReady);
+        act();
+        require(cudaStreamSynchronize(stream) == cudaSuccess);
+        require(resident_accepted[prefill] == fast + 1 && resident_cold_pages[prefill] == cold);
+        out_gpu.read(out.data(), 0, out.size() * sizeof(float));
+        return out;
+    };
+    const auto snapshot = [&] {
+        std::vector<uint64_t> counts;
+        for (auto * t : {k, v}) for (size_t o = 0; o < ggml_nbytes(t); o += 4096) { counts.push_back(argus_disk_page_descriptor(t, o).access_count); }
+        return counts;
+    };
+    const auto delta = [](const std::vector<uint64_t> & a, const std::vector<uint64_t> & b) {
+        std::vector<uint64_t> d(a.size());
+        for (size_t i = 0; i < a.size(); ++i) { d[i] = b[i] - a[i]; }
+        return d;
+    };
+    // 1. Bit-exact with staged and with the borrowing path; identical access history.
+    const auto expected_kv = run(kv, "staged"), expected_vv = run(vv, "staged");
+    auto before = snapshot();
+    require(run(kv, "batched") == expected_kv);
+    const auto borrowed = delta(before, snapshot());
+    before = snapshot();
+    const auto lanes = resident_cell_kernel[prefill].load(), cold = resident_cold_pages[prefill].load();
+    require(run(kv, nullptr) == expected_kv);
+    require(delta(before, snapshot()) == borrowed);
+    require(resident_cell_kernel[prefill] == lanes + 1 && resident_cold_pages[prefill] == cold);
+    // 2. Demote a page the queued kernel reads, then reuse freed GPU memory: its result stands.
+    // The garbage page stays allocated, so a later promotion cannot land on the old address
+    // and hide a stale table entry.
+    std::unique_ptr<ArgusTierBuffer> garbage;
+    require(outstanding(kv, [&] {
+        argus_disk_move_page(k, 0, ArgusTier::disk, argus_disk_page_revision(k, 0));
+        garbage = std::make_unique<ArgusTierBuffer>(ArgusTier::gpu, 4096);
+        require(cudaMemset(garbage->data(), 0xff, 4096) == cudaSuccess);
+    }) == expected_kv);
+    // A written page off the GPU sends the next call down the borrowing path (cold scratch).
+    const auto cold_before = resident_cold_pages[prefill].load();
+    require(run(kv, nullptr) == expected_kv && resident_cold_pages[prefill] > cold_before);
+    // 3. Promote while another table read is queued: published after it, seen by the next one.
+    require(outstanding(vv, [&] {
+        argus_disk_move_page(k, 0, ArgusTier::gpu, argus_disk_page_revision(k, 0));
+    }) == expected_vv);
+    const auto fast_before = resident_cold_pages[prefill].load();
+    require(run(kv, nullptr) == expected_kv && resident_cold_pages[prefill] == fast_before);
+    garbage.reset();
+    // 4. An append queued behind a table read: the read sees the old rows, the host the new ones.
+    std::vector<ggml_fp16_t> appended(size_t(width) * cells);
+    require(outstanding(kv, [&] { append(k); }) == expected_kv);
+    ggml_backend_tensor_get(k, appended.data(), 0, appended.size() * sizeof(ggml_fp16_t));
+    for (int e = 0; e < width; ++e) { require(appended[e] == ggml_fp32_to_fp16(values[e])); }
+    require(run(kv, "staged") == run(kv, nullptr));
+    // 5. Teardown with a table read still queued: the store waits for it.
+    delay.on(stream);
+    unsetenv("ARGUS_KV_ATTENTION_PATH");
+    compute(vv, 0, stream);
+    ggml_backend_buffer_free(store);
+    require(cudaStreamSynchronize(stream) == cudaSuccess && cudaGetLastError() == cudaSuccess);
+    require(cudaStreamDestroy(stream) == cudaSuccess);
+    ggml_free(ctx);
+    ggml_free(kv_ctx);
+    setenv("ARGUS_KV_POLICY", "off", 1);
+    std::puts("policy table: exact, same access history, safe under queued demotion, promotion, append and teardown");
 }
 
 // Attention scratch and cached pages share a tier budget. The headroom one invocation
@@ -919,6 +1069,7 @@ int main(int argc, char ** argv) try {
     }
     check_gpu_set_rows(); // after the accounting above, which covers attention alone
     check_gpu_write_back();
+    check_policy_table();
     return 0;
 } catch (const std::exception & error) {
     std::fprintf(stderr, "FAILED: %s\n", error.what());

@@ -581,6 +581,41 @@ bool table_attention(ggml_tensor * dst, cudaStream_t stream) {
     return true;
 }
 
+// Policy stores: the same wait-free read through the store's page table, when every written
+// K/V page is on the GPU. CUDA-event profiling keeps the borrowing path, which times kernels.
+struct PolicyLaunch {
+    ggml_tensor * dst;
+    cudaStream_t stream;
+};
+bool launch_policy_cells(const void * const * keys, const void * const * values, size_t key_offset,
+                         size_t value_offset, void * raw) {
+    if (key_offset % (64 * sizeof(half)) || value_offset % (64 * sizeof(half))) { return false; }
+    const auto & launch = *static_cast<const PolicyLaunch *>(raw);
+    auto * dst = launch.dst;
+    const auto * q = dst->src[0], * k = dst->src[1], * mask = dst->src[3];
+    float scale;
+    std::memcpy(&scale, reinterpret_cast<const char *>(dst->op_params) + sizeof(ggml_custom_op_params), sizeof scale);
+    attention_resident_cells<true, true, true><<<(q->ne[1] * q->ne[2] + 3) / 4, 128, 0, launch.stream>>>(
+        static_cast<const char *>(q->data), static_cast<const char *>(mask->data), mask->type == GGML_TYPE_F16,
+        static_cast<float *>(dst->data), q->ne[1], k->ne[1], q->ne[2], k->ne[2],
+        q->nb[1], q->nb[2], mask->nb[0], mask->nb[1], scale, ResidentKV{keys, values, key_offset, value_offset});
+    check(cudaGetLastError());
+    return true;
+}
+bool policy_table_attention(ggml_tensor * dst, cudaStream_t stream) {
+    const char * path = std::getenv("ARGUS_KV_ATTENTION_PATH");
+    if ((path && std::strcmp(path, "cells-v2") != 0) || argus_profile::cuda_events()) { return false; }
+    const auto * q = dst->src[0], * k = dst->src[1], * v = dst->src[2];
+    if (q->ne[0] != 64 || v->ne[0] != 64) { return false; }
+    PolicyLaunch launch{dst, stream};
+    if (!argus_disk_policy_table_read(k, v, stream, launch_policy_cells, &launch)) { return false; }
+    using namespace argus_profile;
+    ++resident_cell_kernel[phase];
+    ++resident_accepted[phase];
+    if (enabled()) { ++kernel_launches[phase]; ++resident_calls[phase]; }
+    return true;
+}
+
 bool try_resident(ggml_tensor * dst, cudaStream_t stream, size_t state_bytes) {
     const char * path = std::getenv("ARGUS_KV_ATTENTION_PATH");
     // Default (and "cells-v2"): batched with the lane-per-cell D=64 kernel, coalesced
@@ -634,7 +669,7 @@ void compute_impl(ggml_tensor * dst, int device, void * raw_stream) {
     const size_t tile_bytes = aligned(key_bytes + value_bytes);
     const size_t state_bytes = aligned(2 * sizeof(float) * q->ne[1] * q->ne[2]);
     argus_kv_policy_prepare(2 * tile_bytes + state_bytes, 2 * tile_bytes);
-    if (table_attention(dst, stream) || try_resident(dst, stream, state_bytes)) {
+    if (table_attention(dst, stream) || policy_table_attention(dst, stream) || try_resident(dst, stream, state_bytes)) {
         if (!(kr == argus_disk_revision(k)) || !(vr == argus_disk_revision(v))) { throw std::runtime_error("ARGUS stale CUDA attention"); }
         argus_kv_policy_observe(k);
         argus_kv_policy_observe(v);
@@ -949,6 +984,11 @@ ggml_tensor * argus_ggml_cuda_set_rows(ggml_context * ctx, ggml_tensor * target,
     const int32_t kind = kind_set_rows;
     std::memcpy(reinterpret_cast<char *>(result->op_params) + kind_offset, &kind, sizeof kind);
     return result;
+}
+__global__ void store_pointer(void ** slot, void * value) { *slot = value; }
+void argus_cuda_store_pointer(void ** slot, void * value, void * stream) {
+    store_pointer<<<1, 1, 0, static_cast<cudaStream_t>(stream)>>>(slot, value);
+    check(cudaGetLastError());
 }
 void * argus_cuda_event_create() {
     cudaEvent_t event;

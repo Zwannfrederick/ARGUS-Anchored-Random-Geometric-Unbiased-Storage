@@ -754,3 +754,107 @@ A/B against E8 (5/5, hash `a152ed56`):
 - Decode is 1.5x stock.
 - Policy-on stores are not GPU-authoritative, so they keep the borrowing path. Giving
   them the same async read is the obvious next step for the product mode.
+
+## E10 (2026-09-26): wait-free page-table attention for policy stores — ACCEPT
+
+Data: [`v070-e10-2026-09-26/`](../docs/measurements/v070-e10-2026-09-26/). This is not a
+copy of the GPU-control table: in a policy store, pages move between tiers while
+attention kernels are still queued.
+
+### Invariants extracted from the code
+
+**1. Where a resident GPU page is allocated, freed or replaced**
+- Promotion and demotion in `move_page`. The old copy is deleted after the new one
+  is verified.
+- The E7b append attaching a fresh GPU page to a written non-GPU page or an unwritten one.
+- The E6 refresh failure in `write_page`, which deletes the copy.
+- `clear(0)` and `release`, which delete every copy.
+- In GPU control only, host `write_page`/`write_run` replace pages; policy stores
+  never do that.
+
+**2. How promotion/demotion relates to launches and stream order**
+- Moves run on the host thread, inside `prepare`/`observe` around each attention
+  call, between launches.
+- A promoted page is filled and verified with synchronous copies before it becomes
+  visible.
+- Nothing orders a move with kernels already queued on the backend's non-blocking
+  stream.
+
+**3. Can a page be freed while an outstanding kernel still uses it?** No. Every free
+is a `cudaFree`/`cudaFreeHost`, and on this driver both wait for all queued device
+work, non-blocking streams included (`cudafree-sync-probe.cu`: about 12 ms while a
+1 GiB copy was pending). `cudaMalloc` does not wait, and a legacy `cudaMemcpy` does
+not order with the backend stream. This is the pre-existing device-wide
+synchronization that E9 already relies on. Avoiding it needs a stream-ordered
+allocator (`cudaFreeAsync`), i.e. an allocator redesign, and is out of scope.
+
+**4. Lifetime of the mixed-resident cold scratch** One attention call. It is
+reserved under the store locks, uploaded on the attention stream and freed after the
+call's wait. The table path never uses it: any written page off the GPU sends that
+call down the borrowing path.
+
+**5. When CPU readers must see GPU writes** Policy appends are synchronous: E7b
+finishes its encode under the store lock. So `read_page`, save and flush see them as
+soon as the append returns. Two paths needed guarding:
+- Host in-place page writes (the E6 refresh on the host append) are not ordered with
+  queued reads. They now wait for the table's read event first.
+- GPU control keeps E8's write event.
+
+### Design
+
+- **Table per policy store.** Each entry holds the page's GPU address or null.
+- **Built only if everything fits.** The table exists only while every page, the table
+  and the policy's scratch headroom fit the GPU budget together. It can then never
+  displace a page, so placement decisions, promotion/demotion and budget accounting
+  are those of the borrowing path.
+- **Stream-ordered publication.** An entry changes only through `publish_entry`, a
+  one-thread kernel on the attention stream, after every GPU-residency change:
+  promotion, demotion, E7b attach, E6 refresh failure. Kernels queued earlier keep
+  the entry they saw.
+- **Residency gate at launch.** The host checks under the store lock that every
+  written K/V page is on the GPU. Otherwise the call takes the borrowing path.
+- **Unchanged pieces.** The 32-cell access history is recorded exactly as on the
+  borrowing path, and `prepare`/`observe` are untouched.
+- **What goes away.** No generation, epoch or refcount; no new global sync; no
+  per-call table and no completion wait.
+- **Profiling.** CUDA-event profiling keeps the borrowing path.
+
+### Correctness gate
+
+`check_policy_table`: every case runs with the kernel still queued behind a 512 MiB copy.
+1. The table path is bit-exact with staged and with the borrowing path, and its
+   per-page access-count deltas are identical.
+2. Demote a page the queued kernel reads, then refill the freed memory with 0xff. The
+   queued result stands, and the next call goes to the borrowing path (cold scratch).
+3. Promote while another table read is queued. The next table read sees the
+   published entry.
+4. A GPU append is queued behind a table read. The read sees the old rows, and a host
+   read right after the append sees the new ones.
+5. Free the store with a table read still queued.
+
+Mutations:
+- no publication: fails, once the garbage page is kept alive so the promotion cannot
+  land on the old address;
+- no residency gate: fails;
+- no access history: fails.
+
+Suites: native 16 passed, Python 382 passed. The staged/mixed policy-semantics tests
+at 4 MiB and 256 KiB are unchanged, because those stores never qualify for a table.
+
+### Performance gate
+
+Same `llama-server`; `libllama.so` switched between E9 and E10; profiler off;
+MCP indexers paused; hash `a152ed56` everywhere.
+
+| | E9 | E10 |
+|---|---:|---:|
+| policy-on prefill (5 pairs) | 2.138 s | **1.817 s (−15.0%, 5/5)** |
+| policy-on decode | 38.2 tok/s | **48.4 tok/s** |
+| GPU-control prefill (3 pairs) | 1.676 s | 1.671 s |
+
+- Placement counters are identical in every pair: promotions 0, demotions 0,
+  rejected 0, committed 12,768.
+- `written_bytes`/`read_bytes` differ, and they are not placement counters. They
+  measure how much the E7b background flusher published inside the request window.
+  A shorter request flushes less inside the window: 8.4–9.4 MB against 13.5–13.7 MB.
+- Every E10 attention call took the table path: 1512 calls, 0 cold pages.
