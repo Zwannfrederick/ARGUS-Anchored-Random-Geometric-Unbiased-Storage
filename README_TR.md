@@ -303,7 +303,7 @@ model = patch_model_with_argus(
 - **Yöntem:** profiler kapalı, her tekrarda yeni sunucu, bir ısınma; değerler
   median (min–max).
 
-Final baseline `17ad9c2` commit'inde alındı ([veri](docs/measurements/v070-e10-2026-09-26/)).
+Final baseline `95c74fa` commit'inde alındı ([veri](docs/measurements/v070-e10-2026-09-26/)).
 
 | mod | prefill | stock'a göre | decode | çıktı hash'i |
 |---|---:|---:|---:|---|

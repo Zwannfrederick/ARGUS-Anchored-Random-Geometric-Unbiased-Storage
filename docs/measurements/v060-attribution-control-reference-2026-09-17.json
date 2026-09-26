@@ -276,6 +276,6 @@
     "argus_cache/csrc/ggml_profile.h": "a645b5724f99a5c2c5f02aaa5a070ff68575a292d1a1d4d6a3b6985302e23afb",
     "benchmarks/bench_llama_paged_context.py": "f72066d5d41ec7dedd29185a92cc5755035db4756450efdab8e7c704cf24cef6"
   },
-  "source_base_commit": "36963a4",
+  "source_base_commit": "88b7bf6",
   "scope": "4K diagnostic, one workload warmup + one measured request. No 262K validation."
 }

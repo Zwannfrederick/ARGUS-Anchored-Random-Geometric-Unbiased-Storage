@@ -26,7 +26,7 @@ V row; each row's two element loads issue together). D=64 row kernel: 34 registe
 
 | GPU-control, profiler off, 3 repeats | Prefill median (min–max) |
 |---|---:|
-| `0320456` D=64 | 5.514 s (5.492–5.521) |
+| `6e8f098` D=64 | 5.514 s (5.492–5.521) |
 | row pages | **5.178 s** (5.146–5.199) |
 
 Profiled kernel events (one repeat each): 3.960 s → 3.609 s. Output hash unchanged;

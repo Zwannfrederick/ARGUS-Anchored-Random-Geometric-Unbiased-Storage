@@ -6,7 +6,7 @@ v0.7 was an optimization campaign on one workload: Qwen2.5-0.5B-Instruct Q4_K_M,
 F16 KV, 4K context, RTX 3050 Ti Laptop. Every step kept every ARGUS attention path
 bit-exact with the staged reference; the output hash is `a152ed56` throughout.
 
-Final baseline (profiler off, 5 repeats, MCP indexers paused, commit `17ad9c2`):
+Final baseline (profiler off, 5 repeats, MCP indexers paused, commit `95c74fa`):
 
 | mode | prefill | vs stock | decode |
 |---|---:|---:|---:|

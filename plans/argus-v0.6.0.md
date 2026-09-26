@@ -12,8 +12,8 @@ kalanı henüz çalışan özellik iddiası değildir.
 
 ## Attention datapath ilerlemesi — 2026-09-18
 
-`89eaf06` attribution baseline ve placement policy algoritması korunuyor.
-`6f1ef8c` GPU-resident F16 KV için kilitlerle korunan direct pointer-table yolunu
+`9834665` attribution baseline ve placement policy algoritması korunuyor.
+`08d388e` GPU-resident F16 KV için kilitlerle korunan direct pointer-table yolunu
 getirdi: prefill payload D2D sıfırlandı, fakat scalar kernel yüzünden anlamlı
 hızlanma görülmedi (41,24 → 40,05 s). Sonraki batched kernel aynı FP32 reduction
 ve FMA sırasını koruyarak Q>1 işi attention başına tek CUDA invocation'a topladı:
@@ -28,7 +28,7 @@ yavaş; decode kazancı ve policy-on hızlanması iddia edilmiyor. **262K çalı
 Detaylı süreler, transfer/sync sayıları ve sınırlar:
 [4K datapath raporu](../docs/measurements/v060-datapath-2026-09-18.md).
 
-### Checkpoint — 2026-09-18 (`7c51892`..`ff1ca2d`)
+### Checkpoint — 2026-09-18 (`a1ed543`..`52c1534`)
 
 Census: policy-on'da her prefill çağrısını, mevcut ubatch'in yeniden yazdığı (write_page
 residency'yi düşürür) tek bir küçük cold run reddediyordu; bütçe/alignment/codec hiç

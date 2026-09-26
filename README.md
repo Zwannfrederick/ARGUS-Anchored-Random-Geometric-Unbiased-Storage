@@ -279,7 +279,7 @@ set `ARGUS_TRACE_PATH=/path/trace.jsonl` to also write them as JSON lines.
 Qwen2.5-0.5B-Instruct Q4_K_M, F16 KV, 4096 context, 4016-token prompt, 16
 generated tokens, ubatch 64, RTX 3050 Ti Laptop (4 GB), KV on the host (`-nkvo`)
 for every mode, GPU/pinned budgets 64 MiB. Profiler off, fresh server per repeat,
-one warm-up; median (min–max). Final baseline at commit `17ad9c2`
+one warm-up; median (min–max). Final baseline at commit `95c74fa`
 ([data](docs/measurements/v070-e10-2026-09-26/)).
 
 | mode | prefill | vs stock | decode | output hash |

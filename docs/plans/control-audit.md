@@ -1,6 +1,6 @@
 # ARGUS Deep Control Audit — v0.7-dev
-**Tarih:** 2026-09-25 · **Branch:** `v0.7-dev` (HEAD `be4cc47`, çalışma ağacında commit edilmemiş E4 `cells-v2`)
-**Önceki rapor:** 2026-09-04 sürümü (v0.5 öncesi, Ollama/gateway odaklı) git geçmişinde: `git show f00568c:docs/plans/control-audit.md`.
+**Tarih:** 2026-09-25 · **Branch:** `v0.7-dev` (HEAD `4e63501`, çalışma ağacında commit edilmemiş E4 `cells-v2`)
+**Önceki rapor:** 2026-09-04 sürümü (v0.5 öncesi, Ollama/gateway odaklı) git geçmişinde: `git show 7b99080:docs/plans/control-audit.md`.
 
 **Kapsam:** Statik ve kod düzeyinde denetim. Makine meşgul olduğu için bu turda yeni zamanlama ölçümü yok. Aşağıdaki süreler v0.6/v0.7 ölçüm raporlarından alındı ve bağlantıları verildi. Odak dört soru:
 1. Darboğazlar nerede?
@@ -63,7 +63,7 @@ A ve B aynı kavramı (sayfalı KV) iki kez uyguluyor ve ortak kod paylaşmıyor
 
 ## 2. P0 — Kritik hatalar ve performans kök nedenleri
 
-### P0.1 Decode staged yolu: GPU'daki veri GPU'ya sayfa sayfa kopyalanıyor — **YAPILDI (E5, `077c816`)**: GPU-control decode 7.53 → 39.31 tok/s
+### P0.1 Decode staged yolu: GPU'daki veri GPU'ya sayfa sayfa kopyalanıyor — **YAPILDI (E5, `20cd1f0`)**: GPU-control decode 7.53 → 39.31 tok/s
 **Dosyalar:** `argus_cache/csrc/ggml_cuda_attention.cu:550`, `:598–635` · `argus_cache/csrc/ggml_disk_buffer.cpp:101`, `:873–911`
 
 **Kanıt:**
@@ -198,7 +198,7 @@ Mottodaki hedef: "inference server değil, altındaki katman". Bir KV-cache yön
 
 | Madde | Durum |
 |---|---|
-| Kabul edilmiş checkpoint | `5be871e`: GPU-control 2.406 s, 1.79x, hash `a152ed56` |
+| Kabul edilmiş checkpoint | `b0255fe`: GPU-control 2.406 s, 1.79x, hash `a152ed56` |
 | **E4 `cells-v2`** (V için half2) | Kod hazır, commit edilmedi. SASS gate geçti, varsayılan kernel'ler byte-identical. Kernel events −6.3% (5/5). **Eksik olan tek şey boş makinede profiler kapalı prefill A/B'si.** Veri: `docs/measurements/v070-e4-2026-09-25/` |
 | M1 / M2 | Karşılandı |
 | M3 < 2.25 s | E4 + allocator ile yaklaşılıyor, B4 dökümü gerekli |
@@ -226,14 +226,14 @@ Mottodaki hedef: "inference server değil, altındaki katman". Bir KV-cache yön
 
 | Madde | Durum | Commit |
 |---|---|---|
-| P0.1 decode staged yolu | **Yapıldı** (E5): GPU-control decode 7.5 → 39 tok/s | `077c816` |
-| P0.2 `log_event` | **Yapıldı** | `ba81a2a` |
-| P0.3 `Page.get` içindeki `catch (...)` | **Yapıldı** | `ba81a2a` |
-| P0.4 canlı testler | **Yapıldı** (`ARGUS_TEST_LIVE=1`) | `ba81a2a` |
-| L0.1 yeniden yazımda terfinin düşmesi, L0.3 scratch churn'ü | **Yapıldı** (E6); L0.2 geri çekildi | `e4eb49a` |
-| L2.1 CPU tarafında `set_rows` | **Yapıldı** (E7a/E7b): policy-on prefill 8 → 2 s, decode 19 → 40 tok/s | `6eb150b`, `5503f90` |
-| P1 `ggml_disk_buffer.cpp` 1000 satır tavanı | **Yapıldı**: 778 + 548 satır + iç header | `47e5a75` |
-| PL4 desteklenmeyen modelde sürecin düşmesi | **Yapıldı**: yükleme anında stock KV'ye fallback | `760a243` |
+| P0.1 decode staged yolu | **Yapıldı** (E5): GPU-control decode 7.5 → 39 tok/s | `20cd1f0` |
+| P0.2 `log_event` | **Yapıldı** | `a9b95a2` |
+| P0.3 `Page.get` içindeki `catch (...)` | **Yapıldı** | `a9b95a2` |
+| P0.4 canlı testler | **Yapıldı** (`ARGUS_TEST_LIVE=1`) | `a9b95a2` |
+| L0.1 yeniden yazımda terfinin düşmesi, L0.3 scratch churn'ü | **Yapıldı** (E6); L0.2 geri çekildi | `44f6408` |
+| L2.1 CPU tarafında `set_rows` | **Yapıldı** (E7a/E7b): policy-on prefill 8 → 2 s, decode 19 → 40 tok/s | `42cee14`, `7ec68b3` |
+| P1 `ggml_disk_buffer.cpp` 1000 satır tavanı | **Yapıldı**: 778 + 548 satır + iç header | `f3ee005` |
+| PL4 desteklenmeyen modelde sürecin düşmesi | **Yapıldı**: yükleme anında stock KV'ye fallback | `9206bba` |
 | PL1/PL2/PL3/PL6 paket, config struct, çoklu instance, kapsam | Açık (v0.8 tasarım konusu) | — |
 | `memory_manager.py` (1972) ve `manager.cpp` (1055) tavanı | Açık | — |
 | Release gate | Push öncesi sessiz makinede final baseline (M4, policy-on outlier) | — |

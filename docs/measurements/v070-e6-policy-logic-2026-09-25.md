@@ -15,7 +15,7 @@ Item 3 of the [audit action list](../plans/control-audit.md). These changes affe
 
 **Effect, 64 MiB budget, steady state (the measured request after a warmup):**
 
-| | E5 (`077c816`) | E6 |
+| | E5 (`20cd1f0`) | E6 |
 |---|---:|---:|
 | promotions | 12,768 | **0** |
 | cold pages (prefill + decode) | 1,800 + 720 | **0** |
@@ -44,7 +44,7 @@ That is about 40 pages per call over 1,872 calls. Cache and scratch were trading
 
 It failed before the change.
 
-**Effect, tight budget (2 alternating pairs; `before` = `077c816`, `new` = E6):**
+**Effect, tight budget (2 alternating pairs; `before` = `20cd1f0`, `new` = E6):**
 
 | | before | new |
 |---|---:|---:|

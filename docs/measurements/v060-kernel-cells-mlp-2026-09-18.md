@@ -8,7 +8,7 @@ memory layout, registers and placement are unchanged. Same 4K workload as the
 
 ## Change and exactness
 
-Before (`78812c1`, still available as `ARGUS_KV_ATTENTION_PATH=cells`), each masked cell
+Before (`c7681d3`, still available as `ARGUS_KV_ATTENTION_PATH=cells`), each masked cell
 was skipped with `continue`. NVCC compiled every unrolled cell as its own block:
 
 `LDS` row pointer → `LDG` value → consume → branch
@@ -39,7 +39,7 @@ All four cells' loads are in flight before the first is consumed (before: loads 
 
 | Kernel | Registers | Stack / local / spill | Shared | Static SASS |
 |---|---:|---:|---:|---:|
-| `cells` (`78812c1`) | 58 | 0 / 0 / 0 | 3 KiB | 792 |
+| `cells` (`c7681d3`) | 58 | 0 / 0 / 0 | 3 KiB | 792 |
 | `cells-mlp` | 58 | 0 / 0 / 0 | 3 KiB | 792 |
 
 The staged, direct, both batched and the `cells` kernels' SASS is unchanged
@@ -120,18 +120,18 @@ Decode is the unchanged staged Q=1 path; no decode change is claimed.
 Policy-on physical path (profiled, one repeat): 1512/1512 invocations resident on the
 lane-per-cell kernel, 12048 cold pages staged, payload D2D 0, H2D 52,592,640 B, disk read
 148,045,824 B / write 49,348,608 B, 1512 explicit syncs, promotions/demotions 12768/0.
-These are identical to the mixed-resident and `78812c1` measurements. Kernel events 1.66 s.
+These are identical to the mixed-resident and `c7681d3` measurements. Kernel events 1.66 s.
 
 ## Progress on this workload (profiler-disabled medians)
 
 | Checkpoint | GPU-control prefill | policy-on prefill | Source |
 |---|---:|---:|---|
-| staged scalar (forced, `579ba21` binary) | 40.908 s | — | [datapath](v060-datapath-2026-09-18.md) |
-| first batched resident `579ba21` | 12.760 s | 48.319 s | [datapath](v060-datapath-2026-09-18.md) |
-| D=64 specialized `0320456` | 5.514 s | — | [d64](v060-kernel-d64-2026-09-18.md) |
-| row pages `de4bc58` | 5.178 s | — | [rows](v060-kernel-row-pages-2026-09-18.md) |
-| mixed resident `ff1ca2d` / checkpoint `da1b7c4` | 5.217 s | 12.271 s | [checkpoint](v060-checkpoint-2026-09-18.md) |
-| lane-per-cell `78812c1` | 3.685 s | 10.989 s | [cells](v060-kernel-cells-2026-09-18.md) |
+| staged scalar (forced, `674e2e1` binary) | 40.908 s | — | [datapath](v060-datapath-2026-09-18.md) |
+| first batched resident `674e2e1` | 12.760 s | 48.319 s | [datapath](v060-datapath-2026-09-18.md) |
+| D=64 specialized `6e8f098` | 5.514 s | — | [d64](v060-kernel-d64-2026-09-18.md) |
+| row pages `0841ab7` | 5.178 s | — | [rows](v060-kernel-row-pages-2026-09-18.md) |
+| mixed resident `52c1534` / checkpoint `56f45a8` | 5.217 s | 12.271 s | [checkpoint](v060-checkpoint-2026-09-18.md) |
+| lane-per-cell `c7681d3` | 3.685 s | 10.989 s | [cells](v060-kernel-cells-2026-09-18.md) |
 | **branch-free value loop (this)** | **2.821 s** | **9.888 s** | this report |
 | stock-host | 1.332 s | | this report |
 

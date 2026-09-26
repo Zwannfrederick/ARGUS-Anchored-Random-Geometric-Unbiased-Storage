@@ -4,7 +4,7 @@ Same workload, budgets and placement policy as the [checkpoint](v060-checkpoint-
 ARGUS output hash is unchanged (`a152ed56…`) in every run. The warp-per-cell D=64 kernel
 (`attention_resident_batch<64, true>`) stays in the binary as control/reference
 (`ARGUS_KV_ATTENTION_PATH=batched`). Its SASS, and that of the staged, direct and generic
-kernels, is instruction-for-instruction identical to `da1b7c4`.
+kernels, is instruction-for-instruction identical to `56f45a8`.
 
 ## Kernel and why it is bit-exact
 

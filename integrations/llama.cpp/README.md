@@ -295,7 +295,7 @@ publication; the request residual is reported separately, not labelled GPU time.
 GPU-authoritative store with policy off. Written KV pages have no backing file
 and cannot migrate away from GPU; payload disk read/write counters must remain
 zero. (v0.6 text: writes used the CPU set_rows conversion; since v0.7 they are
-written on the GPU, see *Current datapath*.) At the 89eaf06 attribution baseline, attention traverses the same page lookup,
+written on the GPU, see *Current datapath*.) At the 9834665 attribution baseline, attention traverses the same page lookup,
 double-buffered staging, 32-cell kernel and synchronization path. The resident
 prefill optimization below now bypasses staging; decode retains that reference
 path. Masked unwritten padding retains logical-zero semantics. This isolates disk placement; it is not a
@@ -329,7 +329,7 @@ decode (Q=1) takes the same resident path.
 The first [direct-path measurement](../../docs/measurements/v060-datapath-direct-2026-09-18.json)
 eliminates prefill payload D2D (0 bytes) and cuts explicit waits to 1512, but still
 launches 101376 scalar kernels and takes 40.05 seconds prefill versus 41.24 in
-the fresh [89eaf06 reference](../../docs/measurements/v060-datapath-before-2026-09-18.json).
+the fresh [9834665 reference](../../docs/measurements/v060-datapath-before-2026-09-18.json).
 This single profiled pair is not evidence of a material speedup; it exposes the
 remaining scalar-kernel bottleneck. Decode still uses the staged path and this
 sample is slower (3.49 versus 5.02 tok/s), so no decode improvement is claimed.

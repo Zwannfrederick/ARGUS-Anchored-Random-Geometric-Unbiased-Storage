@@ -1,6 +1,6 @@
 # ARGUS Logic & Flow Breakdown — llama.cpp yolu, v0.7-dev
 **Tarih:** 2026-09-25 · **Denetim:** `/logic-audit` · **Eşlik eden rapor:** [control-audit.md](control-audit.md). Oradaki maddeler burada tekrar edilmedi; sadece referans verildi.
-**Önceki sürüm:** 2026-09-04 (Ollama/HF dünyası odaklı), `git show f00568c:docs/plans/logic-flow-breakdown.md`.
+**Önceki sürüm:** 2026-09-04 (Ollama/HF dünyası odaklı), `git show 7b99080:docs/plans/logic-flow-breakdown.md`.
 
 **Soru:** Testler geçiyor ve çıktılar bit-exact. Peki KV sayfasının yolculuğu mantıklı mı? Bir sayfa doğduğu yerden okunduğu yere en kısa ve en doğru yoldan gidiyor mu?
 

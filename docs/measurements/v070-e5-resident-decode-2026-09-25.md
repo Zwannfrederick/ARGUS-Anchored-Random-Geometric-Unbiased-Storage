@@ -24,7 +24,7 @@ At 4K context that came to 46,080 launches and 184,320 staging copies per reques
 | | prefill | decode tok/s (min–max) | TPOT |
 |---|---:|---:|---:|
 | stock-host | 1.286 s | 39.06 (38.07–39.23) | 25.6 ms |
-| ARGUS GPU-control, E4 (`34895ee`, same day) | 2.328 s | 7.53 | — |
+| ARGUS GPU-control, E4 (`a9240b2`, same day) | 2.328 s | 7.53 | — |
 | **ARGUS GPU-control, E5** | 2.187 s | **39.31** (38.54–40.51) | 25.4 ms |
 
 **Decode goes from 4.6x slower than stock to parity: 5.2x.** Resident decode ran 360 of 360 invocations. The prefill path is unchanged by E5; the stock baseline also moved (1.342 → 1.286 s), and the ratio moved with it (1.73x → 1.70x), so this is session variance and no prefill claim is made.

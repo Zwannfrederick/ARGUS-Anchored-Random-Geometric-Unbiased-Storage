@@ -1630,6 +1630,6 @@
     "argus_cache/csrc/ggml_profile.h": "b8b2684cc0e51879ebeafc8190342c3d0828189cad4d4cc2d22a439f13cfb5d9",
     "benchmarks/bench_llama_paged_context.py": "a314a2802a8ab7b13d0faa2c3ad4e9d80663464d33b5fee08732e80f16511382"
   },
-  "source_base_commit": "36963a4",
+  "source_base_commit": "88b7bf6",
   "scope": "Diagnostic CUDA-event attribution, one warmup + one measurement per mode. Event overhead is material for resident decode; see paired unprofiled run and CPU-only follow-up."
 }

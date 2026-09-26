@@ -1,7 +1,7 @@
 # ARGUS v0.7 — experimental deep optimization campaign
 
-Branch `v0.7-dev`, based on `adddea7` (v0.6.0 release; the accepted kernel checkpoint is
-`1ca5d0d`). v0.6 is the immutable reference. Exact by default: no fast math,
+Branch `v0.7-dev`, based on `391e37d` (v0.6.0 release; the accepted kernel checkpoint is
+`3aea617`). v0.6 is the immutable reference. Exact by default: no fast math,
 reassociation, tensor cores, changed reduction or mask order, tolerance change or
 placement-semantics change. Category 2/3 ideas stay opt-in experiments.
 
@@ -371,7 +371,7 @@ Attention is now ≈4x everything else ARGUS does on this path. The two candidat
 ## E3 candidate (2026-09-23): Q shared-load vectorization — REJECTED at the compiler gate
 
 Report: [`v070-e3-q-lds-sass-2026-09-23.md`](../docs/measurements/v070-e3-q-lds-sass-2026-09-23.md).
-`5be871e` is the accepted checkpoint: GPU-control 2.406 s, 1.79x stock, decode
+`b0255fe` is the accepted checkpoint: GPU-control 2.406 s, 1.79x stock, decode
 8.08 tok/s, policy-on 9.178 s, hash `a152ed56…`. M1 and M2 met; next is M3 < 2.25 s.
 
 The candidate was a `cells-kq` path whose only change is vectorizing the query reads
@@ -398,7 +398,7 @@ excluded by the single-factor rule and, for the first, by arithmetic.
 
 No replacement experiment is selected in this turn, as instructed.
 
-## Possible next map (2026-09-23, after `4a58e3f`)
+## Possible next map (2026-09-23, after `231df30`)
 
 Not a selected experiment — the candidate list with what each is worth, what evidence
 it already has and what it still needs. Nothing here is committed to.
@@ -492,7 +492,7 @@ Report: [`v070-e4-v-half2-2026-09-25.md`](../docs/measurements/v070-e4-v-half2-2
 - Category 1: only the lane that owns a dim changes (`2l, 2l+1` instead of `l, l+32`).
   One 32-bit `half2` `__ldg` replaces two 16-bit loads. Mutation-checked.
 - SASS: 8 → 4 V loads per unrolled 4-cell group; reference kernels byte-identical to
-  `be4cc47`. 76 registers, 6 blocks/SM, no spill. `__launch_bounds__(128, 7)` (72
+  `4e63501`. 76 registers, 6 blocks/SM, no spill. `__launch_bounds__(128, 7)` (72
   registers plus an `LDL.64` per tile) was a +1.3% kernel loss; it is rejected and
   must not be retried.
 - Kernel events −6.3% (5/5, ranges do not overlap). Profiler-off prefill −4.5%
@@ -663,7 +663,7 @@ Report: [`v070-e7b-write-back-2026-09-25.md`](../docs/measurements/v070-e7b-writ
 - Contract: after a crash, disk can trail the GPU by the dirty pages. Every published
   slot is still verified. Policy off stays the reference host path.
 
-### Release gate result (2026-09-26, `760a243`)
+### Release gate result (2026-09-26, `9206bba`)
 
 Data: [`v070-release-gate-2026-09-26/`](../docs/measurements/v070-release-gate-2026-09-26/).
 A first attempt was invalid: 3–5 `codebase-memory-mcp` re-index workers ran throughout
@@ -859,7 +859,7 @@ MCP indexers paused; hash `a152ed56` everywhere.
   A shorter request flushes less inside the window: 8.4–9.4 MB against 13.5–13.7 MB.
 - Every E10 attention call took the table path: 1512 calls, 0 cold pages.
 
-### Final baseline after E10 (`b45a860`, MCP indexers paused)
+### Final baseline after E10 (`2ec8f18`, MCP indexers paused)
 
 | mode | prefill median (range) | decode tok/s |
 |---|---:|---:|
@@ -876,8 +876,8 @@ MCP indexers paused; hash `a152ed56` everywhere.
 
 ## v0.7.0 release (2026-09-26)
 
-The optimization campaign is closed. Accepted final optimization: E10 `b45a860`.
-Final-baseline checkpoint: `17ad9c2`.
+The optimization campaign is closed. Accepted final optimization: E10 `2ec8f18`.
+Final-baseline checkpoint: `95c74fa`.
 
 **Release audit.** The E10 lifetime solution covers every path that frees or
 replaces a page:

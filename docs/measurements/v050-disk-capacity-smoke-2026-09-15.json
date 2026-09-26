@@ -21,7 +21,7 @@
   "nvme_verified": false,
   "python": "3.14.7",
   "torch": "2.12.0+cu130",
-  "git_commit": "fa8c48b0212c7cb49af5c77d4ae62c513623c471",
+  "git_commit": "9f5d001edf05a934d55190c2473d36d3244e0c7a",
   "git_dirty": true,
   "notes": "Tiny synthetic geometry, one CPU attention query, buffered filesystem I/O. RSS includes Python/PyTorch. Not a 1M-context model generation result, NVMe throughput result, or v0.5 release gate. Dirty working-tree implementation must accompany this artifact."
 }

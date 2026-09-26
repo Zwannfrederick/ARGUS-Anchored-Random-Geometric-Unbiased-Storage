@@ -1,6 +1,6 @@
 # ARGUS v0.5 — modelden bağımsız KV runtime
 
-Tarih: 2026-09-16. Durum: **kapandı**. Temel teslim commit `9861e9c`;
+Tarih: 2026-09-16. Durum: **kapandı**. Temel teslim commit `a7fecbb`;
 M2 ve M6 kapandı, v0.5.0 yayıma hazır.
 Kapsam: kullanıcı tüm hedefleri, gerçek llama.cpp KV sahipliği dahil, onayladı.
 

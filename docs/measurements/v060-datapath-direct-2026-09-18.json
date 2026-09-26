@@ -574,6 +574,6 @@
     "argus_cache/csrc/ggml_profile.h": "6bc8256ccdc52d98d849215b79fab12989bdcfac95b14a38110a616246f0723a",
     "benchmarks/bench_llama_paged_context.py": "ebe435dbfebdb5fef89ddb31e74f54c18dbd876e4a77defe7e9d4a52dcaa330a"
   },
-  "baseline_commit": "89eaf06",
+  "baseline_commit": "9834665",
   "scope": "Direct-resident 32-cell prefill, unchanged scalar reduction; first optimization stage, not batched kernel."
 }

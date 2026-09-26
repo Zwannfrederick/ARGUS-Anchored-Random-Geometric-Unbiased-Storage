@@ -908,5 +908,5 @@
     "argus_cache/csrc/ggml_profile.h": "6bc8256ccdc52d98d849215b79fab12989bdcfac95b14a38110a616246f0723a",
     "benchmarks/bench_llama_paged_context.py": "8bbed1f7af0ea6748f17c9b36c4ce34137e8fba918b6b81e0b2bc57db2f95706"
   },
-  "baseline_commit": "89eaf06"
+  "baseline_commit": "9834665"
 }

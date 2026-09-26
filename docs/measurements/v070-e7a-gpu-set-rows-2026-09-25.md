@@ -32,7 +32,7 @@ Audit finding L2.1: GPU-born K/V rows were copied to the host, encoded on the CP
 
 ## Results (4K, Qwen2.5-0.5B Q4_K_M, F16 KV, ubatch 64, GPU control)
 
-**A/B, 5 alternating pairs, profiler off.** One `llama-server`; `libllama.so` switched with `LD_LIBRARY_PATH`. E6 = `e4eb49a`.
+**A/B, 5 alternating pairs, profiler off.** One `llama-server`; `libllama.so` switched with `LD_LIBRARY_PATH`. E6 = `44f6408`.
 
 | | prefill median (range) | decode tok/s median |
 |---|---:|---:|

@@ -1,7 +1,7 @@
 {
   "date": "2026-09-17",
   "scope": "v0.6 initial CUDA placement policy correctness and I/O smoke; not a throughput or 262K benchmark",
-  "base_commit": "e9cc1d2",
+  "base_commit": "e41510a",
   "llama_pinned_revision": "54315813269112dd0baed7112ec87ad93a8218ca",
   "runtime_note": "Local patched checkout has no HEAD commit; hashes below identify the tested build inputs and library.",
   "model": "stories15M.gguf",
