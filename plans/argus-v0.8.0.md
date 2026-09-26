@@ -29,9 +29,17 @@ projections until a run replaces them.
 - i5-11300H (4 cores / 8 threads), 31.9 GB RAM, RTX 3050 Ti Laptop 4 GB on PCIe Gen3 x4.
 - **Primary model: Qwen3.6-35B-A3B** (MoE, 22.65 GB; experts run on the CPU with
   `--cpu-moe`). It is the case where weights and KV compete for RAM bandwidth.
-- **Secondary: UI-Mate-9B** (dense, 5.9 GB), the candidate for the neo agent.
-- Gemma 4 (26B-A4B, E4B) are listed in the census; their global layers use head
-  dim 512, which the ARGUS CUDA path does not support (≤ 256).
+- **Primary as well: Gemma 4 26B-A4B** (MoE, 16.9 GB), the model the user most wants at
+  long context. Most of its layers keep a 1024-token sliding window (≈ 210 MB whatever
+  the context); only 5 global layers grow, at 20 KiB/token f16 — the same as Qwen3.6.
+  Its global layers share 2 KV heads among 16 query heads, so the stock CPU kernel's 8x
+  re-read applies unchanged. Their head dim is **512**, which the ARGUS CUDA path does
+  not support (≤ 256): K1 and S1 must cover it.
+- **Secondary: UI-Mate-9B** (dense, 5.9 GB), the candidate for the neo agent, and
+  Gemma 4 E4B (dense, 5.0 GB).
+- Why not vLLM-style serving: those systems assume the weights fit in GPU memory and
+  manage only the KV. On a 4 GB GPU with a 17–23 GB model that assumption fails first;
+  this plan starts from weights in RAM.
 
 ## What the census measured ([v080 census](../docs/measurements/v080-census-2026-09-26/README.md))
 
@@ -95,7 +103,7 @@ each KV head once ≈ 0.10 s (f16) or ≈ 0.05 s (q8_0 cold pages), plus ≈ 15 
 Each one: plan → measurement → accept or reject, recorded like v0.7's E-series.
 
 **M1. Stock baseline with the context actually filled.**
-Qwen3.6 and UI-Mate at 32K, 64K, 128K, 262K filled tokens: prefill time, decode tok/s,
+Qwen3.6, Gemma 4 26B-A4B and UI-Mate at 32K, 64K, 128K, 262K filled tokens: prefill time, decode tok/s,
 VRAM and RAM peaks, for stock in-VRAM (while it fits), stock `-nkvo`, and stock with
 quantized KV. `--cache-ram` is set explicitly in every run: its default (8 GiB of host
 prompt cache) competes with 22.6 GB of Qwen3.6 weights for 31.9 GB of RAM. NVMe
@@ -114,7 +122,8 @@ linear-attention memory, sliding-window caches, F16-only CUDA path).
 
 **K1. CPU decode attention that reads each KV head once.**
 One pass over a KV head serves all of its query heads (8 for Qwen3.6), block by block
-with online softmax, f16 / q8_0 / q4_0. Gate: ≥ 30 GB/s effective KV read on the census
+with online softmax, f16 / q8_0 / q4_0, head dims 256 (Qwen3.6, UI-Mate) and 512
+(Gemma 4 global layers). Gate: ≥ 30 GB/s effective KV read on the census
 geometry at 131K cells (stock: 4.9–5.2), bit-exact with its staged reference, within fp32
 rounding of float64. The evidence K1 must produce is not "the model got faster" but
 **same KV → same attention result → far less DRAM traffic**: DRAM bytes read per
