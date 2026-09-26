@@ -102,9 +102,10 @@ PyTorch ABI and CUDA version would be wrong for most installs.
 configure the extension; pip's isolated build would hide it and compile for an ABI
 your runtime does not have.
 
-The llama.cpp integration is **not** a pip feature: its sources ship inside the
-package (`argus_cache/csrc/ggml_*`) and are compiled into llama.cpp, as described
-next. To work on ARGUS itself:
+The llama.cpp integration is **not** a pip feature: its sources
+(`argus_cache/csrc/ggml_*`) and patches (`integrations/llama.cpp/`) ship in the
+repository and in the source distribution, and are compiled into llama.cpp, as
+described next. To work on ARGUS itself:
 
 ```bash
 python -m venv .venv && source .venv/bin/activate

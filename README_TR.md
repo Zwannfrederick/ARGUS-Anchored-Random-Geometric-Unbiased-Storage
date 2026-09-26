@@ -109,8 +109,9 @@ sürümüne göre derlenmiş bir binary çoğu kurulum için yanlış olur.
 `torch`'unuzu okur; pip'in izole build'i onu gizler ve eklenti, runtime'ınızda
 olmayan bir ABI için derlenir.
 
-llama.cpp entegrasyonu bir pip özelliği **değildir**. Kaynakları paketin içindedir
-(`argus_cache/csrc/ggml_*`) ve aşağıda anlatıldığı gibi llama.cpp'ye derlenir.
+llama.cpp entegrasyonu bir pip özelliği **değildir**. Kaynakları
+(`argus_cache/csrc/ggml_*`) ve patch'leri (`integrations/llama.cpp/`) hem depoda hem
+kaynak dağıtımında (sdist) bulunur ve aşağıda anlatıldığı gibi llama.cpp'ye derlenir.
 ARGUS üzerinde geliştirme yapmak için:
 
 ```bash

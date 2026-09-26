@@ -7,6 +7,10 @@ include LICENSE
 include README.md
 include CHANGELOG.md
 recursive-include argus_cache/csrc *.h *.cuh *.cpp *.cu
+# The llama.cpp integration: the patches and their contract travel with the sources
+# they compile, so a PyPI install has everything the README's build steps need.
+include README_TR.md
+recursive-include integrations/llama.cpp *.patch *.md
 
 # Never ship build artifacts or local measurement scratch.
 prune build
