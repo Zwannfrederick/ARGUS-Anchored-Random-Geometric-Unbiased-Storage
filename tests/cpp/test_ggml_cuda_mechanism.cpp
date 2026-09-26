@@ -182,7 +182,11 @@ static void check_gpu_set_rows() {
     auto * node = argus_ggml_disk_set_rows(ctx, k, source, indices);
     require(argus_ggml_is_cuda_set_rows(node) && !argus_ggml_is_cuda_attention(node));
     const auto before = argus_disk_revision(k);
-    compute(node, 0, nullptr);
+    // The append is asynchronous on the backend's non-blocking stream; host reads must still
+    // see its bytes.
+    cudaStream_t stream;
+    require(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking) == cudaSuccess);
+    compute(node, 0, stream);
     require(!(argus_disk_revision(k) == before));
     for (int pass = 0; pass < 2; ++pass) { // the first host read computes the pending digests, the second checks them
         ggml_backend_tensor_get(k, actual.data(), 0, actual.size() * sizeof(ggml_fp16_t));
@@ -191,10 +195,17 @@ static void check_gpu_set_rows() {
             require(false);
         }
     }
+    // GPU control holds the whole store on the GPU from the first append: untouched pages read as zeros.
     for (size_t page = 0; page < 5; ++page) {
         const auto descriptor = argus_disk_page_descriptor(k, page * 4096);
-        require(descriptor.written == (page != 3) && (page == 3 || descriptor.placement == ArgusTier::gpu));
+        require(descriptor.written && descriptor.placement == ArgusTier::gpu);
     }
+    // A row outside the tensor cannot be refused inside the kernel; the next append refuses.
+    const int64_t outside[] = {3, 40, 80, 79, 17};
+    indices_gpu.write(outside, sizeof outside);
+    compute(node, 0, stream);
+    refuses([&] { compute(node, 0, stream); });
+    require(cudaStreamSynchronize(stream) == cudaSuccess && cudaStreamDestroy(stream) == cudaSuccess);
     ggml_backend_buffer_free(store);
     ggml_backend_buffer_free(host_store);
     ggml_free(ctx);

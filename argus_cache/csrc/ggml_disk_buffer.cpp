@@ -139,6 +139,7 @@ void read_page(Store & store, size_t page, void * data) {
 #ifdef ARGUS_CUDA
     auto & descriptor = page_at(store, page);
     if (descriptor.resident) {
+        if (store.write_event) { argus_cuda_event_wait(store.write_event); } // device appends run ahead
         descriptor.resident->read(data, 0, page_size);
         if (descriptor.digest_pending) {
             descriptor.checksum = checksum(data);
@@ -170,6 +171,7 @@ void write_page(Store & store, size_t page, void * data) {
         if (checksum(data) != digest) { throw std::runtime_error("ARGUS GPU control verification failed"); }
         delete descriptor.resident;
         descriptor.resident = target.release();
+        store.page_table.reset(); // the old page's address is gone
         ++descriptor.content_revision;
         ++descriptor.placement_revision;
         descriptor.checksum = digest;
@@ -383,6 +385,7 @@ void clear(ggml_backend_buffer_t buffer, uint8_t value) {
         }
 #ifdef ARGUS_CUDA
         store.dirty_pages.clear(); // the content they held is gone
+        store.page_table.reset();
 #endif
         store.access_step = 0;
         ++store.content_revision;
@@ -400,6 +403,7 @@ void release(ggml_backend_buffer_t buffer) {
     const auto id = store->id;
 #ifdef ARGUS_CUDA
     destroy_flusher(store->flusher); // joins before the pages it reads can go
+    if (store->write_event) { argus_cuda_event_destroy(store->write_event); }
     // Registry users finish before this allocation's pages can be destroyed.
     std::unique_lock<std::mutex> registry_guard(registry_mutex);
     Store ** link = &registry;

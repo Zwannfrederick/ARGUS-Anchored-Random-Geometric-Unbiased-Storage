@@ -50,6 +50,11 @@ struct Store {
     std::unique_ptr<ArgusTierBuffer> commit_host;
     std::vector<size_t> dirty_pages; // may hold pages flushed since; `dirty` decides
     Flusher * flusher = nullptr;      // started by the first GPU append of a disk-backed store
+    // GPU control, once every page is on the GPU: the device array of page addresses that
+    // lets appends resolve their rows on the device. Dropped whenever a page is replaced.
+    std::unique_ptr<ArgusTierBuffer> page_table;
+    std::unique_ptr<ArgusTierBuffer> append_error; // pinned flag: a device append met a row outside its tensor
+    void * write_event = nullptr;                    // after the last device append; host reads wait for it
 #endif
     std::mutex mutex;
     // Disk-slot I/O. `active` changes only with both locks held (taken in this order), so the

@@ -670,6 +670,36 @@ __global__ void encode_rows(const char * source, size_t source_row, half * const
     half * out = destinations[blockIdx.x];
     for (int e = threadIdx.x; e < width; e += blockDim.x) { out[e] = __float2half_rn(row[e]); }
 }
+// GPU control: the row index is read on the device and resolved through the store's page table.
+__global__ void encode_rows_on_device(const char * source, size_t source_row, const int64_t * rows, int64_t limit,
+        char * const * pages, size_t base, size_t row_bytes, int width, int * error) {
+    const int64_t row = rows[blockIdx.x];
+    if (row < 0 || row >= limit) {
+        if (threadIdx.x == 0) { *error = 1; } // refused by the next append
+        return;
+    }
+    const size_t position = base + size_t(row) * row_bytes;
+    auto * out = reinterpret_cast<half *>(pages[position / 4096] + position % 4096);
+    const auto * in = reinterpret_cast<const float *>(source + blockIdx.x * source_row);
+    for (int e = threadIdx.x; e < width; e += blockDim.x) { out[e] = __float2half_rn(in[e]); }
+}
+struct DeviceAppend {
+    const ggml_tensor * source, * indices, * target;
+    cudaStream_t stream;
+};
+void launch_on_device(void * const * pages, size_t base, int * error, void * raw) {
+    const auto & append = *static_cast<const DeviceAppend *>(raw);
+    encode_rows_on_device<<<append.source->ne[1], 128, 0, append.stream>>>(
+        static_cast<const char *>(append.source->data), append.source->nb[1],
+        static_cast<const int64_t *>(append.indices->data), append.target->ne[1],
+        reinterpret_cast<char * const *>(pages), base, append.target->nb[1], static_cast<int>(append.target->ne[0]), error);
+    check(cudaGetLastError());
+}
+bool device_resident(const void * pointer) {
+    cudaPointerAttributes where{};
+    check(cudaPointerGetAttributes(&where, pointer));
+    return where.type == cudaMemoryTypeDevice;
+}
 struct Append {
     const ggml_tensor * source;
     size_t count;
@@ -694,9 +724,11 @@ void set_rows_compute(ggml_tensor * dst, int device, void * raw_stream) {
     argus_profile::Scope timer(argus_profile::set_rows);
     if (device != 0) { throw std::runtime_error("ARGUS v0.5 CUDA supports device 0 only"); }
     const auto stream = static_cast<cudaStream_t>(raw_stream);
-    cudaPointerAttributes where{};
-    check(cudaPointerGetAttributes(&where, source->data));
-    if (where.type != cudaMemoryTypeDevice) { throw std::runtime_error("ARGUS GPU append needs device-resident rows"); }
+    if (!device_resident(source->data)) { throw std::runtime_error("ARGUS GPU append needs device-resident rows"); }
+    // GPU control with device-resident indices: no host round trip, nothing waits.
+    DeviceAppend on_device{source, indices, target, stream};
+    if (indices->nb[0] == sizeof(int64_t) && device_resident(indices->data) &&
+        argus_disk_gpu_rows_on_device(target, stream, launch_on_device, &on_device)) { return; }
     const size_t count = source->ne[1];
     std::vector<int64_t> rows(count);
     check(cudaMemcpyAsync(rows.data(), indices->data, count * sizeof(int64_t), cudaMemcpyDefault, stream));
@@ -882,6 +914,21 @@ ggml_tensor * argus_ggml_cuda_set_rows(ggml_context * ctx, ggml_tensor * target,
     const int32_t kind = kind_set_rows;
     std::memcpy(reinterpret_cast<char *>(result->op_params) + kind_offset, &kind, sizeof kind);
     return result;
+}
+void * argus_cuda_event_create() {
+    cudaEvent_t event;
+    check(cudaEventCreateWithFlags(&event, cudaEventDisableTiming));
+    return event;
+}
+void argus_cuda_event_record(void * event, void * stream) {
+    check(cudaEventRecord(static_cast<cudaEvent_t>(event), static_cast<cudaStream_t>(stream)));
+}
+void argus_cuda_event_wait(void * event) {
+    argus_profile::Scope timer(argus_profile::synchronization);
+    check(cudaEventSynchronize(static_cast<cudaEvent_t>(event)));
+}
+void argus_cuda_event_destroy(void * event) {
+    if (cudaEventDestroy(static_cast<cudaEvent_t>(event)) != cudaSuccess) { GGML_ABORT("ARGUS CUDA event destroy failed"); }
 }
 void argus_cuda_zero(void * device, size_t bytes, void * stream) {
     check(cudaMemsetAsync(device, 0, bytes, static_cast<cudaStream_t>(stream)));

@@ -214,6 +214,7 @@ bool write_run(Store & store, size_t first, size_t count, const char * source) {
         Page & descriptor = page_at(store, first + i);
         delete descriptor.resident;
         descriptor.resident = targets[i].release();
+        store.page_table.reset();
         ++descriptor.content_revision;
         ++descriptor.placement_revision;
         descriptor.checksum = digests[i];
@@ -300,6 +301,7 @@ void argus_disk_stage_cuda(const ggml_tensor * tensor, void * host, void * devic
     size_t position = checked_offset(store, tensor, start, bytes);
     Bounce bounce;
     std::lock_guard<std::mutex> guard(store.mutex);
+    if (store.write_event) { argus_cuda_event_wait(store.write_event); } // this copy runs on another stream
     try {
         size_t copied = 0;
         while (copied < bytes) {
@@ -518,6 +520,7 @@ bool argus_disk_gpu_rows(const ggml_tensor * target, const int64_t * rows, size_
         if (fresh[i]) {
             delete descriptor.resident;
             descriptor.resident = fresh[i].release();
+            store.page_table.reset();
             ++descriptor.placement_revision;
         }
         ++descriptor.content_revision;
@@ -533,6 +536,63 @@ bool argus_disk_gpu_rows(const ggml_tensor * target, const int64_t * rows, size_
     }
     committed_pages += pages.size();
     if (store.flusher) { store.flusher->wake(); }
+    return true;
+}
+
+bool argus_disk_gpu_rows_on_device(const ggml_tensor * target, void * stream,
+        void (*launch)(void * const * pages, size_t base, int * error, void * context), void * context) {
+    if (!argus_disk_gpu_appendable(target)) { throw std::invalid_argument("ARGUS GPU append needs a GPU-backed store"); }
+    auto & store = store_for((target->view_src ? target->view_src : target)->buffer);
+    if (!store.gpu_control) { return false; }
+    std::lock_guard<std::mutex> guard(store.mutex);
+    if (store.append_error) { // a row outside its tensor is refused here, one append late
+        argus_cuda_event_wait(store.write_event);
+        if (*static_cast<volatile int *>(store.append_error->data())) { throw std::out_of_range("ARGUS KV row index out of range"); }
+    }
+    const size_t count = rounded(store.bytes) / page_size;
+    if (!store.page_table) {
+        // Put every page on the GPU (unwritten ones zeroed), once: appends then need no host round trip.
+        size_t missing = 0;
+        for (size_t i = 0; i < count; ++i) { missing += !store.pages[i].resident; }
+        const auto budget = argus_tier_budget(ArgusTier::gpu);
+        const size_t wanted = (missing + (count * sizeof(void *) + page_size - 1) / page_size) * page_size;
+        if (budget.live > budget.limit || budget.limit - budget.live < wanted) { return false; }
+        std::vector<void *> addresses(count);
+        for (size_t i = 0; i < count; ++i) {
+            Page & page = store.pages[i];
+            if (!page.resident) {
+                auto fresh = std::make_unique<ArgusTierBuffer>(ArgusTier::gpu, page_size);
+                argus_cuda_zero(fresh->data(), page_size, stream);
+                page.resident = fresh.release();
+                ++page.placement_revision;
+            }
+            addresses[i] = page.resident->data();
+        }
+        auto table = std::make_unique<ArgusTierBuffer>(ArgusTier::gpu, count * sizeof(void *));
+        table->write(addresses.data(), count * sizeof(void *));
+        store.page_table = std::move(table);
+        if (!store.append_error) {
+            store.append_error = std::make_unique<ArgusTierBuffer>(ArgusTier::pinned, page_size);
+            *static_cast<int *>(store.append_error->data()) = 0;
+        }
+        if (!store.write_event) { store.write_event = argus_cuda_event_create(); }
+    }
+    const size_t base = checked_offset(store, target, 0, ggml_nbytes(target));
+    launch(static_cast<void * const *>(store.page_table->data()), base, static_cast<int *>(store.append_error->data()), context);
+    argus_cuda_event_record(store.write_event, stream);
+    // The rows are known only on the device: every page the tensor spans may have changed.
+    // Host readers wait for write_event; attention runs later on the same stream.
+    const size_t first = base / page_size, last = (base + ggml_nbytes(target) - 1) / page_size;
+    for (size_t i = first; i <= last; ++i) {
+        Page & descriptor = page_at(store, i);
+        if (descriptor.content_revision == std::numeric_limits<uint64_t>::max()) { throw std::runtime_error("ARGUS page generation exhausted"); }
+        ++descriptor.content_revision;
+        descriptor.digest_pending = true;
+        descriptor.active = 3;
+    }
+    if (store.content_revision == std::numeric_limits<uint64_t>::max()) { throw std::runtime_error("ARGUS store generation exhausted"); }
+    ++store.content_revision;
+    store.last_written_page = last;
     return true;
 }
 

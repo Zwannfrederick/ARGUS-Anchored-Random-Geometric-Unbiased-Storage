@@ -81,6 +81,17 @@ bool argus_disk_gpu_appendable(const ggml_tensor * target);
 bool argus_disk_gpu_rows(const ggml_tensor * target, const int64_t * rows, size_t count, void * stream,
                          void (*encode)(void * const * destinations, void * context), void * context);
 void argus_cuda_zero(void * device, size_t bytes, void * stream);
+// GPU control, asynchronous: once the whole store is on the GPU (done here on first use,
+// within budget), `launch` enqueues the encode on `stream` with the device page-address
+// table, the tensor's byte offset in the store and a device-visible error flag it sets for
+// a row outside the tensor; that is refused by the next append. Returns false, touching
+// nothing, for other stores or when the budget cannot hold every page.
+bool argus_disk_gpu_rows_on_device(const ggml_tensor * target, void * stream,
+        void (*launch)(void * const * pages, size_t base, int * error, void * context), void * context);
+void * argus_cuda_event_create();
+void argus_cuda_event_record(void * event, void * stream);
+void argus_cuda_event_wait(void * event);
+void argus_cuda_event_destroy(void * event);
 ggml_tensor * argus_ggml_cuda_set_rows(ggml_context * ctx, ggml_tensor * target, ggml_tensor * source,
                                        ggml_tensor * indices);
 bool argus_ggml_is_cuda_set_rows(const ggml_tensor * tensor);

@@ -683,3 +683,34 @@ stayed at the benchmark's own ~3 and IO pressure at 1%.
   below it and the median was not. M3 (< 2.25 s) is met by GPU control and policy-on.
 - The 28.8 s policy-on outlier did not recur without foreign IO pressure. The
   unattributed E1 outlier stays open, with no occurrence in this clean run.
+
+## E8 (2026-09-26): GPU-control appends resolved on the device — ACCEPT
+
+Data: [`v070-e8-2026-09-26/`](../docs/measurements/v070-e8-2026-09-26/).
+
+The first append puts every page of a GPU-control store on the GPU, zeroed if unwritten,
+and uploads one device table of page addresses. From then on the kernel reads each
+row index on the device and resolves it through that table. The whole host round
+trip is gone:
+- the D2H copy of the indices and its sync,
+- the per-call page resolution,
+- the row-table allocation and upload,
+- the closing sync.
+
+What replaces it:
+- **Host readers** (`read_page`, staged copies on another stream) wait for the
+  store's write event.
+- **Out-of-range rows.** The kernel sets a pinned error flag, and the next append
+  refuses (tested, mutation-checked). A mutation of the event wait is
+  timing-dependent, so it is covered by construction, not by a test.
+- **Page table invalidation.** Any page replacement drops the table: host writes,
+  `write_run`, the E7a path and `clear`.
+- **Written flags.** Pages a GPU-control tensor spans are all marked written.
+  Unwritten ones read as zero pages instead of null, which is numerically identical
+  because masked cells never contribute.
+
+Results:
+- `set_rows` host exclusive time: 325 → 75 ms per request.
+- GPU-control prefill A/B: 2.228 → 2.151 s (−3.5%), 5/5, hash `a152ed56`.
+- This session was loaded by foreign desktop apps (load ≈ 5), so absolute times are
+  above the release gate's 2.000 s.
