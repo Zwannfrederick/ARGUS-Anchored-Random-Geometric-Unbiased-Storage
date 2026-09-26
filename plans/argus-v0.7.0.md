@@ -662,3 +662,24 @@ Report: [`v070-e7b-write-back-2026-09-25.md`](../docs/measurements/v070-e7b-writ
   I/O under the store lock, and appends filled the attention scratch headroom.
 - Contract: after a crash, disk can trail the GPU by the dirty pages. Every published
   slot is still verified. Policy off stays the reference host path.
+
+### Release gate result (2026-09-26, `760a243`)
+
+Data: [`v070-release-gate-2026-09-26/`](../docs/measurements/v070-release-gate-2026-09-26/).
+A first attempt was invalid: 3–5 `codebase-memory-mcp` re-index workers ran throughout
+(load 7, stock itself hit a 3.1 s outlier). It is kept as `loaded-first-attempt-*`.
+The valid run paused those indexers with SIGSTOP for its duration (`gate.sh`); load
+stayed at the benchmark's own ~3 and IO pressure at 1%.
+
+| mode | prefill median (range) | decode tok/s |
+|---|---:|---:|
+| stock-host | 1.328 s (1.326–1.346) | 37.4 |
+| ARGUS GPU control | **2.000 s** (1.994–2.040) | **41.6** |
+| ARGUS policy-on (3 repeats) | 2.160 s (2.146–2.201) | 38.7 |
+
+- **1.51x stock prefill**, down from 2.09x at the v0.7 baseline. Decode is faster
+  than stock in both ARGUS modes. Hash `a152ed56` on every ARGUS run.
+- **M4 (< 2.00 s) is not met.** The median is exactly on the line: 3 of 5 runs were
+  below it and the median was not. M3 (< 2.25 s) is met by GPU control and policy-on.
+- The 28.8 s policy-on outlier did not recur without foreign IO pressure. The
+  unattributed E1 outlier stays open, with no occurrence in this clean run.

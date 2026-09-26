@@ -1,0 +1,5 @@
+stopped: 6754 7611 9262 9438 16191 
+start load 2.67 3.10 2.97 io avg10=1.00 avg60=1.00
+mid load 3.37 3.24 3.02 io avg10=1.00 avg60=1.01
+end load 3.56 3.29 3.05 io avg10=7.62 avg60=3.63
+resumed: 5 mcp processes

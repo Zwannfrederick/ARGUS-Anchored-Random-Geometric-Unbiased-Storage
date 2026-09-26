@@ -1,0 +1,3 @@
+start load 2.15 1.68 1.93 io avg10=1.00 avg60=1.24
+mid load 7.16 3.15 2.41 io avg10=8.14 avg60=4.96
+end load 6.17 3.41 2.54 io avg10=9.17 avg60=6.61
