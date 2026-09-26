@@ -1,109 +1,269 @@
 # ARGUS
 
-**LLM runtime'ları için KV-cache bellek yöneticisi. KV cache'i tek bir cihaza
-sabitlenmiş tek bir tensor olarak değil, sayfalı bir bellek hiyerarşisi olarak
-ele alır — GPU, pinned RAM, pageable RAM, disk — böylece bir context, normalde
-onu tutması gereken VRAM'den daha uzun yaşayabilir.**
+**LLM runtime'ları için bir KV-cache bellek yöneticisi. KV cache'i tek bir cihaza
+sabitlenmiş tek bir tensör olarak değil, sayfalı bir bellek hiyerarşisi (GPU,
+pinned RAM, pageable RAM, disk) olarak ele alır; böylece bir bağlam, normalde onu
+tutacak VRAM'den daha uzun yaşayabilir.**
 
-ARGUS bir inference server değildir ve hızlandırıcı değildir. Bir server'ın
-altındaki katmandır: her KV sayfasının nerede ve hangi hassasiyette durduğunun
-sahibi. En derin entegrasyon llama.cpp'dir; orada KV tahsisi, sayfa yazımları ve
-attention okumaları ARGUS'a aittir.
+ARGUS bir inference sunucusu değildir. Bir sunucunun altındaki katmandır: her KV
+sayfasının nerede duracağını, nasıl yazılacağını ve attention'ın onu nasıl
+okuyacağını yönetir. En derin entegrasyon llama.cpp'dir. Orada KV ayırma, sayfa
+yazma ve attention okumaları ARGUS'a aittir ve ARGUS kendi referans yoluyla
+bit-exact kalmak zorundadır.
 
-**Durum: v0.6.0. İsteğe bağlı bir placement policy llama.cpp KV sayfalarının
-nerede duracağına karar veriyor; GPU'da duran sayfaları yerinde okuyan CUDA
-attention yolu staged referansla bit düzeyinde aynı sonucu veriyor.** Şimdiye
-kadar ölçülen tek iş yükünde (4K context, Qwen2.5-0.5B, RTX 3050 Ti Laptop)
-ARGUS hâlâ **stock llama.cpp'den yavaş**: KV tamamen GPU'dayken prefill süresi
-stock'un 2,12 katı, policy sayfaları GPU ile disk arasında yerleştirirken 7,42
-katı. Aşağıdaki her performans sayısı bir maliyet ölçümüdür, kazanç değil.
+**Durum: v0.7.0.** Uçtan uca ölçülen tek iş yükünde (4K bağlam, Qwen2.5-0.5B,
+RTX 3050 Ti Laptop):
+- **Prefill:** tüm KV GPU'dayken stock llama.cpp süresinin **1.29 katı**,
+  placement policy GPU/RAM/disk katmanlarını yönetirken **1.36 katı**.
+- **Decode:** iki modda da **stock'tan hızlı**; 55.6 ve 48.2 tok/s, stock 37.5.
+- **v0.7 başında:** aynı prefill 2.09x, policy-on modu 7.4x idi.
+
+Bunlar tek model, tek GPU ve tek bağlam uzunluğunda alınmış ölçümlerdir; genel bir
+hız iddiası değildir. Rakamları alıntılamadan önce
+[karşılaştırma notunu](#stock-karşılaştırmasını-okumak) okuyun.
 
 [![packaging](https://github.com/Zwannfrederick/ARGUS-Anchored-Random-Geometric-Unbiased-Storage/actions/workflows/packaging.yml/badge.svg)](https://github.com/Zwannfrederick/ARGUS-Anchored-Random-Geometric-Unbiased-Storage/actions/workflows/packaging.yml)
 
 English: [README.md](README.md)
 
-## Tek bakışta durum
+---
 
-"Kanıtlandı" diyen her satır onu kanıtlayan dosyaya bağlanır. "Ölçülmedi" diyen
-her satır açıktır — yayımlanmayı bekleyen bir şey değildir.
+## İçindekiler
+
+- [Bir bakışta durum](#bir-bakışta-durum)
+- [ARGUS ne değildir](#argus-ne-değildir)
+- [Kurulum](#kurulum)
+- [llama.cpp ile kullanım](#llamacpp-ile-kullanım): build, modlar, bütün ayarlar
+- [HuggingFace ile kullanım](#huggingface-ile-kullanım)
+- [v0.7 sonuçları](#v07-sonuçları) ve [oraya nasıl gelindi](#v07-nasıl-geldi)
+- [Stock karşılaştırmasını okumak](#stock-karşılaştırmasını-okumak)
+- [Nasıl çalışır](#nasıl-çalışır)
+- [Ölçüm metodolojisi](#ölçüm-metodolojisi)
+- [Bilinen sınırlar](#bilinen-sınırlar)
+- [Önceki kanıtlar](#önceki-kanıtlar-v04v06)
+- [Yol haritası](#yol-haritası)
+
+---
+
+## Bir bakışta durum
+
+"Kanıtlandı" yazan her satır, onu kanıtlayan artifact'e bağlanır. "Ölçülmedi"
+yazan satırlar yayın bekleyen işler değil, açık konulardır.
 
 | İddia | Durum | Kanıt |
 |---|---|---|
-| llama.cpp KV tahsisi, yazımları ve attention okumaları ARGUS'a ait | Kanıtlandı | [host ownership](docs/measurements/v050-llama-host-ownership-2026-09-15.json) |
-| Çıktı stock llama.cpp ile birebir aynı | Kanıtlandı | [UI-Mate parity](docs/measurements/v050-ui-mate-reference-parity-2026-09-16.json) |
-| KV sayfaları GPU ↔ pinned ↔ pageable ↔ disk arasında, kaynağı koruyarak taşınır | Kanıtlandı | [CUDA mechanism](docs/measurements/v050-cuda-mechanism-2026-09-16.json) |
-| HuggingFace yolunda VRAM tasarrufu context ile büyüyor | Kanıtlandı, v0.4 | [downstream](docs/measurements/downstream-2026-08-14.json) |
-| Hassasiyet, belleği gecikmeyle monoton biçimde takas ediyor | Kanıtlandı, motor izole | [fused attention](docs/measurements/v040-fused-attention-benchmark.json) |
-| ARGUS altındaki runtime'dan hızlıdır | **Hayır**, ölçülen tek iş yükünde: 4K prefill stock süresinin 2,12 katı (GPU-resident) ve 7,42 katı (policy açık) | [v0.6, 4K](#v06-ilk-çalışma-noktası-4k) |
-| İsteğe bağlı placement policy sayfaları tier bütçeleri içinde terfi ettirir | 4K'da kanıtlandı; policy açıkken staged ve resident yollar aynı policy kararlarını verir | [residency census](docs/measurements/v060-residency-census-2026-09-18.md), [mixed resident](docs/measurements/v060-mixed-resident-2026-09-18.md) |
-| GPU-resident CUDA attention staged referansla bit düzeyinde aynıdır | Kanıtlandı (float-vektör eşitliği, zorlayıcı maskeler, mutation kontrollü) | [lane-per-cell kernel](docs/measurements/v060-kernel-cells-2026-09-18.md) |
-| 262K'da uzun bağlam throughput'u | **Ölçülmedi**, ertelendi | [v0.6 planı](plans/argus-v0.6.0.md) |
-| INT4, INT2, 1-bit veya JL katmanlarında kalite | **Ölçülmedi** | yalnız FP8'e ulaşıldı, bkz. [Kalite](#kalite) |
+| llama.cpp'de KV ayırma, yazma ve attention okumaları ARGUS'a ait | Kanıtlandı | [host ownership](docs/measurements/v050-llama-host-ownership-2026-09-15.json) |
+| Her ARGUS attention yolu kendi staged referansıyla bit-exact | Kanıtlandı: float vektör eşitliği, adversarial mask'ler, mutation kontrolü; 4K çıktı hash'i her modda `a152ed56` | [v0.7 planı](plans/argus-v0.7.0.md) |
+| Çıktı stock llama.cpp ile byte-byte aynı | **Sadece aritmetik aynıyken.** v0.5 UI-Mate koşusunda kanıtlandı; stock'un tensor-core FlashAttention kullandığı v0.7 4K benchmark'ında **aynı değil** | [UI-Mate parity](docs/measurements/v050-ui-mate-reference-parity-2026-09-16.json), [not](#stock-karşılaştırmasını-okumak) |
+| KV sayfaları GPU ↔ pinned ↔ pageable ↔ disk arasında kaynağı koruyarak taşınır | Kanıtlandı | [CUDA mechanism](docs/measurements/v050-cuda-mechanism-2026-09-16.json) |
+| Placement policy kararları attention yolundan bağımsız, birebir aynı | Kanıtlandı: staged, resident ve sayfa tablosu yollarında; 4 MiB ve 256 KiB bütçelerde | [E6](docs/measurements/v070-e6-policy-logic-2026-09-25.md), [E10](plans/argus-v0.7.0.md) |
+| 4K prefill, stock'a göre | **Daha yavaş:** 1.29x (GPU-control), 1.36x (policy-on) | [final baseline](docs/measurements/v070-e10-2026-09-26/) |
+| 4K decode, stock'a göre | **Daha hızlı:** 55.6 / 48.2, stock 37.5 tok/s | [final baseline](docs/measurements/v070-e10-2026-09-26/) |
+| GPU bütçesinden büyük KV | Çalışıyor ama diske bağlı: 48 MiB KV için 2 MiB GPU → 47.6 s prefill, 1.0 tok/s | [E6](docs/measurements/v070-e6-policy-logic-2026-09-25.md) |
+| Desteklenmeyen modeller llama.cpp'nin kendi KV cache'ine düşer | Kanıtlandı: `-np 2` açılıyor ve cevap veriyor | `tests/test_native_llama_paged.py` |
+| 262K'da uzun bağlam throughput'u | **Ölçülmedi** | — |
+| Başka model, GPU ve bağlam uzunlukları | **Ölçülmedi** | — |
+| INT4, INT2, 1-bit veya JL katmanlarında kalite (HuggingFace yolu) | **Ölçülmedi**; sadece FP8'e ulaşıldı | [Kalite](#kalite-huggingface-yolu) |
 
-Geliştirme makinesinde yerel suite: **401 passed, 3 skipped**. Yukarıdaki CI
-rozeti yalnız paketleme ve depo hijyenini kapsar — barındırılan runner'larda
-CUDA cihazı yoktur, dolayısıyla yeşil rozet "paket doğru dosyaları gönderiyor"
-demektir, "ARGUS çalışıyor" değil.
+Bu sürüm için geliştirme makinesindeki yerel test sonuçları:
+- Python: **382 geçti, 6 atlandı**
+- native llama.cpp, CUDA build'i: **18 geçti** (quantized KV yaşam döngüsü
+  kontrolleri dahil)
+- native, CPU build'i: **11 geçti, 7 atlandı** (atlananlar sadece CUDA'ya özgü
+  kontroller)
+
+CI rozeti sadece paketlemeyi ve depo hijyenini kapsar. Hosted runner'larda CUDA
+cihazı yoktur; yeşil rozet ARGUS'un çalıştığını değil, paketin doğru dosyaları
+içerdiğini gösterir.
 
 ## ARGUS ne değildir
 
-- **Inference server değildir.** Sampling, batching, API serving ve model
-  yükleme runtime'da kalır. ARGUS KV belleğini yönetir.
-- **Hızlandırma değildir.** Bu depoda ARGUS'un altındaki runtime'dan hızlı
-  decode ettiğini gösteren hiçbir ölçüm yoktur. v0.5 sayıları maliyeti gösterir.
-- **Sıkıştırma benchmark'ı değildir.** Codec oranları depolama gerçeğidir, model
-  kalitesini kanıtlamaz. Yalnız FP8 katmanının downstream kanıtı vardır.
+- **Bir inference sunucusu değildir.** Sampling, batching, API sunumu ve model
+  yükleme runtime'da kalır; ARGUS KV belleğini yönetir.
+- **Genel bir hızlandırıcı değildir.** Ölçülen tek iş yükünde ARGUS prefill'i
+  stock'tan hâlâ yavaş, decode'u ise hızlı. İkisi de o iş yükünün ötesinde iddia
+  edilmez.
+- **Varsayılan olarak bir quantizer değildir.** llama.cpp yolunda KV, GGML
+  codec'inde kalır; CUDA yolu için F16. Sayfa bazında karışık hassasiyet sadece
+  HuggingFace araştırma yolunda vardır ve kalite kanıtı yalnızca FP8 içindir.
+- **Kalıcı depolama değildir.** Disk kopyası unlink edilmiş bir `O_DIRECT`
+  dosyasında durur; süreç kapanınca hiçbir şey kalmaz. "Doğrulanmış yedek", bir
+  sayfanın tek bir süreç içinde demote edilip geri okunabildiği kopyadır.
+
+---
 
 ## Kurulum
 
 ```bash
-pip install torch                                        # önce import edilebilir olmalı
-pip install --no-build-isolation argus-cache             # çekirdek çalışma zamanı
+pip install torch                                        # önceden import edilebilir olmalı
+pip install --no-build-isolation argus-cache             # Python runtime + native eklenti
 pip install --no-build-isolation "argus-cache[gateway]"  # + Anthropic Messages gateway
 ```
 
-ARGUS kaynak dağıtımı olarak gelir ve CUDA eklentisini sizin makinenizde derler;
-bu yüzden CUDA destekli bir PyTorch, CUDA toolkit ve C++17 derleyicisi önceden
-kurulu olmalıdır. Hazır wheel yoktur: tek bir PyTorch ABI ve CUDA sürümüne göre
-derlenmiş ikili, kurulumların çoğu için yanlış olurdu.
+ARGUS kaynak dağıtımı (sdist) olarak gelir ve CUDA eklentisini sizin makinenizde
+derler. Bu yüzden CUDA destekli PyTorch, CUDA toolkit ve bir C++17 derleyicisi
+önceden kurulu olmalıdır. Hazır wheel yoktur: tek bir PyTorch ABI'si ve CUDA
+sürümüne göre derlenmiş bir binary çoğu kurulum için yanlış olur.
 
-`--no-build-isolation` opsiyonel değil, zorunludur. Build, eklentiyi
-yapılandırmak için kurulu `torch`'unuzu okur; pip'in izole build'i onu gizler.
-pip'in geçici ortama indirdiği bir torch'a karşı derlemek hata vermekten daha
-kötü olurdu — eklenti, runtime'ınızda olmayan bir ABI için derlenirdi.
+`--no-build-isolation` zorunludur. Build, eklentiyi yapılandırmak için kurulu
+`torch`'unuzu okur; pip'in izole build'i onu gizler ve eklenti, runtime'ınızda
+olmayan bir ABI için derlenir.
 
-ARGUS'un kendisi üzerinde çalışmak için:
+llama.cpp entegrasyonu bir pip özelliği **değildir**. Kaynakları paketin içindedir
+(`argus_cache/csrc/ggml_*`) ve aşağıda anlatıldığı gibi llama.cpp'ye derlenir.
+ARGUS üzerinde geliştirme yapmak için:
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
-pip install -U pip && pip install -e .
+pip install -U pip && pip install -e . --no-build-isolation
 python setup.py build_ext --inplace
 ```
 
+---
+
 ## llama.cpp ile kullanım
 
-En derin entegrasyon ve v0.5'in üzerinde kapandığı yol. KV katmanları, zorunlu
-disk, metadata ve staging bütçeleriyle ARGUS'a ait bir `O_DIRECT` store'da
-tahsis edilir; sayfa yazımları descriptor taşınmadan önce checksum ile
-doğrulanır; attention sayfaları blok blok, sınırlı tek derinlikli prefetch ile
-okur.
+### 1. llama.cpp'yi ARGUS ile derlemek
+
+ARGUS, sabitlenmiş tek bir llama.cpp revizyonunu patch'ler. Revizyon ve tam
+sözleşme için
+[`integrations/llama.cpp/README.md`](integrations/llama.cpp/README.md)'ye bakın.
+Revizyonu doğrulayın, iki patch'i sırayla uygulayın ve CMake'i ARGUS kaynaklarına
+yönlendirin:
 
 ```bash
-export ARGUS_KV_DIR=/hizli/depolamada/bir/yol
-export ARGUS_KV_MAX_BYTES=$((1 << 30))     # disk bütçesi
-export ARGUS_KV_STAGING_BYTES=$((4 << 20)) # staging bütçesi, direct disk KV'yi açar
-llama-server -m model.gguf -c 4096 -fa on -ctk f16 -ctv f16
+git -C /path/to/llama.cpp apply --check /path/to/ARGUS/integrations/llama.cpp/host-kv.patch
+git -C /path/to/llama.cpp apply         /path/to/ARGUS/integrations/llama.cpp/host-kv.patch
+git -C /path/to/llama.cpp apply --check /path/to/ARGUS/integrations/llama.cpp/cuda-kv.patch
+git -C /path/to/llama.cpp apply         /path/to/ARGUS/integrations/llama.cpp/cuda-kv.patch
+cmake -S /path/to/llama.cpp -B /path/to/llama.cpp/build \
+  -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=86 \
+  -DARGUS_CORE_DIR=/path/to/ARGUS/argus_cache/csrc
+cmake --build /path/to/llama.cpp/build --target llama-server -j
 ```
 
-Tanımlanmazsa ikili stock yolu izler. Bütçeler katıdır: aşım sessizce büyümek
-yerine açık hata verir. Kurulum, patch ve tam sözleşme:
-[`integrations/llama.cpp/README.md`](integrations/llama.cpp/README.md).
+- `CMAKE_CUDA_ARCHITECTURES=86`, test edilen RTX 30 serisinin değeridir; kendi
+  GPU'nuzunkini kullanın.
+- Sadece CPU'lu bir build (`-DGGML_CUDA=OFF`), CUDA attention olmadan host ve
+  doğrudan disk modlarını alır.
+- Hiçbir `ARGUS_*` değişkeni ayarlı değilse patch'lenmiş binary aynen stock
+  llama.cpp gibi davranır.
+
+### 2. Mod seçimi
+
+Her şey `llama-server`'ın (ya da patch'lenmiş `libllama`'yı kullanan herhangi bir
+programın) okuduğu ortam değişkenleriyle ayarlanır. Bütçeler kesin sınırdır; aşılırsa
+sessizce büyümek yerine açık bir hatayla durur.
+
+| Mod | Ne için | Gerekli ayarlar | llama-server bayrakları |
+|---|---|---|---|
+| **Eşlenmiş host KV** | KV dosya destekli host belleğinde; attention llama.cpp'nin | `ARGUS_KV_DIR`, `ARGUS_KV_MAX_BYTES` | `-nkvo` |
+| **CPU blok attention** | Eşlenmiş KV üzerinde ARGUS CPU attention | + `ARGUS_KV_RESIDENT_BYTES` | `-nkvo -fa on` |
+| **Doğrudan disk KV** | KV sadece `O_DIRECT` diskte, doğrulanmış sayfalar, CPU attention | + `ARGUS_KV_STAGING_BYTES` | `-nkvo -fa on` |
+| **CUDA, policy kapalı** | CUDA attention'lı referans disk yolu (her okuma diskten) | + `ARGUS_KV_GPU_BYTES`, `ARGUS_KV_PINNED_BYTES` | `-nkvo -fa on -ctk f16 -ctv f16` |
+| **CUDA, policy açık** (ürün modu) | Sayfalar bütçeler içinde GPU / pinned / RAM / disk arasında yerleşir | + `ARGUS_KV_POLICY=on` (isteğe bağlı `ARGUS_KV_RAM_BYTES`) | aynı |
+| **GPU-control** (teşhis) | Bütün KV GPU'da, hiç disk yok | + `ARGUS_KV_GPU_CONTROL=1`, policy kapalı | aynı |
+
+v0.7 ölçümlerinde kullanılan eksiksiz bir policy-on örneği (4K bağlam,
+Qwen2.5-0.5B):
+
+```bash
+export ARGUS_KV_DIR=/fiziksel/diskte/bir/dizin    # tmpfs değil: sayfalar tahliye edilebilmeli
+export ARGUS_KV_MAX_BYTES=$((64 << 30))           # KV yedeği için disk baytı (KV'nin 2 katı ayrılır)
+export ARGUS_KV_RESIDENT_BYTES=$((4 << 20))       # sayfa tanımlayıcı metadata bütçesi
+export ARGUS_KV_STAGING_BYTES=$((4 << 20))        # ARGUS'un bütün host scratch'i, bounce buffer'lar, worker stack'leri
+export ARGUS_KV_GPU_BYTES=$((64 << 20))           # GPU katmanı bütçesi (KV sayfaları + attention scratch)
+export ARGUS_KV_PINNED_BYTES=$((64 << 20))        # pinned RAM katmanı bütçesi
+export ARGUS_KV_POLICY=on
+llama-server -m qwen2.5-0.5b-instruct-q4_k_m.gguf -c 4096 -np 1 -ngl 99 \
+  -fa on -nkvo -ctk f16 -ctv f16 -ub 64
+```
+
+Rejimi GPU bütçesi belirler:
+- **Bütün KV sığıyorsa** (burada 48 MiB), ARGUS en hızlı yolunu kullanır.
+- **Sığmıyorsa**, sayfalar pinned RAM, RAM ya da diskte durur ve okumalar diske
+  bağlı hale gelir ([sonuçlar](#v07-sonuçları)).
+
+### 3. Bütün ayarlar
+
+| Değişken | Değerler | Anlamı |
+|---|---|---|
+| `ARGUS_KV_DIR` | dizin | ARGUS'u açar. Yedek dosyalar burada oluşturulur (ve unlink edilir). Fiziksel bir dosya sistemi kullanın. |
+| `ARGUS_KV_MAX_BYTES` | bayt | KV yedeği için disk / eşleme bütçesi. Doğrudan disk modu her sayfa için iki slot ayırır (KV'nin 2 katı). |
+| `ARGUS_KV_RESIDENT_BYTES` | bayt | Eşlenmiş modda CPU blok attention'ı seçen resident hedefi. Disk modlarında sayfa tanımlayıcıları ve resident handle'lar için metadata bütçesi (KV verisi değil). |
+| `ARGUS_KV_STAGING_BYTES` | bayt | Doğrudan disk KV'yi açar. Süreç genelinde ARGUS'un her host scratch buffer'ını, bounce sayfasını, prefetch/flusher stack'ini ve attention scratch'ini sınırlar. En az bir kodlanmış satır artı bir sayfa almalı. |
+| `ARGUS_KV_BLOCK_CELLS` | hücre (varsayılan 256) | CPU blok attention'ın blok boyu. |
+| `ARGUS_KV_GPU_BYTES` | bayt | Disk modlarında CUDA attention'ı açar. GPU KV sayfaları ve ARGUS'un GPU scratch'i için kesin bütçe; llama.cpp'nin kendi VRAM'i için bir sınır değil. |
+| `ARGUS_KV_PINNED_BYTES` | bayt | GPU katmanıyla birlikte zorunlu. Pinned RAM katmanı bütçesi. |
+| `ARGUS_KV_RAM_BYTES` | bayt (varsayılan: ayarsız = katman kapalı) | Policy için pageable RAM katmanı bütçesi. |
+| `ARGUS_KV_POLICY` | `off` (varsayılan) / `on` | Placement policy. Bilinmeyen değer hata verir. |
+| `ARGUS_KV_GPU_CONTROL` | `1` / ayarsız | Teşhis amaçlı, GPU'nun tek sahip olduğu store. Disk yedeği ve taşıma yok; policy kapalı olmalı. |
+| `ARGUS_KV_STATS_PATH` | dosya | JSON istatistikler (bütçeler, tepe değerler, baytlar, policy sayaçları, profil scope'ları); attention çağrılarından sonra atomik olarak yeniden yazılır. |
+| `ARGUS_KV_PROFILE` | `cpu` / `1` | `cpu`: CPU scope'ları ve sayaçlar; `1`: bunlara ek olarak CUDA event zamanlaması. Profil zamanlamayı değiştirir; sadece aynı binary'nin profilsiz koşularıyla karşılaştırın. |
+| `ARGUS_KV_ATTENTION_PATH` | `cells-v2` (varsayılan), `cells-kc`, `cells-mlp`, `cells`, `batched`, `direct`, `staged` | A/B kontrolleri için referans attention yolları. Hepsi `staged` ile bit-exact. |
+| `ARGUS_KV_CHECKSUM` | `crc32c` (varsayılan) / `fnv` | Sayfa özeti (digest). İkisi de kazara bozulmayı yakalar; hiçbiri bir kimlik doğrulama kontrolü değildir. |
+| `ARGUS_KV_PAGE_COMMIT` | `run` (varsayılan) / `page` | GPU-control'de host yazımları: bütün sayfa dizileri ya da sayfa sayfa (referans). |
+| `ARGUS_KV_NO_OVERLAP` | ayarlı / ayarsız | Staged attention: transfer ve hesaplamayı üst üste bindirmek yerine tile'ları sırayla işler. |
+
+### 4. Çalışma sırasında ne olur
+
+- **Yazma.** Yeni K/V satırları GPU'da, CPU kodlamasıyla byte-byte aynı yazılır
+  (F32→F16, round-to-nearest-even).
+  - **Policy-on** store'larda sayfa *dirty* olur. Arka plandaki flusher onu
+    pasif disk slotuna yayınlar: yazar, geri okur, checksum ile doğrular, sonra
+    yayınlar.
+  - **GPU-control**'de yazım tamamen cihazda çözülür.
+  - GPU bütçesi sayfaları alamazsa yazım değişmeden host yoluna düşer.
+  - Policy-off host yolunda kalır, çünkü referans odur.
+- **Okuma.** Bir K/V görünümündeki yazılmış bütün sayfalar GPU'daysa attention
+  cihazdaki bir sayfa tablosunu okur ve beklemeden döner. Değilse çağrı sayfaları
+  ödünç alır, cold sayfaları çağrıya özel scratch'e kopyalar ve kernel'in bitmesini
+  bekler. İkisi de `staged` ile bit-exact.
+- **Yerleşim (policy-on).** Her attention çağrısından sonra en az iki kez okunmuş
+  sayfalar bütçeler içinde önce GPU'ya, sonra pinned'e, sonra RAM'e terfi eder.
+  Bir katman dolduğunda daha az okunan sayfalar doğrulanmış disk kopyalarına
+  demote edilir. Attention scratch payı boş tutulur; terfi onunla çatışıp churn
+  üretmez.
+- **Desteklenmeyen modeller.** Model MLA, attention sinks, KQ bias, soft-capping,
+  ALiBi ya da Grok attention kullanıyorsa, veya bağlamda birden fazla KV stream
+  varsa (unified cache olmadan `-np > 1`), ARGUS KV cache'i llama.cpp'ye bırakır ve
+  `ARGUS KV disabled (<özellik> is unsupported)` loglar. Yanlış yapılandırmalar
+  (eksik `-nkvo`, `-fa on` olmadan disk KV) açılmayı yine reddeder.
+- **Çökme semantiği.** Yedek dosya unlink edildiği için KV süreçten uzun yaşamaz.
+  Süreç içinde, dirty bir sayfanın disk slotu flusher (ya da önce flush yapan bir
+  demotion) onu yayınlayana kadar GPU kopyasının gerisinde kalır. Yayınlanan her
+  slot doğrulanır ve yenisi doğrulanana kadar önceki slot korunur.
+
+### 5. Gözlemlenebilirlik
+
+`ARGUS_KV_STATS_PATH` ayarlıysa istatistik dosyası şunları raporlar:
+- **bütçeler ve tepe değerler:** `peak_gpu_bytes`, `peak_pinned_bytes`,
+  `peak_staging_bytes` vb.;
+- **disk trafiği:** `read_bytes`, `written_bytes`; ayrıca `committed_pages`;
+- **policy sayaçları:** `policy_promotions`, `policy_demotions`,
+  `policy_rejected`, `policy_nanoseconds`;
+- **resident yol kararları:** her attention çağrısının neden resident yolu
+  kullandığı ya da kullanmadığı (`resident_*_accepted`, `resident_*_reject_*`,
+  `resident_*_cold_pages`).
+
+`ARGUS_KV_PROFILE` ayarlıysa faz başına (prefill / decode) kapsayıcı ve hariç CPU
+scope'ları eklenir; `1` ile ayrıca CUDA kernel ve kopya süreleri.
+
+Benchmark aracı `benchmarks/bench_llama_paged_context.py` bütün modları
+(`stock-host-kv`, `argus-cuda-off`, `argus-cuda-on`, `argus-cuda-control`, …)
+çalıştırır. Bağlama gizlenmiş bir bilgiyi (needle) kontrol eder, her tekrarda
+sunucuyu sıfırdan başlatır ve yukarıdaki istatistikleri toplar.
+
+---
 
 ## HuggingFace ile kullanım
 
+v0.4'ten kalan araştırma yolu: ARGUS, modelin KV cache'ini soğuk sayfaları
+quantize edebilen sayfalı ve katmanlı bir cache ile değiştirir.
+
 ```python
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM
 from argus_cache import AdaptiveCachePolicy, patch_model_with_argus
 
 model = AutoModelForCausalLM.from_pretrained(
@@ -118,307 +278,272 @@ model = patch_model_with_argus(
     sink_tokens=4,
     activation_policy=AdaptiveCachePolicy(
         mode="balanced",
-        expected_tokens=16_448,  # prompt + istenen maksimum çıktı
+        expected_tokens=16_448,  # prompt + istenen en fazla çıktı
     ),
     pipeline_profile="balanced",
 )
 ```
 
-`page_size=1024` test makinesinde ölçülen en iyi gecikme/bellek dengesidir,
-evrensel bir tavsiye değildir. Her model, GPU, context dağılımı ve servis
-hedefi için yeniden ölçün.
+- `page_size=1024` test makinesindeki en iyi gecikme/bellek dengesiydi, evrensel
+  bir öneri değil.
+- Sayfa yaşam döngüsü olayları bellekte (sınırlı sayıda) tutulur;
+  `ARGUS_TRACE_PATH=/yol/trace.jsonl` ile ayrıca JSON satırları olarak yazılır.
+- `ARGUS_LOG_LEVEL` logger seviyesini ayarlar.
 
 ---
 
-# Kanıtlar
+## v0.7 sonuçları
 
-## llama.cpp KV sahipliği (v0.5)
+Ölçüm koşulları:
+- **Model ve iş yükü:** Qwen2.5-0.5B-Instruct Q4_K_M, F16 KV, 4096 bağlam,
+  4016 token'lık prompt, 16 üretilen token, ubatch 64.
+- **Donanım ve yapılandırma:** RTX 3050 Ti Laptop (4 GB); her modda KV host'ta
+  (`-nkvo`); GPU/pinned bütçeleri 64 MiB.
+- **Yöntem:** profiler kapalı, her tekrarda yeni sunucu, bir ısınma; değerler
+  median (min–max).
 
-**Sahiplik gerçektir, yüklenmiş bir kütüphane değil.** Sahiplik iddia
-edilmeden önce tahsis ve page ID kayıtları, write/read sayaçları, attention'ın
-bu sayfaları tükettiğine dair iz ve kontrollü backend kapatma testi gerekir;
-süreç haritalarında bir kütüphanenin görünmesi hiçbir şey kanıtlamaz. Gerçek bir
-CPU model koşusunda: altı attention katmanı, 32.000 vocabulary logiti, prefill
-ve state restore sonrası sekiz decode adımında maksimum logit farkı **0**,
-1.769.472 byte tahsis ve teardown sonrası 0.
-Dosya: [`v050-llama-host-ownership-2026-09-15.json`](docs/measurements/v050-llama-host-ownership-2026-09-15.json).
+Final baseline `17ad9c2` commit'inde alındı ([veri](docs/measurements/v070-e10-2026-09-26/)).
 
-**Çıktı stock ile birebir aynıdır.** `1cb9e1e4` revision'ındaki sabitlenmiş
-upstream UI-Mate mesaj kurucusu ve parser'ıyla, hash'i aynı payload altında,
-stock llama.cpp ve ARGUS 9B çok kipli bir modelde CUDA attention ile aynı
-reasoning metnini, aynı koordinatı, aynı parse edilmiş eylemi ve aynı 119
-completion token'ı üretti.
-Dosya: [`v050-ui-mate-reference-parity-2026-09-16.json`](docs/measurements/v050-ui-mate-reference-parity-2026-09-16.json).
+| mod | prefill | stock'a göre | decode | çıktı hash'i |
+|---|---:|---:|---:|---|
+| stock llama.cpp, host KV (tensor-core FlashAttention) | 1.336 s (1.331–1.341) | 1.00x | 37.5 tok/s | `007ddc77` |
+| ARGUS, GPU-control (teşhis, bütün KV GPU'da) | 1.719 s (1.666–1.759) | 1.29x | 55.6 tok/s | `a152ed56` |
+| ARGUS, policy-on (GPU/pinned/RAM/disk) | 1.821 s (1.814–1.826) | 1.36x | 48.2 tok/s | `a152ed56` |
 
-**Birebirlik sıkıştırma ve restore altında da korunur.** Qwen2.5-0.5B, `q8_0` ve
-`q4_0` KV, 4 MiB staging, 1 MiB resident: crop ve state restore dahil 19 adımda
-attention ve logit farkı 0, peak staging 1,27 MiB.
+Ölçülen request'teki yerleşim sayaçları:
+- **Policy-on:** 0 terfi, 0 demote, 0 ret, 12,768 commit edilmiş sayfa, 0 cold
+  sayfa.
+- **GPU-control:** hiç policy etkinliği ve disk trafiği yok.
 
-**Migration kaynağı korur.** GPU, pinned RAM, pageable RAM ve disk ayrı
-bütçelidir. Taşıma, kaynağı bırakmadan önce hedefi ayırır ve doğrular;
-başarısız transferler ve eski revision'lar yayımlanmış sayfayı korur. 48/64/256
-head boyutları için, Q8 ve Q4 encoded byte'lar dört yerleşim arasında
-değişmeden taşınarak doğrulandı.
-Dosya: [`v050-cuda-mechanism-2026-09-16.json`](docs/measurements/v050-cuda-mechanism-2026-09-16.json).
+**KV, GPU bütçesine sığmadığında** (aynı iş yükü; 48 MiB KV için 2 MiB GPU ve 2 MiB
+pinned katmanı):
+- 47.6 s prefill, 1.0 tok/s decode,
+- request başına 36 terfi, 34 demote ve diskten 2.1 GB okuma.
 
-## Neden hız sonucu yok
+ARGUS'un var olma sebebi bu rejimdir: bağlam hayatta kalır. Ama diske bağlıdır ve
+çok daha yavaştır.
 
-v0.5 **yalnız mekanizma** sağlar. Servis yolunda hiçbir şey sayfayı terfi
-ettirmez — `argus_disk_move_page` yalnız testlerden çağrılır — dolayısıyla her
-attention okuması diske gider. Yukarıdaki UI-Mate koşusunda:
+## v0.7 nasıl geldi
 
-| | stock | ARGUS |
-|---|---:|---:|
-| prefill | 89,34 ms/token | 151,31 ms/token |
-| decode | 165,58 ms/token | 2915,31 ms/token |
-| tek istek | 260,4 s | 752,0 s |
+GPU-control prefill; aynı iş yükü, her adım ayrı ölçülmüş bir deney
+([plan](plans/argus-v0.7.0.md)):
 
-Tek istek diskten **14,98 GB** okudu. Bağlayıcı kısıt bütçeler değildi: 4 MiB
-GPU ve 4 MiB pinned verildi, yalnız ~0,5 MiB kullanıldı, çünkü onları
-kullanmaya karar veren bir şey yok. Ayrıca `ARGUS_KV_RESIDENT_BYTES` bir KV
-çalışma kümesini değil sayfa descriptor tablosunu bütçeler — 256 MiB KV için
-65.536 descriptor.
+| adım | değişiklik | prefill | decode |
+|---|---|---:|---:|
+| v0.6.0 başlangıcı | | 2.778 s (2.09x) | 8.0 tok/s |
+| E1 | exact kernel'de birleştirilmiş (coalesced) K satırı yüklemeleri | 2.709 s | |
+| E2 | donanım CRC32C özetleri, bütün sayfa commit'leri | 2.406 s | 8.1 |
+| E4 | V'nin `half2` olarak yüklenmesi | 2.328 s | |
+| E5 | tek token'lı decode'un resident yola alınması | | **39.3** |
+| E7a | KV yazımlarının GPU'da yapılması | ~1.98–2.03 s | 43 |
+| E8 | yazımların cihazda çözülmesi, host'a gidip gelme yok | −%3.5 | |
+| E9 | attention'ın store sayfa tablosunu beklemeden okuması | **1.68 s** | 55 |
 
-**Bu, placement policy'sinin yokluğunun maliyetidir.** Ayarlanmış bir
-konfigürasyon değil, kısılmış bir konfigürasyon değil ve bir çalışma noktası
-değil. v0.6 policy'yi ve resident attention yolunu ekledi; ilk çalışma noktası
-ölçümü aşağıdadır.
+Policy-on'daki gelişme:
+- 9.2 s'den (v0.6/E2) 2.0 s'ye indi: yazımlar GPU'ya taşındı ve disk yazımı arka
+  plana alındı (E7b).
+- Ardından 1.82 s'ye indi: attention sayfa tablosunu beklemeden okumaya başladı
+  (E10).
 
-## v0.6: ilk çalışma noktası (4K)
+Yolda denetim ve ölçümle bulunan iki placement-policy hatası düzeltildi (E6):
+- yeniden yazılan bir sayfa artık terfisini kaybetmiyor,
+- terfi artık attention scratch payını doldurmuyor.
 
-Qwen2.5-0.5B-Instruct Q4_K_M, F16 KV, 4096 context, 4016 token prompt, 16 üretilen
-token, ubatch 64, RTX 3050 Ti Laptop (4 GB); her modda llama.cpp KV'si host'ta
-(`-nkvo`). Profiler kapalı, dönüşümlü sırada üç tekrar; median (min–max). Çıktı
-ARGUS modları ve yolları arasında aynıdır.
+Kazancın büyük kısmı kernel'den değil, attention'ın etrafındaki veri yolundan
+geldi: beklemeler, host'a gidip gelmeler, CPU'da kodlama. Exact kernel'in kendisi
+prefill'in hâlâ yaklaşık 1.1 s'sini alıyor; stock'un FlashAttention'ı için bu süre
+yaklaşık 0.07 s.
 
-| mod | prefill | stock'a göre | decode |
-|---|---:|---:|---:|
-| stock llama.cpp, host KV | 1,332 s (1,326–1,335) | 1,00x | 37,3 tok/s |
-| ARGUS, tüm KV GPU'da (tanısal kontrol) | 2,821 s (2,779–2,873) | 2,12x | 8,0 tok/s |
-| ARGUS, policy açık (GPU + disk yerleşimi) | 9,888 s (9,779–9,929) | 7,42x | 6,4 tok/s |
+## Stock karşılaştırmasını okumak
 
-v0.6 boyunca aynı iş yükündeki değişim (GPU-resident kontrol prefill'i): staged
-skaler attention 40,9 s → çağrı başına tek batched launch 12,8 s → D=64
-özelleştirmesi 5,5 s → lane-per-cell exact kernel 3,7 s → dalsız value döngüsü
-2,8 s. Policy açıkken süre, yeni yazılmış tek bir cold sayfanın bütün çağrıyı
-staged yola düşürmesi engellenince 48,3 s'den 9,9 s'ye indi. Her adım staged
-kernel ile float-vektör eşitliğini korudu ve nedeni ölçümle doğrulandı (son iki
-kernel adımı için Nsight Compute).
-
-Bunun göstermedikleri: decode değişmedi (hâlâ staged yol, stock'tan 4,7 kat
-yavaş); policy açıkken kalan farkın çoğu doğrulamalı disk write-through'dan
-geliyor; 4K üstü, başka model veya GPU ölçülmedi. Ayrıntılar:
-[checkpoint](docs/measurements/v060-checkpoint-2026-09-18.md),
-[kernel adımları](docs/measurements/v060-kernel-cells-mlp-2026-09-18.md),
-[Nsight Compute atfı](docs/measurements/v060-ncu-cells-2026-09-18.md).
-
-## HuggingFace araştırma yolu (v0.4)
-
-Projenin nereden geldiğine dair tarihsel bağlam. Qwen2.5-0.5B-Instruct,
-RTX 3050 Ti Laptop (4 GB), FP16, batch 1, 64 üretilen token, üç ölçülen tekrar,
-bir ısınma, 1024 token'lık sayfalar.
-
-| context | baseline VRAM | ARGUS VRAM | VRAM değişimi | baseline TPOT | ARGUS TPOT |
-|---:|---:|---:|---:|---:|---:|
-| 512 | 982,2 MiB | 988,2 MiB | +%0,6 | 18,62 ms | 28,69 ms |
-| 1.024 | 1007,1 MiB | 1007,1 MiB | %0,0 | 18,55 ms | 30,21 ms |
-| 2.048 | 1056,8 MiB | 1056,9 MiB | %0,0 | 19,24 ms | 30,85 ms |
-| 4.096 | 1149,4 MiB | 1137,4 MiB | -%1,0 | 19,14 ms | 40,21 ms |
-| 8.192 | 1340,4 MiB | 1280,5 MiB | **-%4,5** | 17,85 ms | **52,51 ms** |
-| 16.384 | 1722,5 MiB | 1590,6 MiB | **-%7,7** | 18,84 ms | **79,78 ms** |
-
-16K'da TTFT baseline için 1,819 s, ARGUS için 3,992 s. Bunun gösterdiği ve
-göstermediği:
-
-- VRAM tasarrufu gerçektir ve bu deneyde context uzunluğuyla büyür.
-- Çözülmemiş sorun decode gecikmesidir: 16K'da TPOT baseline'ın 4,2 katı.
-- **Hiçbir test satırında baseline OOM olurken ARGUS ayakta kalmıyor.** OOM
-  önleme ve daha geniş kullanılabilir context penceresi hipotezdir, sonuç değil.
-
-Dosya: [`downstream-2026-08-14.json`](docs/measurements/downstream-2026-08-14.json).
-Analiz: [`docs/findings-2026-08-14.md`](docs/findings-2026-08-14.md).
-
-## Hassasiyet–gecikme takası, motor izole
-
-Structure-of-Arrays sayfa tablosu, *hassasiyeti* (`ACTIVE_FP16`, `GGML_Q8_0`,
-`GGML_Q4_0`) *yerleşimden* (`GPU_DEVICE`, `HOST_PINNED`, `HOST_PAGEABLE`) tek
-bir bitişik descriptor tablosunda ayırır. `DirectPagedAttentionEngine` bunun
-üzerinde tam bir tile-by-tile online-softmax özyinelemesi çalıştırır: context
-boyutunda FP16 KV tensörü hiç oluşturulmaz ve yeniden kurulum tek bir sayfa
-tile'ıyla sınırlanır.
-
-RTX 3050 Ti Laptop üzerinde Qwen benzeri geometriyle ölçüldü (24 query head,
-4 KV head, head_dim 256, sayfa 128):
-
-| context | ACTIVE_FP16 | GGML_Q8_0 | GGML_Q4_0 |
-|---:|---|---|---|
-| 1.024 | 1,98 ms / 12,15 MiB | 3,15 ms / 10,28 MiB | 4,24 ms / 9,28 MiB |
-| 4.096 | 7,51 ms / 24,15 MiB | 11,43 ms / 16,65 MiB | 15,86 ms / 12,65 MiB |
-| 8.192 | 14,71 ms / 40,15 MiB | 22,55 ms / 25,15 MiB | 31,61 ms / 17,15 MiB |
-| 16.384 | 29,26 ms / 72,15 MiB | 44,97 ms / 44,15 MiB | 62,77 ms / 26,15 MiB |
-| 32.768 | 58,48 ms / 136,16 MiB | 90,15 ms / 76,16 MiB | 125,25 ms / 44,16 MiB |
-
-Takas monoton ve diktir: 32K'da q4_0 context'i 44,16 MiB'de tutuyor, FP16'nın
-136,16 MiB'ine karşı — 3,1 kat az bellek, 2,14 kat gecikme. Bu yalnız motorun
-kendisidir. **HuggingFace decode yoluna bağlanmış değildir**, dolayısıyla bu
-sayılar hiçbir uçtan uca sonuçta görünmez.
-
-Dosya: [`v040-fused-attention-benchmark.json`](docs/measurements/v040-fused-attention-benchmark.json).
-
-## Kalite
-
-Ölçülen perplexity farkı **-0,0176**, ancak o pasaj uzunluğunda yalnız
-kayıpsıza yakın FP8 katmanına ulaşıldı. Bu, INT4, INT2, 1-bit veya JL
-kalitesini **doğrulamaz** — bu uyarı ölçüm dosyasının kendisinde de yazılıdır.
-q4_0 retrieval probu 31k token'da tek ve bağışlayıcı bir görevdir; kuantize KV
-altında akıl yürütme, kod üretimi ve uzun menzilli tutarlılık ölçülmemiştir.
-
-## Bilerek saklanan bir olumsuz sonuç
-
-Yerel bir llama-server'a karşı 4K/16K/32K/64K A/B taraması (Qwen3.6-35B-A3B,
-q4_0 KV) ARGUS lehine bir kazanç gösterir gibi oldu. **Dosyadaki denetim
-ARGUS'un sürece hiç yüklenmediğini gösteriyor**: `argus_in_llama_server_maps:
-false`, `argus_maps_count: 0` ve her context'te iki kolda byte düzeyinde aynı
-peak VRAM. Ortaya çıkan decode hızı farkı (16K'da 17,66'ya karşı 11,88 tok/s)
-ARGUS'a değil, gateway'in prompt-prefix cache'ine dayanıyor.
-
-Bu koşudan hiçbir ARGUS iddiası çıkarılmıyor. Depoda duruyor çünkü yanlış
-atfedilmiş bir kazanç, tam olarak sorgulanmadan geçip gidecek türden sonuçtur.
-Yanında yayımlanan taramalar (`load-mode-comparison`, `pmin-sweep`,
-`speculative-sweep-n2-n3-n4`) llama.cpp runtime ayarıdır ve öyle etiketlenmiştir.
-
-Dosya: [`argus-ab-cache-comparison-2026-09-04.json`](docs/measurements/argus-ab-cache-comparison-2026-09-04.json).
+- **Farklı aritmetik sözleşmeler.** Buradaki stock llama.cpp, tensor core'larda
+  kendi toplama sırası ve hassasiyetiyle FlashAttention kullanır. ARGUS'un
+  kernel'leri, ARGUS'un staged referansındaki FP32 toplama sırasını bit bit korur:
+  Kategori 1 exactness; yeniden sıralama ve tensor core yok.
+  - İkisi farklı bitler üretir: 16 token'lık çıktıların hash'leri farklıdır
+    (`007ddc77` / `a152ed56`), ama ikisi de needle sorusunu doğru cevaplar.
+  - Hız oranları, aynı hesabın iki uygulamasını değil, iki farklı hesabı
+    karşılaştırır.
+- **Tek iş yükü.** Tek model, tek GPU, tek bağlam uzunluğu; her modda KV host'ta.
+  Buradaki hiçbir şey 32K, 262K, başka bir model ya da başka bir GPU hakkında
+  tahmin yürütmez.
+- **Teşhis ve ürün.** GPU-control her sayfayı disk yedeği olmadan GPU'da tutar;
+  veri yolunun yapabileceğinin üst sınırını çizer. Katmanları gerçekten yöneten
+  mod policy-on'dur.
 
 ---
 
-# Nasıl çalışır
-
-## Mimari
+## Nasıl çalışır
 
 ```text
-runtime (llama.cpp / HuggingFace)
-       |
-       v
-ARGUS KV bellek katmanı
-       |
-       +-- page descriptor tablosu: hassasiyet ve yerleşim bağımsız
-       |
-       +-- bütçeli katmanlar: GPU, pinned RAM, pageable RAM, disk
-       |
-       +-- native C++ sayfa yaşam döngüsü, checksum doğrulamalı yazımlar
-       |
-       +-- sayfaları yerinde okuyan CUDA / CPU attention
+llama.cpp (patch'li)                      HuggingFace modeli
+   |  KV ayırma, set_rows, attention          |  cache değişimi
+   v                                          v
+ARGUS disk store (C++/CUDA)              PagedDynamicKVCache (Python + C++)
+   |- sayfa tanımlayıcıları: içerik / yerleşim revizyonları, checksum'lar
+   |- katmanlar: GPU | pinned | pageable RAM | O_DIRECT disk (sayfa başına 2 doğrulanmış slot)
+   |- placement policy (ggml_kv_policy.cpp), bütçeler store'a ait
+   |- GPU yazımları + arka plan write-back flusher
+   '- attention: cihaz sayfa tablosu (beklemesiz) | ödünç sayfalar | staged referans
 ```
 
-Yönetici ilke şudur: **mantıksal bir KV sayfası, fiziksel yerleşimi ve fiziksel
-hassasiyeti üç ayrı şeydir.** Bir sayfa GPU/FP16, pinned/Q8 veya disk/Q4
-olabilir; GPU, FP16 anlamına gelmez. Sıkıştırma katmanları eklentidir; sabit
-kodlanmış isimlerle değil, yetenekler ve sayısal codec metadata'sıyla seçilir.
-Sahiplik ve genişletme noktaları:
-[`docs/architecture.md`](docs/architecture.md).
+- **Yerleşim ve içerik ayrı revizyon eksenleridir.** Bayt koruyan, doğrulanmış
+  bir taşıma okumaları geçersiz kılmaz; yazma kılar.
+- **Bütçeler store'a aittir.** Policy taşıma önerir; store doğrular, reddeder ve
+  sayar.
+- **Kuyrukta bekleyen GPU işi varken sayfa ömrü.**
+  - Sayfa tablosu girdileri sadece stream sırasıyla yayınlanarak değişir.
+  - Değiştirilen bir GPU sayfası `cudaFree` ile serbest bırakılır; test edilen
+    sürücüde bu çağrı kuyruktaki bütün cihaz işini bekler.
+  - Host'un yerinde yazımları son tablo okumasını bekler.
 
-## Model sözleşmeleri core'un dışında kalır
+  Ayrıntı: [E10 invariant'ları](plans/argus-v0.7.0.md).
+- **Kaynak düzeni** (`argus_cache/csrc/` altında):
+  - `ggml_disk_store.h`: ortak store iç yapıları,
+  - `ggml_disk_buffer.cpp`: store ömrü, GGML buffer, host IO,
+  - `ggml_disk_gpu.cpp`: GPU yerleşimi, yazımlar, write-back, taşıma,
+  - `ggml_cuda_attention.cu`: kernel'ler ve dispatch,
+  - `ggml_kv_policy.cpp`: placement policy,
+  - `ggml_paged_attention.cpp`: CPU attention,
+  - `ggml_host_buffer.cpp`: eşlenmiş mod.
 
-`AttentionAdapter`, `config.model_type` başına native uygunluğu, query
-hazırlığını ve çıktı yerleşimini sahiplenir. Uygulamalar
-`register_attention_adapter()` ile sözleşme ekler; kayıtlı olmayan bir model
-yanlışlıkla native page attention'a girmez ve kendi attention implementasyonunu
-korur.
+HuggingFace yolunun ilkesi şudur: mantıksal bir KV sayfası, fiziksel yerleşimi ve
+fiziksel hassasiyeti üç ayrı şeydir; sıkıştırma katmanları yeteneğe göre seçilen
+eklentilerdir. Ayrıntı: [`docs/architecture.md`](docs/architecture.md).
 
-Tam ve doğrusal attention'ı karıştıran modeller için (örneğin Qwen3.8 Gated
-DeltaNet), `argus_cache/models/hybrid_cache.py` sahipliği açıkça belirtir:
-büyüyen full-attention KV'si ARGUS'undur, doğrusal attention katmanlarının sabit
-boyutlu recurrent ve conv state'i ARGUS'un dokunacağı şey değildir. Her cache
-işleminin çevresinde deterministik state digest'leri doğrulanır ve desteklenmeyen
-bir katman rolü sayfalanmak yerine kapanarak hata verir.
+İki mimari sınır:
+- `AttentionAdapter`, model sözleşmelerini çekirdeğin dışında tutar.
+- `argus_cache/models/hybrid_cache.py`, hibrit modellerde sahipliği açıkça
+  belirtir: tam attention'ın KV'si ARGUS'a aittir; lineer attention durumuna
+  ARGUS asla dokunmaz.
 
-## Runtime durumu
+### Runtime durumu
 
-| runtime | durum | ARGUS neyi yönetiyor |
+| runtime | durum | ARGUS'un yönettiği |
 |---|---|---|
-| llama.cpp | En derin entegrasyon; host ve direct-disk KV, CPU ve CUDA attention, birebir parity | KV tahsisi, bütçeler, sayfa yazımları ve attention okumaları |
-| HuggingFace Transformers | Araştırma yolu, ölçüldü | Modelin KV cache'i |
-| Ollama | Dış adapter, canlı test edildi | Ollama içinde hiçbir şey; yalnız konfigürasyon ve zamanlama |
-| vLLM | Kullanılamıyor, kapanarak reddediyor | Hiçbir şey; sahte monkey patch kurulmuyor |
+| llama.cpp | En derin entegrasyon; CPU ve CUDA attention; kendi referansıyla bit-exact | KV ayırma, bütçeler, yazma, yerleşim ve attention okumaları |
+| HuggingFace Transformers | Araştırma yolu, v0.4'te ölçüldü | Modelin KV cache'i |
+| Ollama | Harici adapter | Ollama içinde hiçbir şey; sadece yapılandırma ve zamanlama |
+| vLLM | Güvenli şekilde reddeder | Hiçbir şey; gerçek entegrasyon vLLM'in KV connector'ını gerektirir ([notlar](docs/vllm-verification.md)) |
 | SGLang | Uygulanmadı | Hiçbir şey |
-
-Eski vLLM entegrasyonu vLLM KV bloklarının sahibi değildi ve onları
-sıkıştıramıyordu; bu yüzden mevcut adapter numara yapmak yerine aktivasyonu
-reddediyor. Gerçek bir entegrasyon vLLM'in KV connector'ını veya özel
-attention-backend arayüzlerini kullanmalıdır; bkz.
-[`docs/vllm-verification.md`](docs/vllm-verification.md).
 
 ---
 
-# Yol haritası
+## Ölçüm metodolojisi
 
-## v0.6 — placement policy (yayınlandı)
+- **Boş makine.** Başka bir GPU hesaplama süreci yok.
+  - `codebase-memory-mcp` gibi arka plan yeniden indeksleyicileri her editör/agent
+    oturumunda bir tane çalışır ve sürekli `--index-worker` süreçleri doğurur.
+  - Her final ölçümde bunlar ölçüm boyunca `SIGSTOP` ile durduruldu, sonra devam
+    ettirildi.
+  - Bir release-gate denemesinde load'u 7'ye çıkarmışlar ve bir stock koşusunu
+    1.33 s yerine 3.1 s'ye itmişlerdi. O deneme etiketlenerek
+    [`v070-release-gate-2026-09-26/`](docs/measurements/v070-release-gate-2026-09-26/)
+    içinde saklanıyor.
+- **Aynı binary ile A/B.** Varyantlar tek bir `llama-server` binary'si altında
+  karşılaştırılır: `libllama.so`, `LD_LIBRARY_PATH` ya da bir
+  `ARGUS_KV_ATTENTION_PATH` referansıyla değiştirilir ve tekrarlar dönüşümlü
+  sırayla yapılır.
+- **Profiler kapalı.** Raporlanan her zamanlama profiler kapalıyken alındı;
+  profilli koşular sadece darboğaz tespiti için kullanıldı.
+- **Önce exactness.** Bir değişiklik ancak her ARGUS yolu `staged` ile bit-exact
+  kalıyor ve çıktı hash'i değişmiyorsa kabul edilir.
 
-[`plans/argus-v0.6.0.md`](plans/argus-v0.6.0.md) içindeki sözleşmeye göre
-uygulandı:
+```bash
+# Python test suite'i (çoğu test için CUDA isteğe bağlı; canlı Ollama testleri ARGUS_TEST_LIVE=1 ister)
+pytest tests/ -q
 
-- **Policy, store'un üstünde bir modüldür** (`ARGUS_KV_POLICY=on`, varsayılan
-  kapalı). Mekanizma store'da kalır; `off`, ikinci bir kod yoluyla değil hiç
-  karar üretmeyerek v0.5 davranışını yeniden üretir.
-- **İçerik ve yerleşim ayrı revision eksenleridir.** Byte'ları koruyan,
-  checksum ile doğrulanmış bir taşıma artık uçuştaki prefetch'i iptal ettirmez;
-  store'un başka bir yerindeki yazım migration'ı düşürmez.
-- **Bütçelerin sahibi store'dur.** Policy önerir; store doğrular veya açıkça
-  reddeder, reddedilenler yutulmak yerine sayılır.
-- **Policy yalnız yerleşim seçer.** Precision tanımlıdır ama kapalıdır ve kuralı
-  şudur: hassasiyet düşürme sayfa başına tek yönlüdür — q4 bir sayfayı f16'ya
-  yükseltmek dequantize edilmiş q4 verir, orijinali değil; hiçbir policy bunu
-  geri kazanılmış kalite diye raporlayamaz.
-- **Attention yerleştirmez, yalnız kopyalar.** GPU'da olmayan sayfalar tek bir
-  okuma için çağrıya özel scratch'e kopyalanır; bu yerleşimi, revision'ları ve
-  erişim geçmişini hiç değiştirmez.
+# Native llama.cpp + CUDA suite'i
+ARGUS_LLAMA_CPP_DIR=/path/to/llama.cpp ARGUS_LLAMA_BUILD=build ARGUS_TEST_CUDA=1 \
+ARGUS_TEST_GGUF=/path/to/stories15M.gguf pytest tests/test_native_llama_paged.py -q
 
-v0.6 ayrıca yukarıda ölçülen GPU-resident attention yolunu ekledi. 262K benchmark
-baseline'ı, kalite toleransı ve başarı metriği hâlâ açık; çalıştırılmadı.
-
-## v0.7 — ölçülen farkı kapatmak
-
-Deneysel optimizasyon, her seferinde ölçülmüş tek bir nedensel faktör,
-varsayılan olarak exact: önce GPU-resident 4K prefill'in stock'a olan farkı
-(attention ve çevresindeki her şey), sonra policy açıkken çalışma zamanı
-maliyeti, sonra decode.
+# 4K karşılaştırması
+python benchmarks/bench_llama_paged_context.py --server /path/to/llama-server \
+  --model qwen2.5-0.5b-instruct-q4_k_m.gguf --kv-dir /fiziksel/disk/dizini --contexts 4096 \
+  --modes stock-host-kv argus-cuda-control argus-cuda-on --kv-type f16 --ubatch 64 \
+  --predict 16 --resident-bytes 4194304 --gpu-bytes 67108864 --pinned-bytes 67108864 \
+  --warmups 1 --repeats 5 --output result.json
+```
 
 ## Bilinen sınırlar
 
-- Native HuggingFace decode yalnız doğrulanmış Qwen2 full-attention
-  sözleşmesini kapsar. Diğer modeller ve maskeli/yerel attention durumları K/V'yi
-  yeniden kurar.
-- Streaming attention tek bir fused kernel değil, bir ATen işlem dizisidir; bu
-  yüzden sayfa başına launch maliyeti taşımaya devam eder.
-- `DirectPagedAttentionEngine` yalnız izole ölçülmüştür ve HuggingFace decode
-  yoluna bağlı değildir.
-- Python `PageStore` ile native store ayrıdır.
-- llama.cpp resident attention hızlı yolu F16 KV ile prefill'i (Q>1) kapsar; en
-  hızlı kernel head dimension 64 ister. Decode staged yolu kullanır.
-- Gerçek bellek baskısı altında CPU-spill gecikmesi ve çok kullanıcılı
-  throughput ölçülmemiştir.
-- Öngörücü sayfalama deneyseldir ve varsayılan olarak kapalıdır.
-- [1M token sentetik disk testi](docs/measurements/v050-disk-capacity-smoke-2026-09-15.json)
-  tek katman, tek KV head ve head boyutu 4 kullanır. Gerçek modelde 1M context
-  üretimi değildir ve NVMe performans kanıtı değildir.
+- **CUDA yolu:**
+  - sadece F16 KV (Q8/Q4 KV CPU attention kullanır),
+  - head boyutu ≤ 256; en hızlı kernel'ler D = 64 ister,
+  - tek dizi (tek KV stream), CUDA cihaz 0.
+- **Beklemesiz okumalar** yazılmış her K/V sayfasının GPU'da olmasını ister. Policy
+  modunda sayfa tablosu, bütün store, tablo ve scratch payı birlikte GPU bütçesine
+  sığdığında kurulur. Aksi halde bekleyen (ödünç alan) yol kullanılır.
+- **Bir GPU sayfasının serbest bırakılması**, `cudaFree`'nin kuyruktaki cihaz işini
+  beklemesine dayanır (test edilen sürücüde öyle). Stream sırasına bağlı bir
+  allocator bu cihaz çapındaki beklemeyi kaldırırdı; uygulanmadı.
+- **Policy-on yazımları** her çağrıda stream ile hâlâ senkronize olur; orada
+  sadece attention beklemesizdir.
+- **Yapılandırma** sadece ortam değişkenleriyle yapılır; bütçeler süreç geneli.
+- **llama.cpp patch'leri** sabitlenmiş tek bir revizyonu hedefler.
+- **İki ayrı store:** HuggingFace yolunun Python store'u ile llama.cpp store'u ayrı
+  implementasyonlardır. Sayfa bazında karışık hassasiyet llama.cpp'de yok.
+- **Ölçüm kapsamı:** yukarıdaki her şey tek GPU'da (RTX 3050 Ti Laptop), tek modelde
+  ve 4K'da ölçüldü.
 
-## Kanıtları yeniden üretme
+---
 
-```bash
-pytest tests/ -q
-python benchmarks/bench_native_runtime.py --json native.json
-python benchmarks/bench_jl_fidelity.py --json jl.json --tokens 512
-python benchmarks/bench_downstream.py \
-  --json downstream.json \
-  --contexts 512 1024 2048 4096 8192 16384 \
-  --new-tokens 64 --repeats 3 --warmups 1 --page-size 1024
-```
+## Önceki kanıtlar (v0.4–v0.6)
 
-Benchmark sınıfları bilerek ayrı tutulur:
+**llama.cpp KV sahipliği (v0.5).** Sahiplik iddiasından önce şunlar şart koşuldu:
+ayırma kayıtları, sayfa ID'leri, yazma/okuma sayaçları ve attention'ın bu sayfaları
+tükettiğini gösteren bir iz.
+- Gerçek bir CPU model koşusunda prefill ve durum geri yüklemesinden sonra sekiz
+  decode adımı boyunca en büyük logit farkı 0
+  ([artifact](docs/measurements/v050-llama-host-ownership-2026-09-15.json)).
+- `q8_0` ve `q4_0` KV ile (4 MiB staging, 1 MiB resident bütçe): crop ve geri
+  yükleme dahil 19 adımda attention ve logit farkı 0.
 
-- `reconstruction`: tensor codec hatası, model doğruluğu değil;
-- `runtime`: kernel ve cache gecikmesi ile belleği;
-- `downstream`: uçtan uca TTFT, TPOT, peak VRAM ve model skorlaması.
+**v0.5: sadece mekanizma.** Placement policy olmadan her okuma diske gidiyordu. Tek
+bir UI-Mate request'i 14.98 GB okudu ve stock'un 260 s'sine karşı 752 s sürdü.
+
+**v0.6: ilk çalışma noktası (4K).**
+- Prefill: stock 1.332 s, GPU-resident 2.821 s (2.12x), policy-on 9.888 s (7.42x).
+- Decode: 8.0 / 6.4 tok/s.
+
+Kayıt: [checkpoint](docs/measurements/v060-checkpoint-2026-09-18.md).
+
+**HuggingFace araştırma yolu (v0.4).** Qwen2.5-0.5B, 1024 token'lık sayfalar.
+- VRAM tasarrufu bağlamla birlikte büyüyor (16K'da −%7.7).
+- TPOT baseline'ın 4.2 katına çıkıyor.
+- Test edilen hiçbir satırda baseline OOM olurken ARGUS'un hayatta kaldığı görülmedi.
+
+Kayıtlar: [artifact](docs/measurements/downstream-2026-08-14.json),
+[analiz](docs/findings-2026-08-14.md).
+
+**Hassasiyet ve gecikme, motor tek başına.** 32K'da q4_0 bağlamı FP16'nın
+136.16 MiB'ine karşı 44.16 MiB'de tutuyor: 3.1 kat daha az bellek, 2.14 kat
+gecikme. Motor HuggingFace decode yoluna bağlı değil
+([artifact](docs/measurements/v040-fused-attention-benchmark.json)).
+
+### Kalite (HuggingFace yolu)
+
+Ölçülen perplexity farkı −0.0176, ama sadece neredeyse kayıpsız FP8 katmanına
+ulaşıldı. INT4, INT2, 1-bit ve JL kalitesi doğrulanmadı.
+
+### Bilerek saklanan bir negatif sonuç
+
+Yerel bir llama-server'a karşı yapılan bir A/B taraması ARGUS'un kazandığını
+gösteriyor gibiydi; denetim, ARGUS'un o sürece hiç yüklenmediğini gösterdi. Bundan
+hiçbir iddia çıkarılmaz
+([artifact](docs/measurements/argus-ab-cache-comparison-2026-09-04.json)).
+
+---
+
+## Yol haritası
+
+- **v0.7 (bu sürüm):** ölçülen 4K farkı GPU-control'de 2.09x'ten 1.29x'e,
+  policy-on'da 7.4x'ten 1.36x'e kapandı. Decode stock'tan hızlı. Exactness boyunca
+  korundu. Kayıt: [`plans/argus-v0.7.0.md`](plans/argus-v0.7.0.md).
+- **v0.8 (backlog):** ARGUS'u başka runtime'ların benimseyebileceği bir eklentiye
+  dönüştürmek (paketleme, yapılandırma API'si, çoklu instance bütçeleri, çoklu
+  dizi desteği) ve 4K'nın ötesinde ölçümler. Bkz.
+  [`plans/argus-v0.8.0.md`](plans/argus-v0.8.0.md).
 
 ## Lisans
 

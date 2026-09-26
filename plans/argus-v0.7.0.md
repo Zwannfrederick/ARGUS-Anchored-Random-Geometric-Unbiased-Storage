@@ -873,3 +873,61 @@ MCP indexers paused; hash `a152ed56` everywhere.
 - Hash `a152ed56` on every ARGUS run.
 - M4 (< 2.00 s) is met by both modes.
 - v0.7 stops here.
+
+## v0.7.0 release (2026-09-26)
+
+The optimization campaign is closed. Accepted final optimization: E10 `b45a860`.
+Final-baseline checkpoint: `17ad9c2`.
+
+**Release audit.** The E10 lifetime solution covers every path that frees or
+replaces a page:
+
+| path | guard |
+|---|---|
+| `move_page` promotion/demotion | old copy freed via `cudaFree`/`cudaFreeHost` (waits for queued work); RAM copies never enter the table; then `publish_entry` |
+| append attaching a fresh GPU page | policy: `publish_entry`; GPU control: table dropped; the replaced copy is never a GPU page |
+| host `write_page` in-place refresh / failure | waits for the table's `read_event` before writing; on failure the copy is deleted and `publish_entry` runs |
+| GPU-control host writes / `write_run` | GPU-control only; `cudaFree` waits; table dropped |
+| `clear(0)` | copies and table freed through `cudaFree` (waits) |
+| `release` / shutdown | flusher joined; copies and table freed through `cudaFree`; events destroyed (safe while recorded) |
+
+**Release checks.**
+- Test suites:
+  - Python: 382 passed, 6 skipped.
+  - Native, CUDA build: 18 passed, quantized-KV lifecycle included.
+  - Native, CPU build: 11 passed, 7 CUDA-only skipped.
+- Running the quantized-KV lifecycle checks for the first time on the CUDA build
+  exposed a harness problem, not an ARGUS one:
+  - With zero GPU layers, llama.cpp still offloaded host operations to the GPU,
+    flash attention included (340 graph splits). The stock reference then differed
+    from ARGUS's CPU attention by 0.0206 in the first layer.
+  - The same checks pass with the current sources on the CPU build, and the CPU
+    attention source is unchanged since v0.6.0.
+  - The test now sets `op_offload = false` outside the CUDA-tier variant.
+- Output hash is `a152ed56` in every ARGUS mode; stock is `007ddc77`.
+- Placement counters:
+  - policy on, 64 MiB: 0 promotions, 0 demotions, 0 rejections, 12,768 commits,
+    0 cold pages;
+  - GPU control: no policy activity, no disk bytes;
+  - policy on, 2 MiB: 36 promotions, 34 demotions, 2.14 GB read — identical to
+    E6/E7b.
+
+**Performance evolution** (GPU-control prefill, 4K):
+
+| checkpoint | prefill |
+|---|---:|
+| v0.6.0 baseline | 2.778 s |
+| E1 | 2.709 s |
+| E2 | 2.406 s |
+| E4 | 2.328 s |
+| E7a | ≈2.0 s |
+| E9 | 1.68 s |
+| final baseline | 1.719 s |
+
+- Decode went from 8.0 to 55.6 tok/s.
+- Policy on went from 9.2 s (E2) to 2.0 s (E7b) to 1.82 s (E10).
+
+Methodology note: `codebase-memory-mcp` re-index workers were paused during every
+final measurement. See the release-gate record.
+
+v0.8 backlog: [`argus-v0.8.0.md`](argus-v0.8.0.md).

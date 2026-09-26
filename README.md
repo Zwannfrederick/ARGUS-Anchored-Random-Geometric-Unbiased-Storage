@@ -5,60 +5,91 @@ memory hierarchy — GPU, pinned RAM, pageable RAM, disk — instead of one tens
 pinned to one device, so a context can outlive the VRAM that would normally hold
 it.**
 
-ARGUS is not an inference server and not a speedup engine. It is the layer
-underneath one, owning where each KV page lives and at what precision. The
-deepest integration is llama.cpp, where ARGUS owns the KV allocation, the page
-writes and the attention reads.
+ARGUS is not an inference server. It is the layer underneath one, owning where
+each KV page lives, how it is written and how attention reads it. The deepest
+integration is llama.cpp, where ARGUS owns the KV allocation, the page writes and
+the attention reads, and must stay bit-exact with its own reference path.
 
-**Status: v0.6.0. An opt-in placement policy decides where llama.cpp KV pages
-live, and a GPU-resident CUDA attention path reads them in place, bit-exact with
-the staged reference.** On the one workload measured so far (4K context,
-Qwen2.5-0.5B, RTX 3050 Ti Laptop) ARGUS is still **slower than stock llama.cpp**:
-2.12x stock prefill time with GPU-resident KV, 7.42x with the policy placing
-pages across GPU and disk. Every performance number below is a cost measurement,
-not a win.
+**Status: v0.7.0.** On the one workload measured end to end (4K context,
+Qwen2.5-0.5B, RTX 3050 Ti Laptop), ARGUS prefill takes **1.29x** stock llama.cpp's
+time with all KV on the GPU and **1.36x** with the placement policy managing
+GPU/RAM/disk tiers. Decode is **faster than stock** in both modes (55.6 and
+48.2 tok/s vs 37.5). At the start of v0.7 the same prefill was 2.09x stock and
+the policy-on mode was 7.4x. These are measurements on one model, one GPU and one
+context length, not a general speed claim. [Read the comparison
+caveat](#reading-the-stock-comparison) before quoting them.
 
 [![packaging](https://github.com/Zwannfrederick/ARGUS-Anchored-Random-Geometric-Unbiased-Storage/actions/workflows/packaging.yml/badge.svg)](https://github.com/Zwannfrederick/ARGUS-Anchored-Random-Geometric-Unbiased-Storage/actions/workflows/packaging.yml)
 
 Türkçe belge: [README_TR.md](README_TR.md)
 
+---
+
+## Contents
+
+- [Status at a glance](#status-at-a-glance)
+- [What ARGUS is and is not](#what-argus-is-and-is-not)
+- [Install](#install)
+- [Using ARGUS with llama.cpp](#using-argus-with-llamacpp) — build, modes, every setting
+- [Using ARGUS with HuggingFace](#using-argus-with-huggingface)
+- [v0.7 results](#v07-results) and [how they moved](#how-v07-got-there)
+- [Reading the stock comparison](#reading-the-stock-comparison)
+- [How it works](#how-it-works)
+- [Benchmark methodology](#benchmark-methodology)
+- [Known limits](#known-limits)
+- [Earlier evidence](#earlier-evidence-v04v06)
+- [Roadmap](#roadmap)
+
+---
+
 ## Status at a glance
 
-Every "proven" row links to the artifact that proves it. Every "not measured"
-row is open, not pending publication.
+Every "proven" row links to the artifact that proves it. Every "not measured" row
+is open, not pending publication.
 
 | Claim | Status | Evidence |
 |---|---|---|
 | ARGUS owns llama.cpp KV allocation, writes and attention reads | Proven | [host ownership](docs/measurements/v050-llama-host-ownership-2026-09-15.json) |
-| Output is byte-identical to stock llama.cpp | Proven | [UI-Mate parity](docs/measurements/v050-ui-mate-reference-parity-2026-09-16.json) |
+| Every ARGUS attention path is bit-exact with its staged reference | Proven (float-vector equality, adversarial masks, mutation-checked; 4K output hash `a152ed56` in every mode) | [v0.7 plan](plans/argus-v0.7.0.md) |
+| Output is byte-identical to stock llama.cpp | **Only where the arithmetic matches** — proven on the v0.5 UI-Mate run; **not** on the v0.7 4K benchmark, where stock uses tensor-core FlashAttention | [UI-Mate parity](docs/measurements/v050-ui-mate-reference-parity-2026-09-16.json), [caveat](#reading-the-stock-comparison) |
 | KV pages migrate GPU ↔ pinned ↔ pageable ↔ disk, source-preserving | Proven | [CUDA mechanism](docs/measurements/v050-cuda-mechanism-2026-09-16.json) |
-| VRAM saving on the HuggingFace path grows with context | Proven, v0.4 | [downstream](docs/measurements/downstream-2026-08-14.json) |
-| Precision trades memory for latency, monotonically | Proven, engine in isolation | [fused attention](docs/measurements/v040-fused-attention-benchmark.json) |
-| ARGUS is faster than the runtime it sits under | **No**, on the only measured workload: 4K prefill 2.12x (GPU-resident) and 7.42x (policy on) stock time | [v0.6 at 4K](#v06-the-first-operating-point-4k) |
-| Opt-in placement policy promotes pages within tier budgets | Proven at 4K; policy-on and staged paths make identical policy decisions | [residency census](docs/measurements/v060-residency-census-2026-09-18.md), [mixed resident](docs/measurements/v060-mixed-resident-2026-09-18.md) |
-| GPU-resident CUDA attention is bit-exact with the staged reference | Proven (float-vector equality, adversarial masks, mutation-checked) | [lane-per-cell kernel](docs/measurements/v060-kernel-cells-2026-09-18.md) |
-| Long-context throughput at 262K | **Not measured**, deferred | [v0.6 plan](plans/argus-v0.6.0.md) |
-| Quality under INT4, INT2, 1-bit or JL tiers | **Not measured** | only FP8 was reached, see [Quality](#quality) |
+| Placement policy keeps its decisions identical across attention paths | Proven (staged vs resident vs page-table paths, 4 MiB and 256 KiB budgets) | [E6](docs/measurements/v070-e6-policy-logic-2026-09-25.md), [E10](plans/argus-v0.7.0.md) |
+| 4K prefill vs stock | **Slower**: 1.29x (GPU control), 1.36x (policy on) | [final baseline](docs/measurements/v070-e10-2026-09-26/) |
+| 4K decode vs stock | **Faster**: 55.6 / 48.2 vs 37.5 tok/s | [final baseline](docs/measurements/v070-e10-2026-09-26/) |
+| KV larger than the GPU budget | Works, disk-bound: 2 MiB GPU tier for 48 MiB of KV → 47.6 s prefill, 1.0 tok/s | [E6](docs/measurements/v070-e6-policy-logic-2026-09-25.md) |
+| Unsupported models fall back to llama.cpp's own KV cache | Proven (`-np 2` starts and serves) | `tests/test_native_llama_paged.py` |
+| Long-context throughput at 262K | **Not measured** | — |
+| Other models, GPUs, context lengths | **Not measured** | — |
+| Quality under INT4, INT2, 1-bit or JL tiers (HuggingFace path) | **Not measured**; only FP8 was reached | [Quality](#quality-huggingface-path) |
 
-Local suite on the development machine: **401 passed, 3 skipped**. The CI badge
-above covers packaging and repository hygiene only — hosted runners have no CUDA
-device, so a green badge means the package ships the right files, not that ARGUS
-works.
+Local suites on the development machine for this release: Python **382 passed,
+6 skipped**; native llama.cpp on the CUDA build **18 passed** (including the
+quantized-KV lifecycle checks); native on the CPU build **11 passed, 7 skipped**
+(the CUDA-only checks). The CI badge covers
+packaging and repository hygiene only — hosted runners have no CUDA device, so a
+green badge means the package ships the right files, not that ARGUS works.
 
-## What ARGUS is not
+## What ARGUS is and is not
 
 - **Not an inference server.** Sampling, batching, API serving and model loading
   stay in the runtime. ARGUS manages KV memory.
-- **Not a speedup.** No measurement in this repository shows ARGUS decoding
-  faster than the runtime beneath it. The v0.5 numbers show what it costs.
-- **Not a compression benchmark.** Codec ratios are storage facts; they do not
-  establish model quality. Only the FP8 tier has downstream evidence.
+- **Not a general speedup.** On the one measured workload ARGUS prefill is still
+  slower than stock and decode is faster. Neither result is claimed beyond that
+  workload.
+- **Not a quantizer by default.** On the llama.cpp path KV keeps GGML's codec
+  (F16 for the CUDA path). Per-page mixed precision exists only on the HuggingFace
+  research path and has quality evidence only for FP8.
+- **Not persistent storage.** Disk backing lives in an unlinked `O_DIRECT` file:
+  nothing survives the process. "Verified backing" means the copy a page can be
+  demoted to and read back from inside one process.
+
+---
 
 ## Install
 
 ```bash
 pip install torch                                        # must already be importable
-pip install --no-build-isolation argus-cache             # core runtime
+pip install --no-build-isolation argus-cache             # Python runtime + native extension
 pip install --no-build-isolation "argus-cache[gateway]"  # + Anthropic Messages gateway
 ```
 
@@ -67,42 +98,154 @@ machine, so a CUDA-capable PyTorch, the CUDA toolkit and a C++17 compiler must
 already be present. There is no prebuilt wheel: a binary compiled against one
 PyTorch ABI and CUDA version would be wrong for most installs.
 
-`--no-build-isolation` is required, not optional. The build reads your installed
-`torch` to configure the extension, and pip's isolated build hides it. Building
-against a torch pip fetched into a throwaway environment would be worse than
-failing — the extension would be compiled for an ABI your runtime does not have.
+`--no-build-isolation` is required. The build reads your installed `torch` to
+configure the extension; pip's isolated build would hide it and compile for an ABI
+your runtime does not have.
 
-To work on ARGUS itself:
+The llama.cpp integration is **not** a pip feature: its sources ship inside the
+package (`argus_cache/csrc/ggml_*`) and are compiled into llama.cpp, as described
+next. To work on ARGUS itself:
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
-pip install -U pip && pip install -e .
+pip install -U pip && pip install -e . --no-build-isolation
 python setup.py build_ext --inplace
 ```
 
-## Use it with llama.cpp
+---
 
-This is the deepest integration and the one v0.5 closed on. KV layers are
-allocated in an ARGUS-owned `O_DIRECT` store with enforced disk, metadata and
-staging budgets; page writes are checksum-verified before the descriptor moves;
-attention reads pages block by block with a bounded single-depth prefetch.
+## Using ARGUS with llama.cpp
+
+### 1. Build llama.cpp with ARGUS
+
+ARGUS patches one pinned llama.cpp revision (see
+[`integrations/llama.cpp/README.md`](integrations/llama.cpp/README.md) for the
+revision and the full contract). Verify the revision, then apply both patches in
+order and point CMake at the ARGUS sources:
 
 ```bash
-export ARGUS_KV_DIR=/path/on/fast/storage
-export ARGUS_KV_MAX_BYTES=$((1 << 30))     # disk budget
-export ARGUS_KV_STAGING_BYTES=$((4 << 20)) # staging budget, enables direct disk KV
-llama-server -m model.gguf -c 4096 -fa on -ctk f16 -ctv f16
+git -C /path/to/llama.cpp apply --check /path/to/ARGUS/integrations/llama.cpp/host-kv.patch
+git -C /path/to/llama.cpp apply         /path/to/ARGUS/integrations/llama.cpp/host-kv.patch
+git -C /path/to/llama.cpp apply --check /path/to/ARGUS/integrations/llama.cpp/cuda-kv.patch
+git -C /path/to/llama.cpp apply         /path/to/ARGUS/integrations/llama.cpp/cuda-kv.patch
+cmake -S /path/to/llama.cpp -B /path/to/llama.cpp/build \
+  -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=86 \
+  -DARGUS_CORE_DIR=/path/to/ARGUS/argus_cache/csrc
+cmake --build /path/to/llama.cpp/build --target llama-server -j
 ```
 
-Unset, the binary follows the stock path. Budgets are hard: exceeding one fails
-explicitly rather than silently growing. Setup, the patch and the full contract
-are in [`integrations/llama.cpp/README.md`](integrations/llama.cpp/README.md).
+`CMAKE_CUDA_ARCHITECTURES=86` is the tested RTX 30-series value; use your GPU's.
+A CPU-only build (`-DGGML_CUDA=OFF`) gets the host and direct-disk modes without
+CUDA attention. With no `ARGUS_*` variable set, the patched binary behaves exactly
+like stock llama.cpp.
 
-## Use it with HuggingFace
+### 2. Pick a mode
+
+Everything is configured through environment variables read by `llama-server`
+(or any program linking the patched `libllama`). Budgets are hard limits: going
+over one fails with an explicit error instead of growing.
+
+| Mode | What it is for | Required settings | llama-server flags |
+|---|---|---|---|
+| **Mapped host KV** | KV in file-backed host memory; llama.cpp's attention | `ARGUS_KV_DIR`, `ARGUS_KV_MAX_BYTES` | `-nkvo` |
+| **CPU block attention** | ARGUS CPU attention over mapped KV | + `ARGUS_KV_RESIDENT_BYTES` | `-nkvo -fa on` |
+| **Direct disk KV** | KV only on `O_DIRECT` disk, verified pages, CPU attention | + `ARGUS_KV_STAGING_BYTES` | `-nkvo -fa on` |
+| **CUDA, policy off** | Reference disk path with CUDA attention (every read from disk) | + `ARGUS_KV_GPU_BYTES`, `ARGUS_KV_PINNED_BYTES` | `-nkvo -fa on -ctk f16 -ctv f16` |
+| **CUDA, policy on** (the product mode) | Pages placed across GPU / pinned / RAM / disk within budgets | + `ARGUS_KV_POLICY=on` (optional `ARGUS_KV_RAM_BYTES`) | same |
+| **GPU control** (diagnostic) | All KV GPU-authoritative, no disk at all | + `ARGUS_KV_GPU_CONTROL=1`, policy off | same |
+
+A complete policy-on example, as used for the v0.7 measurements (4K context,
+Qwen2.5-0.5B):
+
+```bash
+export ARGUS_KV_DIR=/path/on/a/physical/disk      # not tmpfs: pages must be evictable
+export ARGUS_KV_MAX_BYTES=$((64 << 30))           # disk bytes for KV backing (2x KV size is reserved)
+export ARGUS_KV_RESIDENT_BYTES=$((4 << 20))       # page-descriptor metadata budget
+export ARGUS_KV_STAGING_BYTES=$((4 << 20))        # all ARGUS host scratch, bounce buffers, worker stacks
+export ARGUS_KV_GPU_BYTES=$((64 << 20))           # GPU tier budget (KV pages + attention scratch)
+export ARGUS_KV_PINNED_BYTES=$((64 << 20))        # pinned-RAM tier budget
+export ARGUS_KV_POLICY=on
+llama-server -m qwen2.5-0.5b-instruct-q4_k_m.gguf -c 4096 -np 1 -ngl 99 \
+  -fa on -nkvo -ctk f16 -ctv f16 -ub 64
+```
+
+The GPU budget decides the regime. When all KV fits (48 MiB here) ARGUS runs its
+fastest path; when it does not, pages live on pinned RAM, RAM or disk and reads
+become disk-bound (see [results](#v07-results)).
+
+### 3. Every setting
+
+| Variable | Values | Meaning |
+|---|---|---|
+| `ARGUS_KV_DIR` | directory | Enables ARGUS. Backing files are created here (and unlinked). Use a physical filesystem. |
+| `ARGUS_KV_MAX_BYTES` | bytes | Disk / mapping budget for KV backing. Direct disk mode reserves two slots per page (2x KV). |
+| `ARGUS_KV_RESIDENT_BYTES` | bytes | Mapped mode: resident target that selects CPU block attention. Disk modes: budget for page descriptors and resident handles (metadata, not KV payload). |
+| `ARGUS_KV_STAGING_BYTES` | bytes | Enables direct disk KV. Bounds every ARGUS host scratch buffer, bounce page, prefetch/flusher stack and attention scratch, process-wide. Must hold at least one encoded row plus a page. |
+| `ARGUS_KV_BLOCK_CELLS` | cells (default 256) | Block size of CPU block attention. |
+| `ARGUS_KV_GPU_BYTES` | bytes | Enables CUDA attention (disk modes). Hard budget for GPU KV pages and ARGUS GPU scratch — not a limit on llama.cpp's own VRAM. |
+| `ARGUS_KV_PINNED_BYTES` | bytes | Required with the GPU tier. Pinned-RAM tier budget. |
+| `ARGUS_KV_RAM_BYTES` | bytes (default unset = tier off) | Pageable-RAM tier budget for the policy. |
+| `ARGUS_KV_POLICY` | `off` (default) / `on` | Placement policy. Unknown values fail. |
+| `ARGUS_KV_GPU_CONTROL` | `1` / unset | Diagnostic GPU-authoritative store. No disk backing, no migration; requires policy off. |
+| `ARGUS_KV_STATS_PATH` | file | JSON stats (budgets, peaks, bytes, policy counters, profile scopes), rewritten atomically after attention calls. |
+| `ARGUS_KV_PROFILE` | `cpu` / `1` | CPU scopes and counters (`cpu`), plus CUDA event timing (`1`). Profiling changes timing; compare only against unprofiled runs of the same binary. |
+| `ARGUS_KV_ATTENTION_PATH` | `cells-v2` (default), `cells-kc`, `cells-mlp`, `cells`, `batched`, `direct`, `staged` | Reference attention paths for A/B checks. All are bit-exact with `staged`. |
+| `ARGUS_KV_CHECKSUM` | `crc32c` (default) / `fnv` | Page digest. Both detect accidental corruption; neither is an authenticity check. |
+| `ARGUS_KV_PAGE_COMMIT` | `run` (default) / `page` | GPU-control host writes: whole-page runs or one page at a time (reference). |
+| `ARGUS_KV_NO_OVERLAP` | set / unset | Staged attention: serial tiles instead of overlapped transfer and compute. |
+
+### 4. What happens at runtime
+
+- **Writes.** New K/V rows are written on the GPU, byte-identical to the CPU
+  encoding (round-to-nearest-even F32→F16). In **policy-on** stores the page
+  becomes *dirty* and a background flusher publishes it to its inactive disk slot
+  (written, read back, checksum-verified, then published). In **GPU control**
+  appends are resolved entirely on the device. When the GPU budget cannot hold
+  the pages, the append falls back to the host path unchanged. Policy off keeps
+  the host path: it is the reference.
+- **Reads.** When every written page of a K/V view is on the GPU, attention reads
+  a device page table and returns without waiting; otherwise the call borrows the
+  pages (and copies cold pages into per-call scratch) and waits for the kernel.
+  Both are bit-exact with `staged`.
+- **Placement (policy on).** After each attention call, pages read at least twice
+  are promoted to GPU, then pinned, then RAM, within budgets; colder pages are
+  demoted to their verified disk copy when a tier is full. Attention scratch
+  headroom is kept free so promotion never churns against it.
+- **Unsupported models.** If a model uses MLA, attention sinks, a KQ bias,
+  soft-capping, ALiBi or Grok attention, or the context has several KV streams
+  (`-np > 1` without a unified cache), ARGUS leaves the KV cache to llama.cpp and
+  logs `ARGUS KV disabled (<feature> is unsupported)`. Misconfiguration (missing
+  `-nkvo`, disk KV without `-fa on`) still refuses to start.
+- **Crash semantics.** The backing file is unlinked, so KV never outlives the
+  process. Within the process, a dirty page's disk slot trails its GPU copy until
+  the flusher (or a demotion, which flushes first) publishes it; every published
+  slot is verified and the previous slot is kept until the new one verifies.
+
+### 5. Observability
+
+With `ARGUS_KV_STATS_PATH` set, the stats file reports budgets and peaks
+(`peak_gpu_bytes`, `peak_pinned_bytes`, `peak_staging_bytes`, …), disk traffic
+(`read_bytes`, `written_bytes`), `committed_pages`, policy counters
+(`policy_promotions`, `policy_demotions`, `policy_rejected`,
+`policy_nanoseconds`), and why each attention call did or did not take the
+resident path (`resident_*_accepted`, `resident_*_reject_*`,
+`resident_*_cold_pages`). With `ARGUS_KV_PROFILE` it adds inclusive and exclusive
+CPU scopes per phase (prefill / decode) and, with `1`, CUDA kernel and copy time.
+
+The benchmark harness `benchmarks/bench_llama_paged_context.py` drives all modes
+(`stock-host-kv`, `argus-cuda-off`, `argus-cuda-on`, `argus-cuda-control`, …) with
+a needle-in-context check, fresh servers per repeat and the stats above.
+
+---
+
+## Using ARGUS with HuggingFace
+
+The research path from v0.4: ARGUS replaces a model's KV cache with a paged,
+tiered cache that can quantize cold pages.
 
 ```python
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM
 from argus_cache import AdaptiveCachePolicy, patch_model_with_argus
 
 model = AutoModelForCausalLM.from_pretrained(
@@ -123,298 +266,227 @@ model = patch_model_with_argus(
 )
 ```
 
-`page_size=1024` is the best latency/memory compromise measured on the test
-machine, not a universal recommendation. Re-benchmark per model, GPU, context
-distribution and service-level objective.
+`page_size=1024` was the best latency/memory compromise on the test machine, not
+a universal recommendation. Page lifecycle events are kept in memory (bounded);
+set `ARGUS_TRACE_PATH=/path/trace.jsonl` to also write them as JSON lines.
+`ARGUS_LOG_LEVEL` sets the logger level.
 
 ---
 
-# Evidence
-
-## llama.cpp KV ownership (v0.5)
-
-**Ownership is real, not a loaded library.** Allocation and page-ID records,
-write/read counters, a trace of attention consuming those pages, and a
-controlled backend-shutdown test are all required before ownership is claimed; a
-library appearing in the process maps proves nothing. On a real CPU model run:
-six attention layers, 32,000 vocabulary logits, maximum logit difference **0**
-across eight decode steps after prefill and state restore, 1,769,472 bytes
-allocated and back to 0 after teardown.
-Artifact: [`v050-llama-host-ownership-2026-09-15.json`](docs/measurements/v050-llama-host-ownership-2026-09-15.json).
-
-**Output is byte-identical to stock.** Driven by the pinned upstream UI-Mate
-message builder and parser at revision `1cb9e1e4`, under a hash-identical
-payload, stock llama.cpp and ARGUS produced the same reasoning text, the same
-coordinate, the same parsed action and the same 119 completion tokens on a
-9B multimodal model with CUDA attention.
-Artifact: [`v050-ui-mate-reference-parity-2026-09-16.json`](docs/measurements/v050-ui-mate-reference-parity-2026-09-16.json).
-
-**Exactness holds under compression and restore.** Qwen2.5-0.5B with `q8_0` and
-`q4_0` KV, 4 MiB staging, 1 MiB resident: attention and logit difference 0 over
-19 steps including crop and state restore, peak staging 1.27 MiB.
-
-**Migration preserves the source.** GPU, pinned RAM, pageable RAM and disk are
-separately budgeted. A move reserves and verifies the destination before
-releasing the source; failed transfers and stale revisions preserve the
-published page. Verified for head dimensions 48/64/256, with Q8 and Q4 encoded
-bytes carried unchanged across all four placements.
-Artifact: [`v050-cuda-mechanism-2026-09-16.json`](docs/measurements/v050-cuda-mechanism-2026-09-16.json).
-
-## Why there is no speed result
-
-v0.5 delivers **mechanism only**. Nothing in the serving path promotes a page —
-`argus_disk_move_page` is called only by tests — so every attention read goes to
-disk. In the UI-Mate run above:
-
-| | stock | ARGUS |
-|---|---:|---:|
-| prefill | 89.34 ms/token | 151.31 ms/token |
-| decode | 165.58 ms/token | 2915.31 ms/token |
-| one request | 260.4 s | 752.0 s |
-
-One request read **14.98 GB** from disk. The tier budgets were not the binding
-constraint: 4 MiB of GPU and 4 MiB of pinned were offered and only ~0.5 MiB was
-ever used, because nothing decides to use them. Note also that
-`ARGUS_KV_RESIDENT_BYTES` budgets the page descriptor table — 65,536 descriptors
-for 256 MiB of KV — not a KV working set.
-
-**This is the cost of having no placement policy.** It is not a tuned
-configuration, not a starved one, and not an operating point. v0.6 added the
-policy and a resident attention path; its first operating-point measurement
-follows.
-
-## v0.6: the first operating point (4K)
+## v0.7 results
 
 Qwen2.5-0.5B-Instruct Q4_K_M, F16 KV, 4096 context, 4016-token prompt, 16
-generated tokens, ubatch 64, RTX 3050 Ti Laptop (4 GB), llama.cpp with KV on the
-host (`-nkvo`) for every mode. Profiler off, three repeats in alternating order;
-median (min–max). Output is identical across ARGUS modes and paths.
+generated tokens, ubatch 64, RTX 3050 Ti Laptop (4 GB), KV on the host (`-nkvo`)
+for every mode, GPU/pinned budgets 64 MiB. Profiler off, fresh server per repeat,
+one warm-up; median (min–max). Final baseline at commit `17ad9c2`
+([data](docs/measurements/v070-e10-2026-09-26/)).
 
-| mode | prefill | vs stock | decode |
-|---|---:|---:|---:|
-| stock llama.cpp, host KV | 1.332 s (1.326–1.335) | 1.00x | 37.3 tok/s |
-| ARGUS, all KV GPU-resident (diagnostic control) | 2.821 s (2.779–2.873) | 2.12x | 8.0 tok/s |
-| ARGUS, policy on (GPU + disk placement) | 9.888 s (9.779–9.929) | 7.42x | 6.4 tok/s |
+| mode | prefill | vs stock | decode | output hash |
+|---|---:|---:|---:|---|
+| stock llama.cpp, host KV (tensor-core FlashAttention) | 1.336 s (1.331–1.341) | 1.00x | 37.5 tok/s | `007ddc77` |
+| ARGUS, GPU control (diagnostic, all KV on GPU) | 1.719 s (1.666–1.759) | 1.29x | 55.6 tok/s | `a152ed56` |
+| ARGUS, policy on (GPU/pinned/RAM/disk) | 1.821 s (1.814–1.826) | 1.36x | 48.2 tok/s | `a152ed56` |
 
-How that moved during v0.6, same workload (GPU-resident control prefill): staged
-scalar attention 40.9 s → one batched launch per invocation 12.8 s → D=64
-specialization 5.5 s → lane-per-cell exact kernel 3.7 s → branch-free value loop
-2.8 s. Policy-on went from 48.3 s to 9.9 s once one freshly written cold page no
-longer forced a whole invocation onto the staged path. Every step kept exact
-float-vector parity with the staged kernel, and its cause was confirmed by
-measurement (Nsight Compute for the last two kernel steps).
+Placement counters in the measured request: policy on — 0 promotions, 0
+demotions, 0 rejections, 12,768 committed pages, 0 cold pages; GPU control — no
+policy activity and zero disk traffic.
 
-What this does not show: decode is unchanged (still the staged path, 4.7x slower
-than stock), the policy-on gap is dominated by verified disk write-through, and
-nothing above 4K or on another model or GPU has been measured. Details:
-[checkpoint](docs/measurements/v060-checkpoint-2026-09-18.md),
-[kernel steps](docs/measurements/v060-kernel-cells-mlp-2026-09-18.md),
-[Nsight Compute attribution](docs/measurements/v060-ncu-cells-2026-09-18.md).
+**When the KV does not fit the GPU budget** (2 MiB GPU and 2 MiB pinned tiers for
+48 MiB of KV, same workload): 47.6 s prefill and 1.0 tok/s decode, 36 promotions,
+34 demotions and 2.1 GB read from disk per request. This is the regime ARGUS
+exists for — the context survives — but it is disk-bound and far slower.
 
-## The HuggingFace research path (v0.4)
+## How v0.7 got there
 
-Historical context for where the project came from. Qwen2.5-0.5B-Instruct,
-RTX 3050 Ti Laptop (4 GB), FP16, batch 1, 64 generated tokens, three measured
-repeats, one warm-up, 1024-token pages.
+GPU-control prefill, same workload, each step a separate measured experiment
+([plan](plans/argus-v0.7.0.md)):
 
-| context | baseline VRAM | ARGUS VRAM | VRAM change | baseline TPOT | ARGUS TPOT |
-|---:|---:|---:|---:|---:|---:|
-| 512 | 982.2 MiB | 988.2 MiB | +0.6% | 18.62 ms | 28.69 ms |
-| 1,024 | 1007.1 MiB | 1007.1 MiB | 0.0% | 18.55 ms | 30.21 ms |
-| 2,048 | 1056.8 MiB | 1056.9 MiB | 0.0% | 19.24 ms | 30.85 ms |
-| 4,096 | 1149.4 MiB | 1137.4 MiB | -1.0% | 19.14 ms | 40.21 ms |
-| 8,192 | 1340.4 MiB | 1280.5 MiB | **-4.5%** | 17.85 ms | **52.51 ms** |
-| 16,384 | 1722.5 MiB | 1590.6 MiB | **-7.7%** | 18.84 ms | **79.78 ms** |
+| step | change | prefill | decode |
+|---|---|---:|---:|
+| v0.6.0 baseline | | 2.778 s (2.09x) | 8.0 tok/s |
+| E1 | coalesced K-row loads in the exact kernel | 2.709 s | |
+| E2 | hardware CRC32C digests, whole-page commits | 2.406 s | 8.1 |
+| E4 | V loaded as `half2` | 2.328 s | |
+| E5 | single-token decode on the resident path | | **39.3** |
+| E7a | KV appends written on the GPU | ~1.98–2.03 s | 43 |
+| E8 | appends resolved on the device, no host round trip | −3.5% | |
+| E9 | attention reads the store page table without waiting | **1.68 s** | 55 |
 
-At 16K, TTFT is 1.819 s baseline against 3.992 s for ARGUS. What this does and
-does not show:
+Policy on moved from 9.2 s (v0.6/E2) to 2.0 s when appends went to the GPU with
+background disk write-back (E7b), then to 1.82 s when attention read its page table
+without waiting (E10). Two placement-policy faults found by audit and measurement
+were fixed on the way (E6): rewrites no longer drop a page's promotion, and
+promotion no longer fills the attention scratch headroom.
 
-- The VRAM saving is real and grows with context length in this experiment.
-- Decode latency is the unresolved problem: TPOT is 4.2x baseline at 16K.
-- **No tested row shows baseline OOM while ARGUS survives.** OOM prevention and a
-  larger usable context window remain hypotheses, not results.
+Most of the gain came from the data path around attention — waits, host round
+trips, CPU encoding — not from the kernel. The exact kernel itself still takes
+about 1.1 s of the prefill, against about 0.07 s for stock's FlashAttention.
 
-Artifact: [`downstream-2026-08-14.json`](docs/measurements/downstream-2026-08-14.json).
-Analysis: [`docs/findings-2026-08-14.md`](docs/findings-2026-08-14.md).
+## Reading the stock comparison
 
-## Precision versus latency, engine in isolation
-
-A Structure-of-Arrays page table separates *precision* (`ACTIVE_FP16`,
-`GGML_Q8_0`, `GGML_Q4_0`) from *placement* (`GPU_DEVICE`, `HOST_PINNED`,
-`HOST_PAGEABLE`) in one contiguous descriptor table.
-`DirectPagedAttentionEngine` runs an exact tile-by-tile online-softmax
-recurrence over it: no context-sized FP16 KV tensor is materialized, and
-reconstruction is bounded to one page tile.
-
-Measured on the RTX 3050 Ti Laptop with Qwen-like geometry (24 query heads,
-4 KV heads, head_dim 256, page 128):
-
-| context | ACTIVE_FP16 | GGML_Q8_0 | GGML_Q4_0 |
-|---:|---|---|---|
-| 1,024 | 1.98 ms / 12.15 MiB | 3.15 ms / 10.28 MiB | 4.24 ms / 9.28 MiB |
-| 4,096 | 7.51 ms / 24.15 MiB | 11.43 ms / 16.65 MiB | 15.86 ms / 12.65 MiB |
-| 8,192 | 14.71 ms / 40.15 MiB | 22.55 ms / 25.15 MiB | 31.61 ms / 17.15 MiB |
-| 16,384 | 29.26 ms / 72.15 MiB | 44.97 ms / 44.15 MiB | 62.77 ms / 26.15 MiB |
-| 32,768 | 58.48 ms / 136.16 MiB | 90.15 ms / 76.16 MiB | 125.25 ms / 44.16 MiB |
-
-The trade is monotone and steep: at 32K, q4_0 holds the context in 44.16 MiB
-against FP16's 136.16 MiB — 3.1x less memory for 2.14x the latency. This is the
-engine alone. **It is not wired into the HuggingFace decode path**, so these
-numbers appear in no end-to-end result.
-
-Artifact: [`v040-fused-attention-benchmark.json`](docs/measurements/v040-fused-attention-benchmark.json).
-
-## Quality
-
-The measured perplexity delta is **-0.0176**, but only the near-lossless FP8
-tier was reached at that passage length. This does **not** validate INT4, INT2,
-1-bit or JL quality — the artifact carries that caveat itself. The q4_0
-retrieval probe is a single forgiving task at 31k tokens; reasoning, code
-generation and long-range coherence under quantized KV are unmeasured.
-
-## A negative result kept on purpose
-
-An A/B sweep at 4K/16K/32K/64K against a local llama-server (Qwen3.6-35B-A3B,
-q4_0 KV) appeared to show an ARGUS win. **The audit in the artifact shows ARGUS
-was never loaded into the process**: `argus_in_llama_server_maps: false`,
-`argus_maps_count: 0`, and peak VRAM byte-identical across both arms at every
-context. The decode-rate gap (17.66 vs 11.88 tok/s at 16K) traces to the
-gateway's prompt-prefix cache, not to ARGUS.
-
-No ARGUS claim is drawn from this run. It ships in the repository because a
-misattributed win is exactly the result that would otherwise go unchallenged.
-The sweeps published beside it (`load-mode-comparison`, `pmin-sweep`,
-`speculative-sweep-n2-n3-n4`) are llama.cpp runtime tuning and are labelled as
-such.
-
-Artifact: [`argus-ab-cache-comparison-2026-09-04.json`](docs/measurements/argus-ab-cache-comparison-2026-09-04.json).
+- **Different arithmetic contracts.** Stock llama.cpp here uses FlashAttention on
+  tensor cores, with its own accumulation order and precision. ARGUS's kernels
+  keep the FP32 accumulation order of ARGUS's staged reference, bit for bit
+  (Category 1 exactness, no reassociation, no tensor cores). The two produce
+  different bits: the 16-token outputs hash differently (`007ddc77` vs
+  `a152ed56`), and both answer the needle question correctly. Speed ratios compare
+  two different computations, not two implementations of the same one.
+- **One workload.** One model, one GPU, one context length, KV on the host for
+  every mode. Nothing here predicts 32K, 262K, another model or another GPU.
+- **Diagnostic vs product.** GPU control keeps every page on the GPU with no disk
+  backing; it bounds what the datapath can do. Policy on is the mode that
+  actually manages tiers.
 
 ---
 
-# How it works
-
-## Architecture
+## How it works
 
 ```text
-runtime (llama.cpp / HuggingFace)
-       |
-       v
-ARGUS KV memory layer
-       |
-       +-- page descriptor table: precision and placement are independent
-       |
-       +-- budgeted tiers: GPU, pinned RAM, pageable RAM, disk
-       |
-       +-- native C++ page lifecycle, checksum-verified writes
-       |
-       +-- CUDA / CPU attention reading pages in place
+llama.cpp (patched)                       HuggingFace model
+   |  KV allocation, set_rows, attention      |  cache replacement
+   v                                          v
+ARGUS disk store (C++/CUDA)              PagedDynamicKVCache (Python + C++)
+   |- page descriptors: content / placement revisions, checksums
+   |- tiers: GPU | pinned | pageable RAM | O_DIRECT disk (2 verified slots/page)
+   |- placement policy (ggml_kv_policy.cpp), budgets owned by the store
+   |- GPU appends + background write-back flusher
+   '- attention: device page table (wait-free) | borrowed pages | staged reference
 ```
 
-The governing principle is that **a logical KV page, its physical placement and
-its physical precision are three separate things**. A page may be GPU/FP16,
-pinned/Q8 or disk/Q4; GPU does not imply FP16. Compression tiers are plugins,
-selected through capabilities and numeric codec metadata rather than hardcoded
-names. Ownership and extension points:
-[`docs/architecture.md`](docs/architecture.md).
+- **Placement and content are separate revision axes.** A byte-preserving,
+  verified move does not invalidate reads; a write does.
+- **The store owns budgets.** The policy proposes moves; the store verifies,
+  refuses and counts.
+- **Page lifetime with queued GPU work.** Page-table entries change only through
+  stream-ordered publication; a replaced GPU page is freed with `cudaFree`, which
+  on the tested driver waits for all queued device work; host in-place writes wait
+  for the last table read. See the [E10 invariants](plans/argus-v0.7.0.md).
+- **Source layout.** `argus_cache/csrc/ggml_disk_store.h` (shared store
+  internals), `ggml_disk_buffer.cpp` (store lifetime, GGML buffer, host I/O),
+  `ggml_disk_gpu.cpp` (GPU residency, appends, write-back, migration),
+  `ggml_cuda_attention.cu` (kernels and dispatch), `ggml_kv_policy.cpp`,
+  `ggml_paged_attention.cpp` (CPU attention), `ggml_host_buffer.cpp` (mapped mode).
 
-## Model contracts stay out of the core
+The HuggingFace path's principle is that a logical KV page, its physical placement
+and its physical precision are three separate things; compression tiers are
+plugins selected by capability. Details: [`docs/architecture.md`](docs/architecture.md).
+`AttentionAdapter` keeps model contracts out of the core, and
+`argus_cache/models/hybrid_cache.py` states ownership for hybrid models: ARGUS owns
+full-attention KV, never linear-attention state.
 
-`AttentionAdapter` owns native eligibility, query preparation and output layout
-per `config.model_type`. Applications add a contract with
-`register_attention_adapter()`; an unregistered model never enters native page
-attention accidentally and keeps its own attention implementation.
-
-For models mixing full and linear attention (Qwen3.8 Gated DeltaNet, for
-example), `argus_cache/models/hybrid_cache.py` states ownership explicitly:
-ARGUS owns the growing KV of full-attention layers, and the fixed-size recurrent
-and conv state of linear-attention layers is not ARGUS's to touch. Deterministic
-state digests are asserted around every cache operation, and an unsupported
-layer role fails closed rather than being paged.
-
-## Runtime status
+### Runtime status
 
 | runtime | status | what ARGUS manages |
 |---|---|---|
-| llama.cpp | Deepest integration; host and direct-disk KV, CPU and CUDA attention, byte-exact parity | KV allocation, budgets, page writes and attention reads |
-| HuggingFace Transformers | Research path, measured | The model's KV cache |
-| Ollama | External adapter, live-tested | Nothing inside Ollama; configuration and timing only |
-| vLLM | Unavailable, fails closed | Nothing; no false monkey patch is installed |
+| llama.cpp | Deepest integration; CPU and CUDA attention; bit-exact with its reference | KV allocation, budgets, writes, placement and attention reads |
+| HuggingFace Transformers | Research path, measured in v0.4 | The model's KV cache |
+| Ollama | External adapter | Nothing inside Ollama; configuration and timing only |
+| vLLM | Fails closed | Nothing; a real integration needs vLLM's KV connector ([notes](docs/vllm-verification.md)) |
 | SGLang | Not implemented | Nothing |
-
-The former vLLM integration did not own vLLM KV blocks and could not compress
-them, so the current adapter refuses activation rather than pretending. A real
-integration must use vLLM's KV connector or custom attention-backend interfaces;
-see [`docs/vllm-verification.md`](docs/vllm-verification.md).
 
 ---
 
-# Roadmap
+## Benchmark methodology
 
-## v0.6 — the placement policy (released)
+- **Idle machine.** No other GPU compute process. Background re-indexers such as
+  `codebase-memory-mcp` (one per editor/agent session, each respawning
+  `--index-worker` processes) were paused with `SIGSTOP` for the duration of every
+  final measurement and resumed afterwards: during one release-gate attempt they
+  pushed load to 7 and a stock run to 3.1 s against 1.33 s. That attempt is kept,
+  labelled, in [`v070-release-gate-2026-09-26/`](docs/measurements/v070-release-gate-2026-09-26/).
+- **Same-binary A/B.** Variants are compared under one `llama-server` binary,
+  switching `libllama.so` with `LD_LIBRARY_PATH` or an `ARGUS_KV_ATTENTION_PATH`
+  reference, with repeats in alternating order.
+- **Profiler off** for every timing that is reported; profiled runs are used for
+  attribution only.
+- **Exactness first.** A change is accepted only if every ARGUS path stays
+  bit-exact with `staged` and the output hash is unchanged.
 
-Implemented as recorded in [`plans/argus-v0.6.0.md`](plans/argus-v0.6.0.md):
+```bash
+# Python suite (CUDA device optional for most tests; live Ollama tests need ARGUS_TEST_LIVE=1)
+pytest tests/ -q
 
-- **The policy is a module above the store** (`ARGUS_KV_POLICY=on`, off by
-  default). The store keeps the mechanism; `off` reproduces v0.5 by deciding
-  nothing, not through a second code path.
-- **Content and placement are separate revision axes.** A byte-preserving,
-  checksum-verified move no longer cancels an in-flight prefetch, and a write
-  elsewhere in the store no longer drops a migration.
-- **The store owns budgets.** Policy proposes; the store verifies or refuses
-  explicitly, and refusals are counted rather than swallowed.
-- **The policy selects placement only.** Precision is defined but off, under the
-  rule that precision reduction is one-way per page: promoting a q4 page to f16
-  yields dequantized q4, never the original, and no policy may report that as
-  recovered quality.
-- **Attention stages, it does not place.** Pages that are not GPU-resident are
-  copied into per-invocation scratch for one read; that never changes placement,
-  revisions or access history.
+# Native llama.cpp + CUDA suite
+ARGUS_LLAMA_CPP_DIR=/path/to/llama.cpp ARGUS_LLAMA_BUILD=build ARGUS_TEST_CUDA=1 \
+ARGUS_TEST_GGUF=/path/to/stories15M.gguf pytest tests/test_native_llama_paged.py -q
 
-v0.6 also added the GPU-resident attention datapath measured above. The 262K
-benchmark baseline, quality tolerance and success metric are still open and were
-not run.
-
-## v0.7 — closing the measured gap
-
-Experimental optimization, one measured causal factor at a time, exact by
-default: first the GPU-resident 4K prefill gap to stock (attention and
-everything around it), then the policy-on runtime cost, then decode.
+# The 4K comparison
+python benchmarks/bench_llama_paged_context.py --server /path/to/llama-server \
+  --model qwen2.5-0.5b-instruct-q4_k_m.gguf --kv-dir /physical/disk/dir --contexts 4096 \
+  --modes stock-host-kv argus-cuda-control argus-cuda-on --kv-type f16 --ubatch 64 \
+  --predict 16 --resident-bytes 4194304 --gpu-bytes 67108864 --pinned-bytes 67108864 \
+  --warmups 1 --repeats 5 --output result.json
+```
 
 ## Known limits
 
-- Native HuggingFace decode covers only the validated Qwen2 full-attention
-  contract. Other models and masked/local-attention cases reconstruct K/V.
-- Streaming attention is an ATen operation sequence, not one fused kernel, so it
-  still carries per-page launch overhead.
-- `DirectPagedAttentionEngine` is measured in isolation and is not wired into
-  the HuggingFace decode path.
-- The Python `PageStore` and the native store are separate.
-- The llama.cpp resident attention fast path covers prefill (Q>1) with F16 KV;
-  its fastest kernel requires head dimension 64. Decode uses the staged path.
-- CPU-spill latency under real memory pressure and multi-user throughput are
-  unmeasured.
-- Predictive paging is experimental and disabled by default.
-- The [1M-token synthetic disk check](docs/measurements/v050-disk-capacity-smoke-2026-09-15.json)
-  uses one layer, one KV head and head dimension 4. It is not 1M-context model
-  generation and not an NVMe performance claim.
+- **CUDA path:** F16 KV only (Q8/Q4 KV use CPU attention), head dimension ≤ 256,
+  fastest kernels need D = 64, one sequence (one KV stream), CUDA device 0.
+- **Wait-free reads** need every written K/V page on the GPU; in policy mode the
+  page table is only built when the whole store, the table and scratch headroom fit
+  the GPU budget. Otherwise the waiting (borrowing) path is used.
+- **Freeing a GPU page relies on `cudaFree` waiting for queued device work**, as it
+  does on the tested driver. A stream-ordered allocator would remove that
+  device-wide wait; it is not implemented.
+- **Policy-on appends still synchronize** with the stream per call; only attention
+  is wait-free there.
+- **Configuration is environment variables only**; budgets are process-global.
+- The llama.cpp patches target one pinned revision.
+- The HuggingFace path's Python store and the llama.cpp store are separate
+  implementations; per-page mixed precision is not available on llama.cpp.
+- Everything above was measured on one GPU (RTX 3050 Ti Laptop), one model and 4K.
 
-## Reproducing the evidence
+---
 
-```bash
-pytest tests/ -q
-python benchmarks/bench_native_runtime.py --json native.json
-python benchmarks/bench_jl_fidelity.py --json jl.json --tokens 512
-python benchmarks/bench_downstream.py \
-  --json downstream.json \
-  --contexts 512 1024 2048 4096 8192 16384 \
-  --new-tokens 64 --repeats 3 --warmups 1 --page-size 1024
-```
+## Earlier evidence (v0.4–v0.6)
 
-Benchmark classes are kept separate on purpose:
+**llama.cpp KV ownership (v0.5).** Allocation, page IDs, write/read counters and a
+trace of attention consuming those pages were required before ownership was
+claimed. On a real CPU model run: maximum logit difference 0 across eight decode
+steps after prefill and state restore
+([artifact](docs/measurements/v050-llama-host-ownership-2026-09-15.json)). With
+`q8_0` and `q4_0` KV, 4 MiB staging and 1 MiB resident budget: attention and logit
+difference 0 over 19 steps including crop and state restore.
 
-- `reconstruction`: tensor codec error, not model accuracy;
-- `runtime`: kernel and cache latency and memory;
-- `downstream`: end-to-end TTFT, TPOT, peak VRAM and model scoring.
+**v0.5 mechanism only.** Without a placement policy every read went to disk: one
+UI-Mate request read 14.98 GB and took 752 s against 260 s for stock.
+
+**v0.6 first operating point (4K).** Stock 1.332 s, GPU-resident 2.821 s (2.12x),
+policy on 9.888 s (7.42x); decode 8.0 / 6.4 tok/s
+([checkpoint](docs/measurements/v060-checkpoint-2026-09-18.md)).
+
+**HuggingFace research path (v0.4).** Qwen2.5-0.5B, 1024-token pages: VRAM saving
+grows with context (−7.7% at 16K) while TPOT rises to 4.2x baseline; no tested row
+showed baseline OOM with ARGUS surviving
+([artifact](docs/measurements/downstream-2026-08-14.json),
+[analysis](docs/findings-2026-08-14.md)).
+
+**Precision vs latency, engine in isolation.** At 32K, q4_0 holds the context in
+44.16 MiB against FP16's 136.16 MiB — 3.1x less memory for 2.14x the latency. The
+engine is not wired into the HuggingFace decode path
+([artifact](docs/measurements/v040-fused-attention-benchmark.json)).
+
+### Quality (HuggingFace path)
+
+The measured perplexity delta is −0.0176, but only the near-lossless FP8 tier was
+reached. INT4, INT2, 1-bit and JL quality are not validated.
+
+### A negative result kept on purpose
+
+An A/B sweep against a local llama-server appeared to show an ARGUS win; the audit
+showed ARGUS was never loaded into that process. No claim is drawn from it
+([artifact](docs/measurements/argus-ab-cache-comparison-2026-09-04.json)).
+
+---
+
+## Roadmap
+
+- **v0.7 (this release):** the measured 4K gap closed from 2.09x to 1.29x (GPU
+  control) and from 7.4x to 1.36x (policy on); decode faster than stock; exactness
+  kept throughout. Record: [`plans/argus-v0.7.0.md`](plans/argus-v0.7.0.md).
+- **v0.8 (backlog):** making ARGUS a plugin other runtimes can adopt — packaging,
+  a configuration API, multi-instance budgets, multi-sequence support — and
+  measurements beyond 4K. See [`plans/argus-v0.8.0.md`](plans/argus-v0.8.0.md).
 
 ## License
 

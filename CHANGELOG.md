@@ -1,5 +1,87 @@
 # Changelog
 
+## v0.7.0 — Closing the measured gap, exactly
+
+v0.7 was an optimization campaign on one workload: Qwen2.5-0.5B-Instruct Q4_K_M,
+F16 KV, 4K context, RTX 3050 Ti Laptop. Every step kept every ARGUS attention path
+bit-exact with the staged reference; the output hash is `a152ed56` throughout.
+
+Final baseline (profiler off, 5 repeats, MCP indexers paused, commit `17ad9c2`):
+
+| mode | prefill | vs stock | decode |
+|---|---:|---:|---:|
+| stock llama.cpp, host KV | 1.336 s | 1.00x | 37.5 tok/s |
+| ARGUS GPU control | 1.719 s | 1.29x | 55.6 tok/s |
+| ARGUS policy on | 1.821 s | 1.36x | 48.2 tok/s |
+
+At v0.6.0 the same workload measured 2.09x (GPU control) and 7.4x (policy on), and
+decode ran at 8 tok/s.
+
+Stock uses tensor-core FlashAttention, a different arithmetic contract. ARGUS and
+stock outputs differ at the bit level, so the ratios compare two different
+computations.
+
+### Added (llama.cpp integration, `argus_cache/csrc/ggml_*`)
+- **Decode on the resident path** (E5). Single-token attention reads GPU pages in
+  place instead of staging 4 KiB copies through 128 tile launches: decode 7.5 →
+  39 tok/s.
+- **KV appends written on the GPU** (E7a, E8). F32→F16 RNE encoding, byte-identical
+  to the CPU path. GPU-control stores resolve the rows on the device through a
+  store page table, with no host round trip.
+- **Background disk write-back for policy stores** (E7b). Appended pages become
+  dirty and a per-store flusher publishes them with the existing double-slot
+  verification. Slot I/O runs under a separate lock so attention is not blocked.
+  After a crash the disk copy can trail the GPU by the dirty pages; the backing file
+  is unlinked and never outlives the process.
+- **Wait-free attention** (E9 for GPU control, E10 for policy stores). Attention
+  reads a device page table and returns without waiting on the kernel. In policy
+  stores the table exists only while the whole store, the table and the scratch
+  headroom fit the GPU budget, so placement decisions are unchanged. Entries change
+  through stream-ordered publication; freeing a GPU page relies on `cudaFree`
+  waiting for queued device work, as it does on the tested driver.
+- **Load-time fallback.** Models with MLA, attention sinks, KQ bias, soft-capping,
+  ALiBi or Grok attention, and contexts with several KV streams, keep llama.cpp's
+  own KV cache instead of failing at graph build.
+- Kernel steps: coalesced K-row loads (E1) and `half2` V loads (E4), selectable
+  against references through `ARGUS_KV_ATTENTION_PATH`. The new default is
+  `cells-v2`.
+- Write path: hardware CRC32C digests and whole-page commits (E2). The previous
+  behaviour is kept selectable through `ARGUS_KV_CHECKSUM=fnv` and
+  `ARGUS_KV_PAGE_COMMIT=page`.
+
+### Fixed
+- **Placement policy:** a rewrite (every decode append) dropped a promoted page back
+  to disk; it now refreshes the copy in place. Promotion filled the attention
+  scratch headroom, so every call evicted what the previous one promoted (78,680 →
+  36 promotions at a 2 MiB budget).
+- The staged path let the policy observe while its scratch still held tier budget.
+- **Python runtime:**
+  - `PagedDynamicKVCache.log_event` no longer grows without bound or writes into
+    the caller's working directory; the trace is opt-in through `ARGUS_TRACE_PATH`.
+  - `Page.get` no longer swallows conversion errors.
+
+### Changed
+- `ggml_disk_buffer.cpp` split into `ggml_disk_store.h`, `ggml_disk_buffer.cpp` and
+  `ggml_disk_gpu.cpp`. The llama.cpp patches add the new source; rebuild after
+  updating.
+- Live Ollama tests need `ARGUS_TEST_LIVE=1`; a plain `pytest` no longer loads a
+  model into a running Ollama service.
+- The native lifecycle test keeps its stock reference on the CPU
+  (`op_offload = false`). On a CUDA build llama.cpp offloaded host operations,
+  flash attention included, to the GPU even with zero GPU layers. The quantized-KV
+  parity checks then compared against a different computation and failed; they
+  pass on CPU builds either way.
+
+### Not changed or not measured
+- Policy off is still the reference host path.
+- Q8/Q4 KV still use CPU attention.
+- Nothing beyond 4K, another model or another GPU was measured.
+- The HuggingFace path is unchanged apart from the fixes above.
+
+Local suites: Python 382 passed, 6 skipped; native llama.cpp on the CUDA build 18
+passed (quantized KV included); native on the CPU build 11 passed, 7 skipped
+(CUDA-only). Record: `plans/argus-v0.7.0.md`.
+
 ## v0.6.0 — Placement policy and an exact GPU-resident attention path
 
 The pip-installed runtime (`argus_cache` and the `argus_cpp_backend` extension) is

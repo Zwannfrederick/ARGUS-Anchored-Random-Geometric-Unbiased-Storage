@@ -17,6 +17,57 @@ attention remains GGML's. The direct disk mode below is the budgeted path.
 Other memory implementations may not use `llama_kv_cache`; no support is claimed
 without observing allocation and real inference using the buffer.
 
+## Current datapath (v0.7.0)
+
+This is the behaviour of the shipped sources. The sections further down record how
+each mechanism was introduced (v0.5–v0.6) and keep their original measurements;
+where they describe an older default, this section wins.
+
+- **Appends are written on the GPU** (CUDA builds, F16 KV, rows that never straddle
+  a 4 KiB page). F32→F16 conversion uses round-to-nearest-even, byte-identical to
+  GGML's CPU `from_float`.
+  - *GPU control:* the first append puts every page of the store on the GPU
+    (zeroed if unwritten) and uploads a device page-address table. The encode
+    kernel then reads the row indices on the device, with no host round trip. An
+    out-of-range row sets a pinned flag that the next append refuses.
+  - *Policy on:* touched pages get a GPU copy — in place, uploaded if their content
+    lives elsewhere, or zeroed — and become **dirty**. A per-store background
+    flusher writes each dirty page to its inactive disk slot, reads it back,
+    verifies the checksum and publishes it. Demoting a dirty page flushes it first.
+  - If the GPU budget cannot hold the pages, the row table and the policy's scratch
+    headroom, the append uses the unchanged host path. Policy off always does: it
+    is the reference.
+- **Attention (default `cells-v2`, D = 64, prefill and decode).** When every written
+  page of the K/V views is on the GPU and a store page table exists, the kernel
+  reads the table and the call returns without waiting.
+  - GPU control builds the table at its first append.
+  - Policy stores build it only while every page, the table and the scratch
+    headroom fit the GPU budget together, so placement decisions cannot change.
+  - Otherwise the call borrows the pages (cold pages copied into per-call scratch)
+    and waits, as before.
+
+  All paths are bit-exact with `staged`.
+- **Page lifetime with queued GPU work.**
+  - Policy page-table entries change only through a one-thread kernel on the
+    attention stream (`publish_entry`), after every change of a page's GPU
+    residency: promotion, demotion, append attach, and failure of a host in-place
+    write.
+  - Replaced GPU pages are freed with `cudaFree`, which on the tested driver waits
+    for all queued device work.
+  - Host in-place writes to a GPU page wait for the table's last read.
+  - `clear` and teardown free pages and the table the same way.
+- **Placement policy.** Unchanged in its algorithm, with two fixes: a rewrite
+  refreshes a promoted page in place instead of dropping it to disk, and promotion
+  leaves the attention scratch headroom free.
+
+Measured at 4K (Qwen2.5-0.5B, RTX 3050 Ti), final v0.7 baseline:
+- stock-host 1.336 s;
+- GPU control 1.719 s (1.29x), decode 55.6 tok/s;
+- policy on 1.821 s (1.36x), decode 48.2 tok/s.
+
+Stock uses tensor-core FlashAttention, so outputs differ from stock at the bit level
+(ARGUS hash `a152ed56` in every mode). See `plans/argus-v0.7.0.md`.
+
 ## Unsupported models fall back at load
 
 ARGUS takes the KV cache only for the attention it implements. When the KV cache is
@@ -243,8 +294,8 @@ publication; the request residual is reported separately, not labelled GPU time.
 `--modes argus-cuda-control` enables `ARGUS_KV_GPU_CONTROL=1`, a diagnostic
 GPU-authoritative store with policy off. Written KV pages have no backing file
 and cannot migrate away from GPU; payload disk read/write counters must remain
-zero. Writes still use the same CPU set_rows conversion and separately budgeted,
-verified GPU page replacement. At the 89eaf06 attribution baseline, attention traverses the same page lookup,
+zero. (v0.6 text: writes used the CPU set_rows conversion; since v0.7 they are
+written on the GPU, see *Current datapath*.) At the 89eaf06 attribution baseline, attention traverses the same page lookup,
 double-buffered staging, 32-cell kernel and synchronization path. The resident
 prefill optimization below now bypasses staging; decode retains that reference
 path. Masked unwritten padding retains logical-zero semantics. This isolates disk placement; it is not a
@@ -258,9 +309,10 @@ records paired profiler-disabled/event runs, CPU-only scopes, the original
 2 MiB pressure point, and the GPU-only control. It separates overlapping timers
 and observed measurement overhead; it does not claim 262K validation.
 
-Resident prefill defaults to a single-launch pointer-table path; for D=64 views whose
-rows are aligned to their size it uses the lane-per-cell kernel with a branch-free
-value loop (`cells-mlp`). Controlled comparisons (`ARGUS_KV_ATTENTION_PATH`, or
+Resident attention defaults to a single-launch pointer-table path; for D=64 views whose
+rows are aligned to their size it uses the lane-per-cell kernel (v0.7 default
+`cells-v2`: coalesced K loads and `half2` V loads; `cells-kc` and `cells-mlp` remain as
+references). Controlled comparisons (`ARGUS_KV_ATTENTION_PATH`, or
 `--attention-path` in the ladder): `cells` keeps the per-cell-branch loop, `batched`
 the warp-per-cell kernel, `direct` the intermediate 32-cell resident kernel and
 `staged` the reference path. All are bit-exact with `staged`.
@@ -271,8 +323,8 @@ Unwritten pages retain logical-zero semantics. The registry and both source stor
 stay locked until the compute stream completes, protecting against writes, migration
 and teardown. Pointer tables, cold-page scratch and optional scalar-path state are
 charged to staging/GPU budgets. Read history is recorded with the same 32-cell access
-granularity as staged attention; placement-policy decisions are unchanged. Decode
-falls back to staged.
+granularity as staged attention; placement-policy decisions are unchanged. Since v0.7
+decode (Q=1) takes the same resident path.
 
 The first [direct-path measurement](../../docs/measurements/v060-datapath-direct-2026-09-18.json)
 eliminates prefill payload D2D (0 bytes) and cuts explicit waits to 1512, but still

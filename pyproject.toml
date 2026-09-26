@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "argus_cache"
-version = "0.6.0"
-description = "Heterogeneous KV-cache memory management: paged transformer KV storage across FP16/FP8/INT8/INT4/INT2/1-bit tiers and CPU spill"
+version = "0.7.0"
+description = "Paged KV-cache memory manager for LLM runtimes: GPU/pinned/RAM/disk tiers for llama.cpp with exact CUDA attention, plus a quantized-tier research path for HuggingFace"
 readme = "README.md"
 authors = [
     { name = "Muhammed Emin Çelik" }
