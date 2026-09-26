@@ -2,9 +2,10 @@
 
 ## Goal
 
-Run the longest possible context on one consumer machine, with **no disk in the KV
-path**, by making GPU memory, RAM and the model's own weights share the machine's
-bandwidth deliberately. Speed matters, capacity matters more.
+Run the longest possible context on one consumer machine by making GPU memory, RAM and
+the model's own weights share the machine's bandwidth deliberately, with **light disk
+use**: disk may hold KV, but never so much that it chokes the system. Speed matters,
+capacity matters more.
 
 The v0.7 question was "how close to stock at 4K"; at 4K the KV fits in VRAM and ARGUS
 has nothing to win. The v0.8 question is:
@@ -54,11 +55,20 @@ each KV head once ≈ 0.10 s (f16) or ≈ 0.05 s (q8_0 cold pages), plus ≈ 15 
    KV across PCIe on the decode path.
 3. **One memory plan for weights and KV.** VRAM and RAM bandwidth are budgets shared by
    expert weights and KV pages; placement follows measured marginal benefit.
-4. **No disk on the decode path; disk allowed as a session store.** KV that a decode
-   step reads lives in VRAM or RAM, and capacity beyond RAM comes from compression. KV
-   of an idle session or a shared prefix is different: it is read once when the session
-   resumes, and one read replaces a whole prefill. Evicting it should demote it to a
-   lower tier (RAM, then the verified disk store of v0.5–v0.7), not drop it.
+4. **Disk-light.** Disk is a tier, never a heavy one:
+   - no per-token disk reads on the decode path in the normal regime: KV that every
+     decode step reads lives in VRAM or RAM, and capacity beyond RAM comes first from
+     compression;
+   - pages beyond RAM may live on disk only when attention rarely reads them (for
+     example pages that E1 proves negligible);
+   - writes are background, throttled and low priority (a bytes-per-second budget,
+     idle I/O class);
+   - KV of an idle session or a shared prefix is read once when the session resumes,
+     and one read replaces a whole prefill. Evicting it demotes it (RAM, then the
+     verified disk store of v0.5–v0.7) instead of dropping it.
+
+   Every run records disk bytes read and written per decoded token and iowait; a run in
+   which disk I/O stalls the system (sustained iowait) fails its gate.
    Production evidence for the split: the
    [Nebius/WEKA shared-KV benchmark](https://nebius.com/blog/posts/nebius-weka-shared-kv-cache-benchmark-hgx-b300)
    (8-hour agentic-coding replay, DeepSeek-V4-Pro, HGX B300) served 2.4x more requests
@@ -101,9 +111,11 @@ rounding of float64. The evidence K1 must produce is not "the model got faster" 
 decoded token, measured with the same counters as M1, should fall toward one read of
 the KV. Expected to matter on its own for stock-style `-nkvo` runs.
 
-**Z1. RAM-only store.** The v0.7 store needs `ARGUS_KV_DIR`; v0.8 needs a store whose
-bottom tier is RAM (pinned or pageable) with no backing file, keeping budgets, page
-descriptors and verification of moves.
+**Z1. RAM-bottomed store with a light disk tier.** The v0.7 store needs `ARGUS_KV_DIR`
+and treats disk as the home of every page. v0.8 needs a store that works with RAM
+(pinned or pageable) as its bottom tier and no backing file, keeping budgets, page
+descriptors and verification of moves; when a disk directory is given, disk becomes an
+optional lower tier under a write-rate budget and idle I/O priority.
 
 **S1. Split attention.** GPU-resident pages on the GPU kernel, RAM pages on K1,
 concurrently, merged by log-sum-exp; only q and the partial (output, max, sum) cross
@@ -139,8 +151,9 @@ demotes instead of drops, and one budget shared with the planner (P1).
 
 - Qwen3.6 at 262K filled decodes several times faster than stock `-nkvo` (projection:
   ≈ 1 tok/s stock vs 5–10 tok/s), exact mode.
-- The longest filled context that runs on this machine with no disk, per model, in exact
-  and capacity mode, with quality numbers for the latter.
+- The longest filled context that runs on this machine without heavy disk use, per
+  model, in exact and capacity mode, with quality numbers for the latter and disk
+  bytes and iowait for both.
 - Every number reproducible from a script in `docs/measurements/v080-*`.
 
 ## Carried from the v0.7 backlog
