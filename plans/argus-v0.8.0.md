@@ -71,7 +71,11 @@ Each one: plan → measurement → accept or reject, recorded like v0.7's E-seri
 **M1. Stock baseline with the context actually filled.**
 Qwen3.6 and UI-Mate at 32K, 64K, 128K, 262K filled tokens: prefill time, decode tok/s,
 VRAM and RAM peaks, for stock in-VRAM (while it fits), stock `-nkvo`, and stock with
-quantized KV. Also: free VRAM next to each model, and RAM bandwidth while experts are
+quantized KV. Every run also records, in the same artifact: attention wall time per
+decoded token, the number of populated KV cells, **physical DRAM bytes read** (memory
+controller counters `uncore_imc_free_running_*/data_read`), and CPU utilization. Runs
+only on a cleared machine (IDEs, Gradle, browsers, emulator closed): swap and reclaim
+noise would contaminate the scaling curve. Also: free VRAM next to each model, and RAM bandwidth while experts are
 read. Also records which v0.7 limits bite on these models (head dim 256, hybrid
 linear-attention memory, sliding-window caches, F16-only CUDA path).
 *This is the table every later experiment is judged against.*
@@ -80,7 +84,10 @@ linear-attention memory, sliding-window caches, F16-only CUDA path).
 One pass over a KV head serves all of its query heads (8 for Qwen3.6), block by block
 with online softmax, f16 / q8_0 / q4_0. Gate: ≥ 30 GB/s effective KV read on the census
 geometry at 131K cells (stock: 4.9–5.2), bit-exact with its staged reference, within fp32
-rounding of float64. Expected to matter on its own for stock-style `-nkvo` runs.
+rounding of float64. The evidence K1 must produce is not "the model got faster" but
+**same KV → same attention result → far less DRAM traffic**: DRAM bytes read per
+decoded token, measured with the same counters as M1, should fall toward one read of
+the KV. Expected to matter on its own for stock-style `-nkvo` runs.
 
 **Z1. RAM-only store.** The v0.7 store needs `ARGUS_KV_DIR`; v0.8 needs a store whose
 bottom tier is RAM (pinned or pageable) with no backing file, keeping budgets, page
