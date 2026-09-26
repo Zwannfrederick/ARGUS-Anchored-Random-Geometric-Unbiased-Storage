@@ -714,3 +714,43 @@ Results:
 - GPU-control prefill A/B: 2.228 → 2.151 s (−3.5%), 5/5, hash `a152ed56`.
 - This session was loaded by foreign desktop apps (load ≈ 5), so absolute times are
   above the release gate's 2.000 s.
+
+## E9 (2026-09-26): GPU-control attention without a per-call wait — ACCEPT; M4 met
+
+Data: [`v070-e9-2026-09-26/`](../docs/measurements/v070-e9-2026-09-26/).
+
+Once E8 has built a GPU-control store's device page table, the default attention path
+(`cells-v2`) reads K/V pages through that table directly. There is no per-call pointer
+table to build, allocate or upload, and no stream wait at the end, so the next layer's
+work queues behind the kernel.
+
+Why that is safe:
+- Nothing is borrowed. Any page replacement drops the table, and freeing GPU memory
+  synchronizes the device first.
+- The profiler still waits, but only when CUDA-event timing is requested.
+- The reference paths keep the borrowing path.
+
+Tests:
+- A parity test: the table path and the borrowing path agree bit for bit on a
+  non-blocking stream.
+- A mutation that shifts the table by one page fails the test.
+- Native 16 passed.
+
+A/B against E8 (5/5, hash `a152ed56`):
+- prefill 1.936 → 1.664 s (−14%);
+- decode 43.6 → 55.9 tok/s.
+
+**Final baseline** (MCP indexers paused, 5 repeats):
+
+| mode | prefill median (range) | decode tok/s |
+|---|---:|---:|
+| stock-host | 1.350 s (1.333–1.366) | 37.5 |
+| ARGUS GPU control | **1.679 s** (1.661–1.931) | **55.3** |
+| ARGUS policy-on (3 repeats, path unchanged) | 2.177 s (2.159–2.182) | 38.4 |
+
+- **M4 (< 2.00 s) is met.** All five runs are below the line; the median ratio is
+  **1.24x** stock.
+- The stretch goal (< 1.75 s) is met by the median, with 2 of 5 runs above it.
+- Decode is 1.5x stock.
+- Policy-on stores are not GPU-authoritative, so they keep the borrowing path. Giving
+  them the same async read is the obvious next step for the product mode.

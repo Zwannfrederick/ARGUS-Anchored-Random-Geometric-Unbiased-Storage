@@ -200,6 +200,35 @@ static void check_gpu_set_rows() {
         const auto descriptor = argus_disk_page_descriptor(k, page * 4096);
         require(descriptor.written && descriptor.placement == ArgusTier::gpu);
     }
+    // Attention over a device-appended store reads the store's page table without waiting:
+    // bit-exact with the path that borrows pages and waits.
+    {
+        using namespace argus_profile;
+        auto * view = ggml_view_3d(ctx, k, 64, 2, cells, 64 * sizeof(ggml_fp16_t), 128 * sizeof(ggml_fp16_t), 0);
+        auto * q = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, 64, 4, 3);
+        auto * mask = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, cells, 3);
+        ArgusTierBuffer q_gpu(ArgusTier::gpu, ggml_nbytes(q)), mask_gpu(ArgusTier::gpu, ggml_nbytes(mask));
+        ArgusTierBuffer out_gpu(ArgusTier::gpu, 64 * 4 * 3 * sizeof(float));
+        std::vector<float> query(64 * 4 * 3), zeros(cells * 3, 0.0f), fast(query.size()), borrowed(query.size());
+        for (auto & x : query) { x = normal(rng); }
+        q_gpu.write(query.data(), ggml_nbytes(q));
+        mask_gpu.write(zeros.data(), ggml_nbytes(mask));
+        q->data = q_gpu.data();
+        mask->data = mask_gpu.data();
+        auto * attention = argus_ggml_cuda_attention(ctx, q, view, view, mask, 0.125f);
+        attention->data = out_gpu.data();
+        const auto accepted = resident_accepted[prefill].load(), lanes = resident_cell_kernel[prefill].load();
+        unsetenv("ARGUS_KV_ATTENTION_PATH");
+        compute(attention, 0, stream);
+        require(cudaStreamSynchronize(stream) == cudaSuccess);
+        out_gpu.read(fast.data(), 0, fast.size() * sizeof(float));
+        require(resident_accepted[prefill] == accepted + 1 && resident_cell_kernel[prefill] == lanes + 1);
+        setenv("ARGUS_KV_ATTENTION_PATH", "batched", 1);
+        compute(attention, 0, stream);
+        out_gpu.read(borrowed.data(), 0, borrowed.size() * sizeof(float));
+        unsetenv("ARGUS_KV_ATTENTION_PATH");
+        require(fast == borrowed);
+    }
     // A row outside the tensor cannot be refused inside the kernel; the next append refuses.
     const int64_t outside[] = {3, 40, 80, 79, 17};
     indices_gpu.write(outside, sizeof outside);

@@ -546,6 +546,41 @@ void resident_compute(size_t k_pages, size_t v_pages, void * raw) {
     }
 }
 
+// GPU control with a device page table: the default kernel reads the store's own table,
+// so there is no per-call table to build or upload and nothing to wait for. The next
+// layer's work queues behind the kernel. Reference paths keep the borrowing path.
+bool table_attention(ggml_tensor * dst, cudaStream_t stream) {
+    const char * path = std::getenv("ARGUS_KV_ATTENTION_PATH");
+    if (path && std::strcmp(path, "cells-v2") != 0) { return false; }
+    const auto * q = dst->src[0], * k = dst->src[1], * v = dst->src[2], * mask = dst->src[3];
+    if (q->ne[0] != 64 || v->ne[0] != 64) { return false; }
+    ResidentKV pages{};
+    if (!argus_disk_gpu_table(k, v, &pages.keys, &pages.values, &pages.key_offset, &pages.value_offset)) { return false; }
+    if (pages.key_offset % (64 * sizeof(half)) || pages.value_offset % (64 * sizeof(half))) { return false; }
+    float scale;
+    std::memcpy(&scale, reinterpret_cast<const char *>(dst->op_params) + sizeof(ggml_custom_op_params), sizeof scale);
+    std::unique_ptr<Event> begin, end;
+    if (argus_profile::cuda_events()) {
+        begin = std::make_unique<Event>(); end = std::make_unique<Event>();
+        check(cudaEventRecord(begin->value, stream));
+    }
+    attention_resident_cells<true, true, true><<<(q->ne[1] * q->ne[2] + 3) / 4, 128, 0, stream>>>(
+        static_cast<const char *>(q->data), static_cast<const char *>(mask->data), mask->type == GGML_TYPE_F16,
+        static_cast<float *>(dst->data), q->ne[1], k->ne[1], q->ne[2], k->ne[2],
+        q->nb[1], q->nb[2], mask->nb[0], mask->nb[1], scale, pages);
+    check(cudaGetLastError());
+    using namespace argus_profile;
+    ++resident_cell_kernel[phase];
+    ++resident_accepted[phase];
+    if (enabled()) { ++kernel_launches[phase]; ++resident_calls[phase]; }
+    if (end) { // timing needs the kernel finished; profiling only
+        check(cudaEventRecord(end->value, stream));
+        argus_cuda_wait(stream);
+        elapsed(kernel_gpu, *begin, *end);
+    }
+    return true;
+}
+
 bool try_resident(ggml_tensor * dst, cudaStream_t stream, size_t state_bytes) {
     const char * path = std::getenv("ARGUS_KV_ATTENTION_PATH");
     // Default (and "cells-v2"): batched with the lane-per-cell D=64 kernel, coalesced
@@ -599,7 +634,7 @@ void compute_impl(ggml_tensor * dst, int device, void * raw_stream) {
     const size_t tile_bytes = aligned(key_bytes + value_bytes);
     const size_t state_bytes = aligned(2 * sizeof(float) * q->ne[1] * q->ne[2]);
     argus_kv_policy_prepare(2 * tile_bytes + state_bytes, 2 * tile_bytes);
-    if (try_resident(dst, stream, state_bytes)) {
+    if (table_attention(dst, stream) || try_resident(dst, stream, state_bytes)) {
         if (!(kr == argus_disk_revision(k)) || !(vr == argus_disk_revision(v))) { throw std::runtime_error("ARGUS stale CUDA attention"); }
         argus_kv_policy_observe(k);
         argus_kv_policy_observe(v);

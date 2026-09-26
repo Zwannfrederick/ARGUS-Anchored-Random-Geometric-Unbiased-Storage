@@ -88,6 +88,11 @@ void argus_cuda_zero(void * device, size_t bytes, void * stream);
 // nothing, for other stores or when the budget cannot hold every page.
 bool argus_disk_gpu_rows_on_device(const ggml_tensor * target, void * stream,
         void (*launch)(void * const * pages, size_t base, int * error, void * context), void * context);
+// GPU control with the device page table built: tables for k and v, indexed from the page
+// holding each tensor's first byte, and those bytes' offsets within their pages. Nothing is
+// borrowed: replacing a page drops the table, and freeing GPU memory synchronizes first.
+bool argus_disk_gpu_table(const ggml_tensor * k, const ggml_tensor * v, const void * const ** keys,
+                          const void * const ** values, size_t * key_offset, size_t * value_offset);
 void * argus_cuda_event_create();
 void argus_cuda_event_record(void * event, void * stream);
 void argus_cuda_event_wait(void * event);

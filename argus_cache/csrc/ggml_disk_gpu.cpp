@@ -596,6 +596,27 @@ bool argus_disk_gpu_rows_on_device(const ggml_tensor * target, void * stream,
     return true;
 }
 
+bool argus_disk_gpu_table(const ggml_tensor * k, const ggml_tensor * v, const void * const ** keys,
+                          const void * const ** values, size_t * key_offset, size_t * value_offset) {
+    const ggml_tensor * tensors[] = {k, v};
+    const void * const * tables[2];
+    size_t offsets[2];
+    for (int t = 0; t < 2; ++t) {
+        if (!argus_ggml_is_disk_tensor(tensors[t])) { return false; }
+        auto & store = store_for((tensors[t]->view_src ? tensors[t]->view_src : tensors[t])->buffer);
+        std::lock_guard<std::mutex> guard(store.mutex);
+        if (!store.gpu_control || !store.page_table) { return false; }
+        const size_t base = checked_offset(store, tensors[t], 0, ggml_nbytes(tensors[t]));
+        tables[t] = static_cast<const void * const *>(store.page_table->data()) + base / page_size;
+        offsets[t] = base % page_size;
+    }
+    *keys = tables[0];
+    *values = tables[1];
+    *key_offset = offsets[0];
+    *value_offset = offsets[1];
+    return true;
+}
+
 void argus_disk_flush(const ggml_tensor * tensor) {
     if (!argus_ggml_is_disk_tensor(tensor)) { throw std::invalid_argument("ARGUS flush requires disk storage"); }
     auto & store = store_for((tensor->view_src ? tensor->view_src : tensor)->buffer);
