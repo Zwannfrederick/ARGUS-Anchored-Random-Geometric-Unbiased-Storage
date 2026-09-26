@@ -858,3 +858,18 @@ MCP indexers paused; hash `a152ed56` everywhere.
   measure how much the E7b background flusher published inside the request window.
   A shorter request flushes less inside the window: 8.4–9.4 MB against 13.5–13.7 MB.
 - Every E10 attention call took the table path: 1512 calls, 0 cold pages.
+
+### Final baseline after E10 (`b45a860`, MCP indexers paused)
+
+| mode | prefill median (range) | decode tok/s |
+|---|---:|---:|
+| stock-host | 1.336 s (1.331–1.341) | 37.5 |
+| ARGUS GPU control | **1.719 s** (1.666–1.759) | **55.6** |
+| ARGUS policy-on (3 repeats) | **1.821 s** (1.814–1.826) | **48.2** |
+
+- GPU control is 1.29x stock and policy-on 1.36x.
+- Both ARGUS modes decode faster than stock.
+- Placement counters: 0 promotions, 0 demotions, 12,768 commits.
+- Hash `a152ed56` on every ARGUS run.
+- M4 (< 2.00 s) is met by both modes.
+- v0.7 stops here.
