@@ -54,8 +54,17 @@ each KV head once ≈ 0.10 s (f16) or ≈ 0.05 s (q8_0 cold pages), plus ≈ 15 
    KV across PCIe on the decode path.
 3. **One memory plan for weights and KV.** VRAM and RAM bandwidth are budgets shared by
    expert weights and KV pages; placement follows measured marginal benefit.
-4. **No disk.** The bottom tier is RAM. Capacity beyond RAM comes from compression, not
-   from storage.
+4. **No disk on the decode path; disk allowed as a session store.** KV that a decode
+   step reads lives in VRAM or RAM, and capacity beyond RAM comes from compression. KV
+   of an idle session or a shared prefix is different: it is read once when the session
+   resumes, and one read replaces a whole prefill. Evicting it should demote it to a
+   lower tier (RAM, then the verified disk store of v0.5–v0.7), not drop it.
+   Production evidence for the split: the
+   [Nebius/WEKA shared-KV benchmark](https://nebius.com/blog/posts/nebius-weka-shared-kv-cache-benchmark-hgx-b300)
+   (8-hour agentic-coding replay, DeepSeek-V4-Pro, HGX B300) served 2.4x more requests
+   with an NVMe tier under HBM, cache hits 40% → 93%, uncached input per request
+   33,900 → 4,400 tokens. The gain came from not repeating prefill, not from faster
+   decode.
 5. **Two modes, never mixed silently.**
    - *Exact mode* (default): full softmax attention over every cell, KV stored at the
      precision llama.cpp was asked for. Each new path has a staged reference with the
@@ -71,7 +80,10 @@ Each one: plan → measurement → accept or reject, recorded like v0.7's E-seri
 **M1. Stock baseline with the context actually filled.**
 Qwen3.6 and UI-Mate at 32K, 64K, 128K, 262K filled tokens: prefill time, decode tok/s,
 VRAM and RAM peaks, for stock in-VRAM (while it fits), stock `-nkvo`, and stock with
-quantized KV. Every run also records, in the same artifact: attention wall time per
+quantized KV. `--cache-ram` is set explicitly in every run: its default (8 GiB of host
+prompt cache) competes with 22.6 GB of Qwen3.6 weights for 31.9 GB of RAM. NVMe
+sequential read (`O_DIRECT`) joins the census, for the session-store arithmetic. Every
+run also records, in the same artifact: attention wall time per
 decoded token, the number of populated KV cells, **physical DRAM bytes read** (memory
 controller counters `uncore_imc_free_running_*/data_read`), and CPU utilization. Runs
 only on a cleared machine (IDEs, Gradle, browsers, emulator closed): swap and reclaim
@@ -114,8 +126,14 @@ whose combined softmax weight is provably below ε are not read, so the output e
 bounded by ε·max|v|. ε = 0 is exact mode. Related work to survey first: Quest,
 InfiniGen, ShadowKV, MagicPIG, FastDecode.
 
-**R1. Prefix reuse in RAM.** Keep the KV of a repeated prefix (system prompt, tool
-definitions) resident across requests to avoid re-running long prefills.
+**R1. Session and prefix reuse.** Stock llama.cpp at the pinned revision already has
+a host-RAM prompt cache (`--cache-ram`, default 8 GiB), context checkpoints for hybrid
+and sliding-window models (`--ctx-checkpoints`, 32 per slot; required for Qwen3.6's
+linear-attention state) and manual slot save/restore to disk (`--slot-save-path`).
+First measure those on a replayed agent session (neo, Claude Code): hit rate, prefilled
+tokens per turn, time to first token, RAM they hold. Build only what is missing, most
+likely a disk session tier that reuses the verified v0.5–v0.7 store, eviction that
+demotes instead of drops, and one budget shared with the planner (P1).
 
 ## Success
 
