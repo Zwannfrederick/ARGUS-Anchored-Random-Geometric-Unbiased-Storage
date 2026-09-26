@@ -107,6 +107,11 @@ int main(int argc, char ** argv) try {
     params.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED;
     params.type_k = kv_type;
     params.type_v = kv_type;
+#ifndef ARGUS_TEST_CUDA_TIER
+    // The reference is stock CPU attention. A CUDA build would otherwise offload host
+    // tensor operations (flash attention included) to the GPU, where it computes differently.
+    params.op_offload = false;
+#endif
 
     unsetenv("ARGUS_KV_DIR");
     unsetenv("ARGUS_KV_RESIDENT_BYTES");
