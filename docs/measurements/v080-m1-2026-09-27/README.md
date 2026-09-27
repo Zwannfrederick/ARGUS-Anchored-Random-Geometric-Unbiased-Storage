@@ -25,12 +25,18 @@ the CPU with `--cpu-moe`), f16 KV.
 | 8K (probe) | 24.45 | 6.64 ¹ | 20.42 | 22.32 | 0.91x |
 | 32K | **22.47** | 3.15 | 13.23 | 20.12 | 0.90x |
 | 64K | **does not start** ² | 1.86 | 9.49 | **12.31** | **6.6x** |
-| 128K | — | running ³ | 4.41 | **6.18** | — |
+| 128K | — | **did not finish** ³ | 4.41 | **6.18** | — |
 
 ¹ Earlier build (8K probe), before recurrent state stayed on the GPU under ARGUS.
 ² The context fails to allocate its prefill compute buffer (841 MB) next to 1.3 GB of KV.
-³ Stock `-nkvo` at 128K was left running at the end of the day; its result lands in
-`results/qwen36-128k.json`.
+³ Stock `-nkvo` at 128K was stopped after 15 minutes: the machine was thrashing. Swap
+(4 GB zram + 512 MB file) was full, the server sat in uninterruptible disk wait, only
+11.8 GB of the 22.6 GB model file stayed resident and was re-read from disk at ~300 MB/s
+(iowait 9–10%). At that rate every prefill batch takes ~75 s instead of ~7 s. The K1 and
+tiers runs at 128K, which run prefill attention on the GPU, completed without this.
+Hypothesis to test: stock's CPU prefill attention adds host compute buffers (the 2048 x
+131K F32 mask alone is 1 GB, plus its F16 copy) to 2.6 GB of pageable KV, and that pushes
+22.6 GB of mmapped weights out of 31.9 GB of RAM. Not yet measured.
 
 Every run found the hidden fact (`needle_found`), including tiers at 128K.
 
@@ -50,7 +56,7 @@ Every run found the hidden fact (`needle_found`), including tiers at 128K.
 |---|---:|---:|---:|
 | 32K | 111.6 s | 128.9 s | 113.8 s |
 | 64K | — | 271.7 s | 242.2 s |
-| 128K | — | running | 540.3 s (K1 run: 544.8 s) |
+| 128K | — | did not finish (thrashing) | 540.3 s (K1 run: 544.8 s) |
 
 **Prefill is dominated by expert weights, not KV.** With `--cpu-moe`, llama.cpp copies
 every expert of every layer (≈ 21 GB) across PCIe (3.1 GB/s) for each prefill batch: ≈ 7 s
