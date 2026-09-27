@@ -1,0 +1,11 @@
+type=f16 d=256 heads=16/2 n_kv=20224 tokens=1 k1_error=1.61e-07 stock_error=0.000794
+type=q8_0 d=256 heads=16/2 n_kv=5120 tokens=1 k1_error=3.88e-08 stock_error=0.000683
+type=q4_0 d=256 heads=16/2 n_kv=5120 tokens=1 k1_error=4.99e-08 stock_error=0.000677
+type=f16 d=512 heads=16/2 n_kv=4352 tokens=1 k1_error=7.09e-08 stock_error=0.00108
+type=f16 d=256 heads=16/4 n_kv=3072 tokens=3 k1_error=1.3e-07 stock_error=0.00158
+type=f32 d=64 heads=8/8 n_kv=700 tokens=2 k1_error=1.58e-07 stock_error=1.94e-07
+type=f16 d=40 heads=4/1 n_kv=300 tokens=1 k1_error=2.02e-07 stock_error=0.00107
+type=f16 d=256 heads=16/2 n_kv=33 tokens=1 k1_error=1.35e-07 stock_error=0.000874
+type=f16 d=256 heads=16/2 n_kv=1 tokens=1 k1_error=0 stock_error=0
+type=f16 d=128 heads=32/8 n_kv=12 tokens=12 k1_error=1.75e-07 stock_error=0.000837
+ok

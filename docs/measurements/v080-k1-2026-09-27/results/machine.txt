@@ -1,0 +1,20 @@
+2026-09-27T21:54:47+03:00
+7.2.7-zen1-1-zen
+git 1c3562c42773ba6adb39d0bdd2a3034c44a3fa72 dirty=1
+Model adı:                               11th Gen Intel(R) Core(TM) i5-11300H @ 3.10GHz
+CPU(s) scaling MHz:                      85%
+İşlemci en yüksek MHz:                   3100,0000
+İşlemci asgari MHz:                      400,0000
+turbo disabled: 1
+governor: powersave
+               total        used        free      shared  buff/cache   available
+Mem:           31869       10121        7021         711       16210       21747
+Swap:           4607           1        4606
+ 21:54:47 up  1:02,  1 user,  load average: 3,35, 4,21, 4,86
+quiet.sh: paused 42 processes: antigravity-ide x17, ChatGPT x10, clangd.main x2, codebase-memory x2, language_server x2, pyrefly x1, vesktop x8
+ARGUS K1: decode attention on host KV (f16/f16, head dim 256, 16/2 heads)
+quiet.sh: paused 42 processes: antigravity-ide x17, ChatGPT x10, clangd.main x2, codebase-memory x2, language_server x2, pyrefly x1, vesktop x8
+ARGUS K1: decode attention on host KV (f16/f16, head dim 256, 16/2 heads)
+quiet.sh: paused 43 processes: antigravity-ide x17, ChatGPT x10, clangd.main x2, codebase-memory x3, language_server x2, pyrefly x1, vesktop x8
+ARGUS K1: decode attention on host KV (f16/f16, head dim 256, 16/2 heads)
+ 21:58:32 up  1:06,  1 user,  load average: 2,18, 3,21, 4,31
