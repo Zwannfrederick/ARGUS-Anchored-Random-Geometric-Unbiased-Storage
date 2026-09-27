@@ -1,4 +1,5 @@
 #include "ggml_cuda_attention.h"
+#include "ggml_cuda_external.h"
 #include "ggml_kv_policy.h"
 #include "ggml_profile.h"
 #include "ggml-cuda.h"
@@ -144,20 +145,6 @@ __global__ void attention_tile(const char * query, const half * keys, const half
     }
     if (d < dv) { output[row * dv + d] = last ? (sum > 0 ? acc / sum : 0.0f) : acc; }
     if (d == 0) { state[2 * row] = maximum; state[2 * row + 1] = sum; }
-}
-void cpu_refused(ggml_tensor *, int, int, void *) { GGML_ABORT("ARGUS CUDA operation assigned to CPU"); }
-// Every ARGUS CUDA node shares the one registered external marker; op_params carries its kind.
-enum ExternalKind : int32_t { kind_attention = 0, kind_set_rows = 1 };
-constexpr size_t kind_offset = sizeof(ggml_custom_op_params) + sizeof(float); // after attention's scale
-static_assert(kind_offset + sizeof(int32_t) <= GGML_MAX_OP_PARAMS);
-int32_t external_kind(const ggml_tensor * tensor) {
-    if (tensor->op != GGML_OP_CUSTOM) { return -1; }
-    ggml_custom_op_params params;
-    std::memcpy(&params, tensor->op_params, sizeof params);
-    if (params.fun != cpu_refused) { return -1; }
-    int32_t kind;
-    std::memcpy(&kind, reinterpret_cast<const char *>(tensor->op_params) + kind_offset, sizeof kind);
-    return kind;
 }
 
 // Four query/head warps per block, full context in one invocation. The staged
@@ -811,14 +798,17 @@ void set_rows_compute(ggml_tensor * dst, int device, void * raw_stream) {
     { argus_profile::Scope wait(argus_profile::synchronization); check(cudaStreamSynchronize(stream)); }
     argus_disk_append_rows(target, static_cast<const char *>(host.data()), source->nb[1], rows.data(), count);
 }
-void compute(ggml_tensor * dst, int device, void * raw_stream) {
-    if (external_kind(dst) == kind_set_rows) { set_rows_compute(dst, device, raw_stream); return; }
-    argus_profile::InPhase phase(dst->src[0]->ne[2] > 1);
-    compute_impl(dst, device, raw_stream);
+} // namespace
+
+void argus_cuda_set_rows_compute(ggml_tensor * dst, int device, void * stream) { set_rows_compute(dst, device, stream); }
+void argus_cuda_attention_compute(ggml_tensor * dst, int device, void * stream) {
+    {
+        argus_profile::InPhase phase(dst->src[0]->ne[2] > 1);
+        compute_impl(dst, device, stream);
+    }
     // Publish after timers and scratch destructors, including the final attention call.
     argus_disk_publish_stats();
 }
-} // namespace
 
 ArgusTierBuffer::ArgusTierBuffer(ArgusTier tier, size_t bytes) : tier_(tier), bytes_(aligned(bytes)) {
     argus_profile::Scope timer(argus_profile::allocation);
@@ -932,14 +922,6 @@ void argus_cuda_wait(void * stream) {
     pending_copies = 0;
 }
 
-static void register_external_op() {
-    static const bool registered = [] {
-        ggml_backend_cuda_register_custom_op(cpu_refused, compute, argus_ggml_disk_buffer_type());
-        return true;
-    }();
-    (void) registered;
-}
-
 ggml_tensor * argus_ggml_cuda_attention(ggml_context * ctx, ggml_tensor * q, ggml_tensor * k,
                                        ggml_tensor * v, ggml_tensor * mask, float scale) {
     if (!q || !k || !v || !mask || q->type != GGML_TYPE_F32 ||
@@ -958,18 +940,9 @@ ggml_tensor * argus_ggml_cuda_attention(ggml_context * ctx, ggml_tensor * q, ggm
         throw std::runtime_error("ARGUS CUDA attention requires FP16 KV, packed cells, D<=256 and single-stream GQA");
     }
     setting("ARGUS_KV_GPU_BYTES"); setting("ARGUS_KV_PINNED_BYTES");
-    register_external_op();
     ggml_tensor * args[] = {q, k, v, mask};
-    auto * result = ggml_custom_4d(ctx, GGML_TYPE_F32, v->ne[0], q->ne[1], q->ne[2], 1,
-                                  args, 4, cpu_refused, 1, nullptr);
-    static_assert(sizeof(ggml_custom_op_params) + sizeof scale <= GGML_MAX_OP_PARAMS);
-    std::memcpy(reinterpret_cast<char *>(result->op_params) + sizeof(ggml_custom_op_params), &scale, sizeof scale);
-    const int32_t kind = kind_attention;
-    std::memcpy(reinterpret_cast<char *>(result->op_params) + kind_offset, &kind, sizeof kind);
-    return result;
+    return argus_cuda_external_op(ctx, v->ne[0], q->ne[1], q->ne[2], args, 4, argus_kind_attention, scale);
 }
-bool argus_ggml_is_cuda_attention(const ggml_tensor * tensor) { return external_kind(tensor) == kind_attention; }
-bool argus_ggml_is_cuda_set_rows(const ggml_tensor * tensor) { return external_kind(tensor) == kind_set_rows; }
 ggml_tensor * argus_ggml_cuda_set_rows(ggml_context * ctx, ggml_tensor * target, ggml_tensor * source,
                                        ggml_tensor * indices) {
     if (!argus_disk_gpu_appendable(target) || target->type != GGML_TYPE_F16 || source->type != GGML_TYPE_F32 ||
@@ -978,12 +951,8 @@ ggml_tensor * argus_ggml_cuda_set_rows(ggml_context * ctx, ggml_tensor * target,
         throw std::runtime_error("ARGUS GPU append contract is unsupported");
     }
     setting("ARGUS_KV_GPU_BYTES");
-    register_external_op();
     ggml_tensor * args[] = {source, indices, target};
-    auto * result = ggml_custom_4d(ctx, GGML_TYPE_F32, 1, 1, 1, 1, args, 3, cpu_refused, 1, nullptr);
-    const int32_t kind = kind_set_rows;
-    std::memcpy(reinterpret_cast<char *>(result->op_params) + kind_offset, &kind, sizeof kind);
-    return result;
+    return argus_cuda_external_op(ctx, 1, 1, 1, args, 3, argus_kind_set_rows, 0.0f);
 }
 __global__ void store_pointer(void ** slot, void * value) { *slot = value; }
 void argus_cuda_store_pointer(void ** slot, void * value, void * stream) {

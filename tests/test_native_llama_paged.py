@@ -63,6 +63,15 @@ def test_decode_attention_k1_matches_reference_at_every_thread_count(tmp_path, i
     assert result.stdout.count("k1_error=") == 10 and result.stdout.endswith("ok\n")
 
 
+@pytest.mark.skipif(os.environ.get("ARGUS_TEST_CUDA") != "1", reason="set ARGUS_TEST_CUDA=1 with CUDA build")
+def test_split_attention_gpu_and_k1_parts_match_reference(tmp_path):
+    binary = _compile(tmp_path, "tests/cpp/test_ggml_split_attention.cpp", [],
+                      ["-lllama", "-lggml-base", "-lggml-cpu", "-lggml-cuda", "-lggml"])
+    result = subprocess.run([binary], capture_output=True, text=True, timeout=600)
+    assert result.returncode == 0, result.stderr[-2000:]
+    assert result.stdout.count("error=") == 7 and result.stdout.endswith("ok\n")
+
+
 def test_paged_workers_release_coordination_between_invocations(tmp_path):
     binary = _compile(tmp_path, "tests/cpp/test_ggml_paged_coordination.cpp",
                       [str(ROOT / "argus_cache/csrc/ggml_host_buffer.cpp"),
@@ -177,17 +186,20 @@ def test_cuda_tier_migration_and_attention(tmp_path):
     if nvcc is None:
         pytest.skip("CUDA toolkit required")
     cuda = Path(nvcc).resolve().parents[1]
-    obj = tmp_path / "cuda_attention.o"
-    subprocess.run(
-        [nvcc, "-std=c++17", "-arch=sm_86", "-Xcompiler=-fPIC",
-         f"-I{LLAMA}/ggml/include", f"-I{LLAMA}/ggml/src", f"-I{ROOT}/argus_cache/csrc",
-         "-c", str(ROOT / "argus_cache/csrc/ggml_cuda_attention.cu"), "-o", str(obj)], check=True,
-    )
+    objects = []
+    # The external-op dispatch reaches every ARGUS CUDA kind, so all three units link together.
+    for unit in ("ggml_cuda_attention", "ggml_cuda_external", "ggml_split_attention"):
+        objects.append(tmp_path / f"{unit}.o")
+        subprocess.run(
+            [nvcc, "-std=c++17", "-arch=sm_86", "-Xcompiler=-fPIC",
+             f"-I{LLAMA}/ggml/include", f"-I{LLAMA}/ggml/src", f"-I{ROOT}/argus_cache/csrc",
+             "-c", str(ROOT / f"argus_cache/csrc/{unit}.cu"), "-o", str(objects[-1])], check=True,
+        )
     binary = _compile(tmp_path, "tests/cpp/test_ggml_cuda_mechanism.cpp",
                       ["-DARGUS_CUDA", f"-I{cuda}/include", str(ROOT / "argus_cache/csrc/ggml_disk_buffer.cpp"),
                        str(ROOT / "argus_cache/csrc/ggml_disk_gpu.cpp"),
                        str(ROOT / "argus_cache/csrc/ggml_kv_policy.cpp"),
-                       str(obj), f"-L{cuda}/lib64", f"-Wl,-rpath,{cuda}/lib64",
+                       *map(str, objects), f"-L{cuda}/lib64", f"-Wl,-rpath,{cuda}/lib64",
                        "-Wl,--wrap=pwrite", "-Wl,--wrap=pread", "-pthread"],
                       ["-lggml-base", "-lggml-cpu", "-lggml", "-lcudart"])
     for dimension in (48, 64, 256):

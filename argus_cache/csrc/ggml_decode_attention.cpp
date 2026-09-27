@@ -295,7 +295,26 @@ int64_t max_tokens() {
     return value;
 }
 
-ArgusK1Problem problem_of(float scale, const ggml_tensor * q, const ggml_tensor * k, const ggml_tensor * v,
+// What a node needs beyond its tensors. GGML custom ops keep their own state in op_params,
+// so this travels as interned userdata.
+struct Call {
+    float scale;
+    int64_t mask_cell0;  // cell c of k/v reads mask column mask_cell0 + c
+    bool operator==(const Call & other) const { return scale == other.scale && mask_cell0 == other.mask_cell0; }
+};
+
+const Call * intern(Call call) {
+    static std::mutex lock;
+    static std::deque<Call> calls;
+    std::lock_guard<std::mutex> guard(lock);
+    for (const auto & known : calls) {
+        if (known == call) { return &known; }
+    }
+    calls.push_back(call);
+    return &calls.back();
+}
+
+ArgusK1Problem problem_of(const Call & call, const ggml_tensor * q, const ggml_tensor * k, const ggml_tensor * v,
                           const ggml_tensor * mask) {
     ArgusK1Problem p{};
     p.dk = k->ne[0]; p.dv = v->ne[0]; p.n_head = q->ne[1]; p.n_head_kv = k->ne[1]; p.n_tokens = q->ne[2]; p.n_kv = k->ne[2];
@@ -303,14 +322,18 @@ ArgusK1Problem problem_of(float scale, const ggml_tensor * q, const ggml_tensor 
     p.q = static_cast<const char *>(q->data); p.q_head_stride = q->nb[1]; p.q_token_stride = q->nb[2];
     p.k = static_cast<const char *>(k->data); p.k_head_stride = k->nb[1]; p.k_cell_stride = k->nb[2];
     p.v = static_cast<const char *>(v->data); p.v_head_stride = v->nb[1]; p.v_cell_stride = v->nb[2];
-    p.mask = static_cast<const char *>(mask->data); p.mask_type = mask->type; p.mask_token_stride = mask->nb[1];
-    p.scale = scale;
+    p.mask = static_cast<const char *>(mask->data) + call.mask_cell0 * ggml_type_size(mask->type);
+    p.mask_type = mask->type; p.mask_token_stride = mask->nb[1];
+    p.scale = call.scale;
     return p;
 }
 
-// GGML custom ops keep their own state in op_params, so the scale travels as userdata.
+ArgusK1Problem problem_of(const ggml_tensor * dst, void * userdata) {
+    return problem_of(*static_cast<const Call *>(userdata), dst->src[0], dst->src[1], dst->src[2], dst->src[3]);
+}
+
 void partials_op(ggml_tensor * dst, int ith, int nth, void * userdata) {
-    const ArgusK1Problem p = problem_of(*static_cast<const float *>(userdata), dst->src[0], dst->src[1], dst->src[2], dst->src[3]);
+    const ArgusK1Problem p = problem_of(dst, userdata);
     static std::once_flag announced;  // one line per process: runs can prove the path was taken
     std::call_once(announced, [&] {
         std::fprintf(stderr, "ARGUS K1: decode attention on host KV (%s/%s, head dim %lld, %lld/%lld heads)\n",
@@ -323,22 +346,18 @@ void partials_op(ggml_tensor * dst, int ith, int nth, void * userdata) {
     }
 }
 
+// src[4] holds K1's partials; src[5], when present, partials of the cells before them
+// (the GPU side of a split call), merged first.
 void reduce_op(ggml_tensor * dst, int ith, int nth, void * userdata) {
-    const ArgusK1Problem p = problem_of(*static_cast<const float *>(userdata), dst->src[0], dst->src[1], dst->src[2], dst->src[3]);
-    const int64_t rows = p.n_head_kv * p.rows();
-    argus_k1_reduce(p, static_cast<const float *>(dst->src[4]->data), rows * ith / nth, rows * (ith + 1) / nth,
-                    static_cast<char *>(dst->data), dst->nb[1], dst->nb[2]);
-}
-
-const float * intern_scale(float scale) {
-    static std::mutex lock;
-    static std::deque<float> values;
-    std::lock_guard<std::mutex> guard(lock);
-    for (const auto & value : values) {
-        if (value == scale) { return &value; }
+    const ArgusK1Problem p = problem_of(dst, userdata);
+    ArgusK1Partials parts[2];
+    int count = 0;
+    for (const ggml_tensor * source : {dst->src[5], dst->src[4]}) {
+        if (source) { parts[count++] = {static_cast<const float *>(source->data), source->ne[2]}; }
     }
-    values.push_back(scale);
-    return &values.back();
+    const int64_t rows = p.n_head_kv * p.rows();
+    argus_k1_reduce(p, parts, count, rows * ith / nth, rows * (ith + 1) / nth,
+                    static_cast<char *>(dst->data), dst->nb[1], dst->nb[2]);
 }
 
 bool host_resident(const ggml_tensor * tensor) {
@@ -362,9 +381,9 @@ void argus_k1_task(const ArgusK1Problem & p, int64_t task, float * partials) {
     attend_chunk(p, c0, std::min(c0 + chunk, p.n_kv), partials);
 }
 
-void argus_k1_reduce(const ArgusK1Problem & p, const float * partials, int64_t head_row0, int64_t head_row1,
-                     char * out, size_t out_head_stride, size_t out_token_stride) {
-    const int64_t chunks = argus_k1_tasks(p), G = p.group(), R = p.rows(), rows = p.n_head_kv * R;
+void argus_k1_reduce(const ArgusK1Problem & p, const ArgusK1Partials * parts, int n_parts, int64_t head_row0,
+                     int64_t head_row1, char * out, size_t out_head_stride, size_t out_token_stride) {
+    const int64_t G = p.group(), R = p.rows(), rows = p.n_head_kv * R;
     const int64_t stride = argus_k1_partial_floats(p);
     for (int64_t head_row = head_row0; head_row < head_row1; ++head_row) {
         const int64_t head_kv = head_row / R, row = head_row % R;
@@ -372,40 +391,74 @@ void argus_k1_reduce(const ArgusK1Problem & p, const float * partials, int64_t h
         auto * result = reinterpret_cast<float *>(out + head * out_head_stride + token * out_token_stride);
         std::fill_n(result, p.dv, 0.0f);
         float max = minus_inf, sum = 0.0f;
-        for (int64_t j = 0; j < chunks; ++j) {
-            const float * partial = partials + (j * rows + head_row) * stride;
-            if (partial[1] == 0.0f) { continue; }
-            const float merged = std::max(max, partial[0]);
-            const float keep = std::exp(max - merged), add = std::exp(partial[0] - merged);
-            for (int64_t i = 0; i < p.dv; ++i) { result[i] = result[i] * keep + partial[2 + i] * add; }
-            sum = sum * keep + partial[1] * add;
-            max = merged;
+        for (int part = 0; part < n_parts; ++part) {
+            for (int64_t j = 0; j < parts[part].chunks; ++j) {
+                const float * partial = parts[part].data + (j * rows + head_row) * stride;
+                if (partial[1] == 0.0f) { continue; }
+                const float merged = std::max(max, partial[0]);
+                const float keep = std::exp(max - merged), add = std::exp(partial[0] - merged);
+                for (int64_t i = 0; i < p.dv; ++i) { result[i] = result[i] * keep + partial[2 + i] * add; }
+                sum = sum * keep + partial[1] * add;
+                max = merged;
+            }
         }
         const float inverse = sum == 0.0f ? 0.0f : 1.0f / sum;
         for (int64_t i = 0; i < p.dv; ++i) { result[i] *= inverse; }
     }
 }
 
-ggml_tensor * argus_ggml_decode_attention(ggml_context * ctx, ggml_tensor * q, ggml_tensor * k, ggml_tensor * v,
-                                          ggml_tensor * mask, bool unsupported_features, float scale) {
-    if (!k1_enabled() || unsupported_features || !mask || q->ne[2] > max_tokens()) { return nullptr; }
-    const bool supported =
-        q->type == GGML_TYPE_F32 && q->nb[0] == sizeof(float) && q->ne[3] == 1 && k->ne[3] == 1 && v->ne[3] == 1 &&
-        q->ne[0] == k->ne[0] && k->ne[1] == v->ne[1] && k->ne[2] == v->ne[2] && q->ne[1] % k->ne[1] == 0 &&
+namespace {
+bool k1_supports(const ggml_tensor * q, const ggml_tensor * k, const ggml_tensor * v, const ggml_tensor * mask,
+                 int64_t mask_cell0) {
+    return q->type == GGML_TYPE_F32 && q->nb[0] == sizeof(float) && q->ne[3] == 1 && k->ne[3] == 1 && v->ne[3] == 1 &&
+        q->ne[0] == k->ne[0] && k->ne[1] == v->ne[1] && k->ne[2] == v->ne[2] && k->ne[2] > 0 && q->ne[1] % k->ne[1] == 0 &&
         v->nb[1] <= v->nb[2] && k->nb[0] == ggml_type_size(k->type) && v->nb[0] == ggml_type_size(v->type) &&
         k->ne[0] % ggml_blck_size(k->type) == 0 && v->ne[0] % ggml_blck_size(v->type) == 0 &&
         (k->type == GGML_TYPE_F32 || ggml_get_type_traits(k->type)->to_float) &&
         (v->type == GGML_TYPE_F32 || ggml_get_type_traits(v->type)->to_float) &&
-        (mask->type == GGML_TYPE_F16 || mask->type == GGML_TYPE_F32) && mask->ne[0] >= k->ne[2] &&
-        mask->ne[1] >= q->ne[2] && mask->ne[2] == 1 && mask->ne[3] == 1 && host_resident(k) && host_resident(v);
-    if (!supported) { return nullptr; }
-    float * userdata = const_cast<float *>(intern_scale(scale));
+        (mask->type == GGML_TYPE_F16 || mask->type == GGML_TYPE_F32) && mask_cell0 >= 0 &&
+        mask->ne[0] >= mask_cell0 + k->ne[2] && mask->ne[1] >= q->ne[2] && mask->ne[2] == 1 && mask->ne[3] == 1 &&
+        host_resident(k) && host_resident(v);
+}
+
+ggml_tensor * k1_graph(ggml_context * ctx, ggml_tensor * q, ggml_tensor * k, ggml_tensor * v, ggml_tensor * mask,
+                       int64_t mask_cell0, ggml_tensor * prior, float scale) {
+    auto * userdata = const_cast<Call *>(intern({scale, mask_cell0}));
     const int64_t rows = q->ne[2] * q->ne[1];
     const int64_t chunk = argus_k1_chunk_cells(k->ne[2]), tasks = (k->ne[2] + chunk - 1) / chunk;
     ggml_tensor * inputs[] = {q, k, v, mask};
     ggml_tensor * partials = ggml_custom_4d(ctx, GGML_TYPE_F32, v->ne[0] + 2, rows, tasks, 1, inputs, 4,
                                             partials_op, GGML_N_TASKS_MAX, userdata);
-    ggml_tensor * reduce_inputs[] = {q, k, v, mask, partials};
-    return ggml_custom_4d(ctx, GGML_TYPE_F32, v->ne[0], q->ne[1], q->ne[2], 1, reduce_inputs, 5,
+    ggml_tensor * reduce_inputs[] = {q, k, v, mask, partials, prior};
+    return ggml_custom_4d(ctx, GGML_TYPE_F32, v->ne[0], q->ne[1], q->ne[2], 1, reduce_inputs, prior ? 6 : 5,
                           reduce_op, GGML_N_TASKS_MAX, userdata);
+}
+} // namespace
+
+bool argus_k1_enabled() { return k1_enabled(); }
+
+bool argus_ggml_is_k1(const ggml_tensor * tensor) {
+    if (tensor->op != GGML_OP_CUSTOM) { return false; }
+    ggml_custom_op_t fun;  // the first field of GGML's ggml_custom_op_params
+    std::memcpy(&fun, tensor->op_params, sizeof fun);
+    return fun == partials_op || fun == reduce_op;
+}
+
+int64_t argus_k1_max_tokens() { return max_tokens(); }
+
+ggml_tensor * argus_ggml_decode_attention(ggml_context * ctx, ggml_tensor * q, ggml_tensor * k, ggml_tensor * v,
+                                          ggml_tensor * mask, bool unsupported_features, float scale) {
+    if (!k1_enabled() || unsupported_features || !mask || q->ne[2] > max_tokens() || !k1_supports(q, k, v, mask, 0)) {
+        return nullptr;
+    }
+    return k1_graph(ctx, q, k, v, mask, 0, nullptr, scale);
+}
+
+ggml_tensor * argus_ggml_decode_attention_after(ggml_context * ctx, ggml_tensor * q, ggml_tensor * k, ggml_tensor * v,
+                                                ggml_tensor * mask, int64_t mask_cell0, ggml_tensor * prior, float scale) {
+    if (!k1_supports(q, k, v, mask, mask_cell0) ||
+        (prior && (prior->ne[0] != v->ne[0] + 2 || prior->ne[1] != q->ne[1] * q->ne[2] || prior->type != GGML_TYPE_F32))) {
+        return nullptr;
+    }
+    return k1_graph(ctx, q, k, v, mask, mask_cell0, prior, scale);
 }
