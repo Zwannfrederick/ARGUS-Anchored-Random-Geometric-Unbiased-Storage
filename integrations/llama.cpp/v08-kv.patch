@@ -122,7 +122,7 @@
          bool sinks = false, kq_bias = false;
          for (const auto & layer : model.layers) {
              sinks = sinks || layer.attn_sinks;
-@@ -179,10 +180,25 @@
+@@ -179,10 +180,14 @@
          argus_skip = is_mla ? "MLA" : sinks ? "attention sinks" : kq_bias ? "KQ bias" :
              hparams.attn_soft_cap ? "attention soft-capping" : hparams.f_max_alibi_bias != 0.0f ? "ALiBi" :
              model.arch == LLM_ARCH_GROK ? "Grok attention" : n_stream > 1 ? "multiple KV streams" : nullptr;
@@ -131,54 +131,35 @@
              LLAMA_LOG_WARN("%s: ARGUS KV disabled (%s is unsupported): using llama.cpp's own KV cache\n", __func__, argus_skip);
          }
      }
-+    // v0.8 tiers: F16 host KV (-nkvo) whose first cells get a write-through device mirror.
-+    int64_t argus_cells = 0;
-+    if (!offload && !v_trans && n_stream == 1 && !hparams.no_alloc && !argus_skip && !std::getenv("ARGUS_KV_DIR") &&
-+        type_k == GGML_TYPE_F16 && type_v == GGML_TYPE_F16) {
-+        size_t bytes_per_cell = 0;
-+        for (uint32_t il = 0; il < n_layer; il++) {
-+            if (!hparams.has_kv(il) || (filter && !filter(il)) || (share && other && share(il) >= 0)) { continue; }
-+            bytes_per_cell += ggml_row_size(type_k, hparams.n_embd_k_gqa(il)) + ggml_row_size(type_v, hparams.n_embd_v_gqa(il));
-+        }
-+        argus_cells = argus_kv_mirror_cells(kv_size, bytes_per_cell);
-+        if (argus_cells > 0) {
-+            LLAMA_LOG_INFO("%s: ARGUS KV tiers: cells [0, %lld) of %u mirrored in device memory\n", __func__,
-+                           (long long) argus_cells, kv_size);
-+        }
-+    }
++    // v0.8 tiers: F16 host KV (-nkvo) in pinned memory, its first cells mirrored in device
++    // memory once the context has reserved its compute buffers.
++    const bool argus_tiers = !offload && !v_trans && n_stream == 1 && !hparams.no_alloc && !argus_skip &&
++        !std::getenv("ARGUS_KV_DIR") && type_k == GGML_TYPE_F16 && type_v == GGML_TYPE_F16 && argus_kv_tiers_requested();
  #endif
  
      for (uint32_t il = 0; il < n_layer; il++) {
-@@ -254,6 +270,11 @@
+@@ -254,6 +259,11 @@
              buft = argus_ggml_disk_enabled() ? argus_ggml_disk_buffer_type() : argus_ggml_host_buffer_type();
              dev_name = ggml_backend_buft_name(buft);
          }
 +        // Mirrored host KV lives in pinned memory, which the GPU writes directly.
-+        if (argus_cells > 0 && argus_kv_host_buffer_type()) {
++        if (argus_tiers && argus_kv_host_buffer_type()) {
 +            buft = argus_kv_host_buffer_type();
 +            dev_name = ggml_backend_buft_name(buft);
 +        }
  #endif
          LLAMA_LOG_DEBUG("%s: layer %3d: dev = %s\n", __func__, il, dev_name);
  
-@@ -271,6 +292,24 @@
+@@ -271,6 +281,16 @@
          has_k && ggml_format_name(k, "cache_%sk_l%d", name_tag, il);
          has_v && ggml_format_name(v, "cache_%sv_l%d", name_tag, il);
  
 +#ifdef LLAMA_ARGUS_HOST
-+        if (argus_cells > 0) {
++        if (argus_tiers) {
 +            ggml_backend_dev_t dev = model.dev_layer(il);
 +            if (dev && ggml_backend_dev_type(dev) == GGML_BACKEND_DEVICE_TYPE_GPU) {
-+                ggml_context * mirror_ctx = ctx_for_buft(ggml_backend_dev_buffer_type(dev));
-+                if (!mirror_ctx) {
-+                    throw std::runtime_error("failed to create ggml context for ARGUS KV mirror");
-+                }
-+                ggml_tensor * k_mirror = ggml_new_tensor_2d(mirror_ctx, type_k, n_embd_k_gqa, argus_cells + 1);
-+                ggml_tensor * v_mirror = ggml_new_tensor_2d(mirror_ctx, type_v, n_embd_v_gqa, argus_cells + 1);
-+                ggml_format_name(k_mirror, "argus_mirror_k_l%d", il);
-+                ggml_format_name(v_mirror, "argus_mirror_v_l%d", il);
-+                argus_mirrors.push_back(argus_kv_mirror_register(k, k_mirror, argus_cells));
-+                argus_mirrors.push_back(argus_kv_mirror_register(v, v_mirror, argus_cells));
++                argus_mirrors.push_back(argus_kv_register(k, dev));
++                argus_mirrors.push_back(argus_kv_register(v, dev));
 +            }
 +        }
 +#endif
@@ -186,7 +167,20 @@
          std::vector<ggml_tensor *> k_stream;
          std::vector<ggml_tensor *> v_stream;
  
-@@ -925,6 +964,14 @@
+@@ -411,6 +431,12 @@
+         for (auto & [_, buf] : ctxs_bufs) {
+             ggml_backend_buffer_clear(buf.get(), 0);
+         }
++#ifdef LLAMA_ARGUS_HOST
++        for (const auto & layer : layers) {  // device mirrors follow the cleared host
++            argus_kv_mirror_refresh(layer.k);
++            argus_kv_mirror_refresh(layer.v);
++        }
++#endif
+     }
+ }
+ 
+@@ -925,6 +951,14 @@
  
              cells.reset_shift();
          }
@@ -201,7 +195,7 @@
      }
  
      return updated;
-@@ -1389,6 +1436,7 @@
+@@ -1389,6 +1423,7 @@
      // store the current K values into the cache
  #ifdef LLAMA_ARGUS_HOST
      if (auto * stored = argus_ggml_disk_set_rows(ctx, k, k_cur, k_idxs)) { return stored; }
@@ -209,7 +203,7 @@
  #endif
      return ggml_set_rows(ctx, k, k_cur, k_idxs);
  }
-@@ -1427,6 +1475,7 @@
+@@ -1427,6 +1462,7 @@
  
  #ifdef LLAMA_ARGUS_HOST
          if (auto * stored = argus_ggml_disk_set_rows(ctx, v, v_cur, v_idxs)) { return stored; }
@@ -217,7 +211,7 @@
  #endif
          return ggml_set_rows(ctx, v, v_cur, v_idxs);
      }
-@@ -2704,6 +2753,13 @@
+@@ -2704,6 +2740,13 @@
          }
      }
  
@@ -282,3 +276,25 @@
              hparams.n_swa, hparams.swa_type, mem_other_swa, filter_swa, reuse, share);
  }
  
+--- a/src/llama-context.cpp
++++ b/src/llama-context.cpp
+@@ -1,5 +1,8 @@
+ #include "llama-context.h"
+ #ifdef LLAMA_ARGUS_HOST
++#include "ggml_kv_tiers.h"
++#endif
++#ifdef LLAMA_ARGUS_HOST
+ #include "ggml_disk_buffer.h"
+ #endif
+ 
+@@ -462,6 +465,10 @@
+         }
+ 
+         sched_reserve();
++#ifdef LLAMA_ARGUS_HOST
++        // Compute buffers are known now: KV mirrors take what device memory their budget allows.
++        argus_kv_allocate_mirrors();
++#endif
+ 
+         if (!cparams.flash_attn) {
+             if (ggml_is_quantized(params.type_v)) {

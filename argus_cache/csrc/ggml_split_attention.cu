@@ -1,9 +1,9 @@
 // S1, GPU side: decode partials over GPU-resident KV cells, then one merge per row.
-// A block is 4 warps over one (KV head, chunk of cells, group of up to 8 query rows); the
-// rows' queries sit in shared memory and every warp walks its own cells with an online
-// softmax. Lanes own D/32 consecutive elements, so a warp reads each K or V row as one
-// contiguous span. Warps merge at the end of the chunk; a second kernel merges the chunks
-// of a row in order. Accumulation is F32 throughout.
+// A block is 8 warps over one (KV head, chunk of cells, group of up to 8 query rows), one
+// warp per row. Tiles of K, then of V, are staged in shared memory with coalesced loads;
+// a lane computes whole dot products of its cell (no per-cell reductions), the softmax is
+// updated once per tile, and each lane owns D/32 output elements. A second kernel merges
+// the chunks of a row in order. Accumulation is F32 throughout.
 #include "ggml_split_attention.h"
 #include "ggml_cuda_external.h"
 
@@ -14,9 +14,14 @@
 #include <string>
 
 namespace {
-constexpr int warps = 4;
-constexpr int rows_per_block = 8;
+constexpr int rows_per_block = 8;  // one warp per query row
 constexpr int chunk_cells = 256;
+
+// Cells per tile, and lanes per cell so that a warp covers a tile.
+template <int D> constexpr int tile_cells = D >= 512 ? 16 : 32;
+// half2 words per shared tile row: odd, so lanes reading different rows at the same column
+// fall in different banks.
+template <int D> constexpr int row_words = D / 2 + 1;
 
 void check(cudaError_t status) {
     if (status != cudaSuccess) { throw std::runtime_error(std::string("ARGUS split attention: ") + cudaGetErrorString(status)); }
@@ -31,35 +36,15 @@ struct Problem {
     float scale;
 };
 
-template <int E>
-__device__ void load_row(const char * row, int lane, float (&out)[E]) {
-    // E halves per lane, consecutive: 4, 8, 16 or 32 bytes.
-    const __half * h = reinterpret_cast<const __half *>(row) + lane * E;
-    if constexpr (E % 8 == 0) {
-        #pragma unroll
-        for (int j = 0; j < E; j += 8) {
-            const uint4 raw = *reinterpret_cast<const uint4 *>(h + j);
-            const __half2 * pairs = reinterpret_cast<const __half2 *>(&raw);
-            #pragma unroll
-            for (int i = 0; i < 4; ++i) {
-                const float2 f = __half22float2(pairs[i]);
-                out[j + 2 * i] = f.x;
-                out[j + 2 * i + 1] = f.y;
-            }
-        }
-    } else {
-        #pragma unroll
-        for (int j = 0; j < E; j += 2) {
-            const float2 f = __half22float2(*reinterpret_cast<const __half2 *>(h + j));
-            out[j] = f.x;
-            out[j + 1] = f.y;
-        }
-    }
-}
-
 __device__ float warp_sum(float x) {
     #pragma unroll
     for (int offset = 16; offset > 0; offset /= 2) { x += __shfl_xor_sync(0xffffffffu, x, offset); }
+    return x;
+}
+
+__device__ float warp_max(float x) {
+    #pragma unroll
+    for (int offset = 16; offset > 0; offset /= 2) { x = fmaxf(x, __shfl_xor_sync(0xffffffffu, x, offset)); }
     return x;
 }
 
@@ -70,107 +55,97 @@ __device__ float bias_at(const Problem & p, int token, int cell) {
                       : reinterpret_cast<const float *>(row)[column];
 }
 
-// grid (chunks, heads_kv, row groups), block warps * 32. partials[chunk][head_kv * rows + row][D + 2].
+// n rows of one KV head, from cell `first`, into the shared tile (16-byte global loads).
 template <int D>
-__global__ void decode_partials(Problem p, float * partials) {
-    constexpr int E = D / 32;
-    __shared__ float q_shared[rows_per_block][D];      // element (lane * E + e) stored at [e * 32 + lane]
-    __shared__ float o_shared[rows_per_block][D];
-    __shared__ float m_shared[warps][rows_per_block], l_shared[warps][rows_per_block];
+__device__ void load_tile(const char * base, size_t head_stride, size_t cell_stride, int head_kv, int first, int n,
+                          __half2 (*tile)[row_words<D>]) {
+    constexpr int units = D / 8;  // 16-byte units per row
+    for (int i = threadIdx.x; i < n * units; i += blockDim.x) {
+        const int c = i / units, u = i % units;
+        const uint4 raw = *reinterpret_cast<const uint4 *>(base + head_kv * head_stride + (first + c) * cell_stride + u * 16);
+        const __half2 * pairs = reinterpret_cast<const __half2 *>(&raw);
+        #pragma unroll
+        for (int j = 0; j < 4; ++j) { tile[c][4 * u + j] = pairs[j]; }
+    }
+}
 
-    const int lane = threadIdx.x % 32, warp = threadIdx.x / 32;
+// grid (chunks, heads_kv, row groups), block 8 warps. partials[chunk][head_kv * rows + row][D + 2].
+template <int D>
+__global__ void __launch_bounds__(rows_per_block * 32) decode_partials(Problem p, float * partials) {
+    constexpr int T = tile_cells<D>, lanes_per_cell = 32 / T, E = D / 32;
+    constexpr int part_words = D / 2 / lanes_per_cell;
+    __shared__ float q_shared[rows_per_block][D];
+    __shared__ __half2 tile[T][row_words<D>];
+    __shared__ float weights[rows_per_block][T];
+
+    const int lane = threadIdx.x % 32, r = threadIdx.x / 32;
     const int chunk = blockIdx.x, head_kv = blockIdx.y, row0 = blockIdx.z * rows_per_block;
     const int rows = min(rows_per_block, p.rows - row0);
+    const bool active = r < rows;
+    const int row = row0 + r, token = active ? row / p.group : 0;
     for (int i = threadIdx.x; i < rows * D; i += blockDim.x) {
-        const int r = i / D, d = i % D, row = row0 + r;
-        const int token = row / p.group, head = head_kv * p.group + row % p.group;
-        const float value = reinterpret_cast<const float *>(p.q + head * p.q_head + token * p.q_token)[d];
-        q_shared[r][(d % E) * 32 + d / E] = value;
+        const int rr = i / D, d = i % D, rw = row0 + rr;
+        const int t = rw / p.group, head = head_kv * p.group + rw % p.group;
+        q_shared[rr][d] = reinterpret_cast<const float *>(p.q + head * p.q_head + t * p.q_token)[d];
     }
-    __syncthreads();
 
-    float m[rows_per_block], l[rows_per_block], o[rows_per_block][E];
+    float m = -INFINITY, l = 0.0f, acc[E];
     #pragma unroll
-    for (int r = 0; r < rows_per_block; ++r) {
-        m[r] = -INFINITY;
-        l[r] = 0.0f;
-        #pragma unroll
-        for (int e = 0; e < E; ++e) { o[r][e] = 0.0f; }
-    }
+    for (int e = 0; e < E; ++e) { acc[e] = 0.0f; }
     const int c0 = chunk * chunk_cells, c1 = min(c0 + chunk_cells, p.cells);
-    for (int cell = c0 + warp; cell < c1; cell += warps) {
-        float bias[rows_per_block];
-        bool any = false;
-        #pragma unroll
-        for (int r = 0; r < rows_per_block; ++r) {
-            bias[r] = r < rows ? bias_at(p, (row0 + r) / p.group, cell) : -INFINITY;
-            any = any || bias[r] != -INFINITY;
-        }
-        if (!any) { continue; }
-        float kf[E], vf[E];
-        load_row<E>(p.k + head_kv * p.k_head + cell * p.k_cell, lane, kf);
-        load_row<E>(p.v + head_kv * p.v_head + cell * p.v_cell, lane, vf);
-        #pragma unroll
-        for (int r = 0; r < rows_per_block; ++r) {
-            if (bias[r] == -INFINITY) { continue; }
+    const int cell = lane / lanes_per_cell, part = lane % lanes_per_cell;
+    for (int t0 = c0; t0 < c1; t0 += T) {
+        const int n = min(T, c1 - t0);
+        __syncthreads();  // the previous tile's V is no longer read
+        load_tile<D>(p.k, p.k_head, p.k_cell, head_kv, t0, n, tile);
+        __syncthreads();
+        if (active) {
             float dot = 0.0f;
-            #pragma unroll
-            for (int e = 0; e < E; ++e) { dot = fmaf(q_shared[r][e * 32 + lane], kf[e], dot); }
-            const float score = fmaf(warp_sum(dot), p.scale, bias[r]);
-            if (score > m[r]) {
-                const float keep = expf(m[r] - score);
-                l[r] *= keep;
-                #pragma unroll
-                for (int e = 0; e < E; ++e) { o[r][e] *= keep; }
-                m[r] = score;
-            }
-            const float weight = expf(score - m[r]);
-            l[r] += weight;
-            #pragma unroll
-            for (int e = 0; e < E; ++e) { o[r][e] = fmaf(weight, vf[e], o[r][e]); }
-        }
-    }
-
-    // Merge the warps: common max per row, then each warp adds its rescaled sums in turn.
-    if (lane == 0) {
-        #pragma unroll
-        for (int r = 0; r < rows_per_block; ++r) { m_shared[warp][r] = m[r]; l_shared[warp][r] = l[r]; }
-    }
-    __syncthreads();
-    float top[rows_per_block], factor[rows_per_block];
-    #pragma unroll
-    for (int r = 0; r < rows_per_block; ++r) {
-        top[r] = m_shared[0][r];
-        for (int w = 1; w < warps; ++w) { top[r] = fmaxf(top[r], m_shared[w][r]); }
-        factor[r] = m[r] == -INFINITY ? 0.0f : expf(m[r] - top[r]);
-    }
-    for (int w = 0; w < warps; ++w) {
-        if (warp == w) {
-            for (int r = 0; r < rows; ++r) {
-                #pragma unroll
-                for (int e = 0; e < E; ++e) {
-                    const float add = o[r][e] * factor[r];
-                    o_shared[r][lane * E + e] = w == 0 ? add : o_shared[r][lane * E + e] + add;
+            if (cell < n) {
+                const float2 * q2 = reinterpret_cast<const float2 *>(q_shared[r]);
+                #pragma unroll 8
+                for (int w = part * part_words; w < (part + 1) * part_words; ++w) {
+                    const float2 k2 = __half22float2(tile[cell][w]);
+                    const float2 qq = q2[w];
+                    dot = fmaf(qq.x, k2.x, fmaf(qq.y, k2.y, dot));
                 }
             }
-        }
-        __syncthreads();
-    }
-    const int stride = D + 2;
-    for (int i = threadIdx.x; i < rows * stride; i += blockDim.x) {
-        const int r = i / stride, j = i % stride;
-        float value;
-        if (j == 0) {
-            value = top[r];
-        } else if (j == 1) {
-            value = 0.0f;
-            for (int w = 0; w < warps; ++w) {
-                if (m_shared[w][r] != -INFINITY) { value += l_shared[w][r] * expf(m_shared[w][r] - top[r]); }
+            #pragma unroll
+            for (int offset = lanes_per_cell / 2; offset > 0; offset /= 2) { dot += __shfl_xor_sync(0xffffffffu, dot, offset); }
+            float score = -INFINITY;
+            if (cell < n) {
+                const float bias = bias_at(p, token, t0 + cell);
+                if (bias != -INFINITY) { score = fmaf(dot, p.scale, bias); }
             }
-        } else {
-            value = o_shared[r][j - 2];
+            const float top = fmaxf(m, warp_max(score));
+            const float weight = score == -INFINITY ? 0.0f : expf(score - top);
+            const float keep = m == -INFINITY ? 0.0f : expf(m - top);
+            l = l * keep + warp_sum(part == 0 ? weight : 0.0f);
+            m = top;
+            #pragma unroll
+            for (int e = 0; e < E; ++e) { acc[e] *= keep; }
+            if (part == 0) { weights[r][cell] = weight; }
         }
-        partials[(static_cast<size_t>(chunk) * p.heads_kv * p.rows + head_kv * p.rows + row0 + r) * stride + j] = value;
+        __syncthreads();  // every warp is done with K
+        // ponytail: K then V through one tile, no overlap of loads and math; cp.async double
+        // buffering is the upgrade (loading both tiles at once lowered occupancy: slower).
+        load_tile<D>(p.v, p.v_head, p.v_cell, head_kv, t0, n, tile);
+        __syncthreads();
+        if (active) {
+            for (int c = 0; c < n; ++c) {
+                const float weight = weights[r][c];
+                if (weight == 0.0f) { continue; }
+                const __half * value = reinterpret_cast<const __half *>(tile[c]);
+                #pragma unroll
+                for (int e = 0; e < E; ++e) { acc[e] = fmaf(weight, __half2float(value[e * 32 + lane]), acc[e]); }
+            }
+        }
+    }
+    if (active) {
+        float * out = partials + (static_cast<size_t>(chunk) * p.heads_kv * p.rows + head_kv * p.rows + row) * (D + 2);
+        if (lane == 0) { out[0] = m; out[1] = l; }
+        #pragma unroll
+        for (int e = 0; e < E; ++e) { out[2 + e * 32 + lane] = acc[e]; }
     }
 }
 
@@ -243,7 +218,7 @@ Problem problem_of(const ggml_tensor * dst) {
 template <int D>
 void launch_partials(const Problem & p, float * partials, cudaStream_t stream) {
     const dim3 grid((p.cells + chunk_cells - 1) / chunk_cells, p.heads_kv, (p.rows + rows_per_block - 1) / rows_per_block);
-    decode_partials<D><<<grid, warps * 32, 0, stream>>>(p, partials);
+    decode_partials<D><<<grid, rows_per_block * 32, 0, stream>>>(p, partials);
 }
 } // namespace
 

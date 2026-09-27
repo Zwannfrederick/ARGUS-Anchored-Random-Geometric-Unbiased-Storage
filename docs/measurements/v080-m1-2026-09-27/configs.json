@@ -45,7 +45,7 @@
         "-nkvo"
       ],
       "env": {
-        "ARGUS_KV_VRAM_BYTES": "1073741824",
+        "ARGUS_KV_VRAM_BYTES": "auto",
         "ARGUS_KV_PREFILL": "gpu"
       }
     },

@@ -5,6 +5,7 @@
 // first G cells of each layer (its mirror): every append is written to both, and the copy
 // is refreshed from the host after anything else rewrites cells (K shift, state restore).
 // Invariant: a mirror's rows [0, G) equal its host rows [0, G) whenever a graph reads them.
+// Mirrors are sized and allocated once the context knows its compute buffers (P1).
 //
 // Decode attention then runs where each part lives (S1): the GPU over [0, G), K1 over
 // [G, n_kv), merged by log-sum-exp, only q and partials crossing PCIe. A context that fits
@@ -18,15 +19,19 @@
 #include <cstdint>
 #include <memory>
 
-// KV cache construction. Cells to mirror in a cache of kv_size cells whose layers need
-// bytes_per_cell (K and V rows of every layer) per cell: whole 256-cell steps within what is
-// left of ARGUS_KV_VRAM_BYTES, which this call reserves. 0 when tiers are off.
-int64_t argus_kv_mirror_cells(int64_t kv_size, size_t bytes_per_cell);
+// ARGUS_KV_VRAM_BYTES is set: a byte budget for mirrors, or "auto" (the device's free memory
+// once the context has reserved its compute buffers, minus ARGUS_KV_VRAM_MARGIN, 256 MiB by
+// default).
+bool argus_kv_tiers_requested();
 
-// Registers `device` (cells + 1 rows; the last is scratch for rows outside the mirror) as
-// the mirror of `host`, a layer's K or V cache tensor. The registration lasts as long as
-// the returned handle, which the cache keeps.
-std::shared_ptr<void> argus_kv_mirror_register(const ggml_tensor * host, ggml_tensor * device, int64_t cells);
+// KV cache construction: registers `host`, a layer's K or V tensor, to be mirrored on `dev`.
+// The registration lasts as long as the returned handle, which the cache keeps.
+std::shared_ptr<void> argus_kv_register(const ggml_tensor * host, ggml_backend_dev_t dev);
+
+// After a context has reserved its compute buffers: mirrors for every registered tensor that
+// has none, the same leading cells for every layer, within the budget, filled from the host.
+// Tensors left without a mirror keep host KV and K1.
+void argus_kv_allocate_mirrors();
 
 // Host storage for KV that ARGUS mirrors: pinned memory, which the GPU writes directly (CUDA
 // builds); nullptr to keep llama.cpp's choice.
