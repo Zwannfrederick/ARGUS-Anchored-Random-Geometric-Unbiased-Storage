@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <charconv>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
@@ -80,8 +81,12 @@ int64_t argus_kv_mirror_cells(int64_t kv_size, size_t bytes_per_cell) {
     if (used >= budget) { return 0; }
     // One scratch row per mirror is part of the cost of a cell range.
     const int64_t fit = static_cast<int64_t>((budget - used) / bytes_per_cell) - 1;
-    if (fit >= kv_size) { return kv_size; }
-    return std::max<int64_t>(0, fit / 256 * 256);
+    const int64_t cells = fit >= kv_size ? kv_size : std::max<int64_t>(0, fit / 256 * 256);
+    if (cells > 0) {  // on stderr whatever the log level: runs can prove the tiers exist
+        std::fprintf(stderr, "ARGUS KV tiers: cells [0, %lld) of %lld mirrored in device memory (%.1f MiB)\n",
+                     (long long) cells, (long long) kv_size, cells * double(bytes_per_cell) / (1 << 20));
+    }
+    return cells;
 }
 
 std::shared_ptr<void> argus_kv_mirror_register(const ggml_tensor * host, ggml_tensor * device, int64_t cells) {
@@ -181,6 +186,8 @@ ggml_tensor * argus_kv_tiered_attention(ggml_context * ctx, ggml_backend_sched_t
         return out;
     }
     if (cells == n_kv) {
+        static std::once_flag announced;
+        std::call_once(announced, [] { std::fprintf(stderr, "ARGUS S1: decode attention on the GPU mirror\n"); });
         assign_gpu(sched, gpu_part);
         return gpu_part;
     }
@@ -191,6 +198,8 @@ ggml_tensor * argus_kv_tiered_attention(ggml_context * ctx, ggml_backend_sched_t
                                         v->view_offs + cells * v->nb[2]);
     ggml_tensor * out = argus_ggml_decode_attention_after(ctx, q, k_host, v_host, mask, cells, prior, scale);
     if (!out) { return nullptr; }
+    static std::once_flag announced;
+    std::call_once(announced, [] { std::fprintf(stderr, "ARGUS S1: split decode attention (GPU mirror + K1 on host)\n"); });
     assign_gpu(sched, prior);
     ggml_backend_sched_set_tensor_backend(sched, out->src[4], cpu);
     ggml_backend_sched_set_tensor_backend(sched, out, cpu);

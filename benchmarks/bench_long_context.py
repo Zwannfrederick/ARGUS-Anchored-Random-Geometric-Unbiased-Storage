@@ -141,6 +141,10 @@ def run_one(args, name, context):
         prompt = build_prompt(base, context - args.predict - 64, code)
         request = {"prompt": prompt, "n_predict": args.predict, "temperature": 0, "seed": 42,
                    "cache_prompt": False, "ignore_eos": True}
+        if args.warmup_tokens:
+            # Pages the model in (mmap): the first pass over the experts reads them from disk.
+            warmup = {"prompt": prompt[:args.warmup_tokens], "n_predict": 4, "temperature": 0, "cache_prompt": False}
+            http_json(f"{base}/completion", warmup, timeout=args.request_timeout)
         sampler = threading.Thread(target=memory_sampler, args=(process.pid, stop, peaks), daemon=True)
         sampler.start()
         cpu_before = process_cpu_seconds(process.pid)
@@ -185,6 +189,9 @@ def run_one(args, name, context):
         k1_requested = config.get("env", {}).get("ARGUS_KV_CPU_ATTENTION") == "k1"
         if k1_requested and "error" not in result and not any(l.startswith("ARGUS K1:") for l in lines):
             result["error"] = "RuntimeError: requested K1 path was not observed in the server log"
+        if config.get("env", {}).get("ARGUS_KV_VRAM_BYTES") and "error" not in result and \
+                not any(l.startswith("ARGUS KV tiers: cells") for l in lines):
+            result["error"] = "RuntimeError: requested KV tiers were not observed in the server log"
         result["server_log"] = [l for l in lines if any(s in l for s in (
             "KV buffer", "compute buffer", "offloaded", "ARGUS", "model buffer", "CUDA0", "error"))][-24:]
         if "error" in result:
@@ -215,6 +222,7 @@ def main():
     parser.add_argument("--contexts", type=int, nargs="+", required=True)
     parser.add_argument("--repeats", type=int, default=1)
     parser.add_argument("--predict", type=int, default=32)
+    parser.add_argument("--warmup-tokens", type=int, default=0, help="unmeasured request of this many prompt tokens first")
     parser.add_argument("--request-timeout", type=float, default=6 * 3600)
     parser.add_argument("--output", required=True)
     args = parser.parse_args()
@@ -236,7 +244,8 @@ def main():
         "sha256": {"model": file_sha256(args.model), "server": file_sha256(args.server), "harness": file_sha256(__file__)},
         "notes": ["prefill_seconds and decode rate are the server's own timings",
                   "probe_late_ms: how late a thread asking to sleep 10 ms woke up, during the request",
-                  "one fresh server per run; fixed prompt and seed; no prompt-cache reuse"],
+                  "one fresh server per run; fixed prompt and seed; no prompt-cache reuse",
+                  "warmup_tokens > 0: one unmeasured request of that many tokens first, in the same server"],
         "runs": [],
     }
     library = Path(args.server).resolve().parent / "libllama.so"
