@@ -249,6 +249,52 @@ Evidence: [`test_unsupported_model_falls_back_to_stock_kv_at_load`](../tests/tes
 Observability (`ARGUS_KV_STATS_PATH`, `ARGUS_KV_PROFILE`):
 [README § Observability](../README.md#5-observability).
 
+### 2.11 v0.8: KV tiers over llama.cpp's own KV (`v08-kv.patch`)
+
+v0.8 does not build a new store. llama.cpp's own KV cache with `-nkvo` is the bottom tier
+(RAM, the truth); ARGUS decides where each part of it is *also* held and where each part
+of attention is *computed*. Nothing needs `ARGUS_KV_DIR`.
+
+```text
+                   host RAM (pinned)  — every cell of every layer: the truth
+                   ├── cells [0, G)   ──write-through──►  device mirror (VRAM)
+                   └── cells [G, n)
+decode (≤ 16 tokens)      GPU kernel over [0, G)  ─┐
+                          K1 on the CPU over [G, n) ┴─► log-sum-exp merge ─► output
+prefill (larger batches)  one PCIe copy of the host view ─► stock CUDA flash attention (P2)
+fixed-size state          recurrent state, sliding window: stay in VRAM (never placed)
+```
+
+| mechanism | setting | source |
+|---|---|---|
+| K1: CPU decode attention reading each KV head once for all its query heads | `ARGUS_KV_CPU_ATTENTION=k1` | `ggml_decode_attention.{h,cpp}`, `ggml_decode_simd.h` |
+| Mirrors: first G cells of each layer in VRAM, sized after compute buffers | `ARGUS_KV_VRAM_BYTES=<bytes>\|auto`, `ARGUS_KV_VRAM_MARGIN` | `ggml_kv_tiers.{h,cpp}` |
+| S1: GPU partials over the mirror, merged with K1 | automatic with mirrors | `ggml_split_attention.{h,cu}` |
+| P2: prefill attention on the GPU over host KV | `ARGUS_KV_PREFILL=gpu` | `ggml_kv_tiers.cpp`, graph hook |
+| Fixed-size state on the GPU under `-nkvo` | automatic when ARGUS manages KV | `llama-memory-hybrid.cpp`, `llama-kv-cache-iswa.cpp` hooks |
+
+- **Mirror invariant.** A mirror's rows [0, G) equal its host rows whenever a graph reads
+  them. Appends write both; K shift, state restore and `clear` refresh the mirror.
+- **Appends.** Decode batches: one GPU kernel converts the new rows to F16 (round to
+  nearest even, byte-identical to GGML's CPU) and writes the pinned host rows through
+  their device mapping and the mirror rows. Prefill batches: llama.cpp's `set_rows` plus
+  the mirror's, because GGML copies a host view for GPU attention when a split starts —
+  before an append queued in the same split would run.
+- **Ordering.** The mirror is read later on the same CUDA stream; K1 reads host cells in a
+  CPU split, after GGML has synchronized the GPU for its inputs.
+- **Placement of nodes.** The GPU nodes are assigned to CUDA and the K1 nodes to the CPU
+  explicitly: GGML's CPU backend accepts any custom op, so the scheduler would otherwise
+  spread the CPU from K1 to its GPU neighbours.
+- **Exactness.** K1, the GPU kernel and the merge accumulate in F32; every path is within
+  fp32 rounding of a float64 reference ([`test_ggml_decode_attention.cpp`](../tests/cpp/test_ggml_decode_attention.cpp),
+  [`test_ggml_split_attention.cpp`](../tests/cpp/test_ggml_split_attention.cpp)), and K1 is bit-identical
+  at any thread count.
+- **Observability.** One stderr line each for the mirror size and the first use of each
+  decode path, whatever llama.cpp's log level; the long-context harness refuses a run
+  whose requested path was not observed.
+
+Measurements: [K1](measurements/v080-k1-2026-09-27/README.md), [M1](measurements/v080-m1-2026-09-27/README.md).
+
 ---
 
 ## 3. The HuggingFace path

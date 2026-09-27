@@ -1,0 +1,430 @@
+{
+  "generated": "2026-09-27T22:48:42+0300",
+  "git": {
+    "commit": "8c18ad734f977ce15fc8a9d45f03dc2ee063dbbf",
+    "dirty_files": 2
+  },
+  "host": {
+    "platform": "Linux-7.2.7-zen1-1-zen-x86_64-with-glibc2.44",
+    "cpu_count": 8,
+    "turbo_disabled": "1"
+  },
+  "model": "Qwen3.6-35B-A3B-UD-Q4_K_M-MTP.gguf",
+  "configs": {
+    "server_args": [
+      "-np",
+      "1",
+      "-fa",
+      "on",
+      "-ngl",
+      "99",
+      "--cpu-moe",
+      "-t",
+      "4",
+      "--cpu-mask",
+      "0xF",
+      "--cpu-strict",
+      "1",
+      "--cache-ram",
+      "0",
+      "-b",
+      "2048",
+      "-ub",
+      "2048"
+    ],
+    "configs": {
+      "stock-gpu-kv": {
+        "args": [],
+        "env": {}
+      },
+      "stock-nkvo": {
+        "args": [
+          "-nkvo"
+        ],
+        "env": {}
+      },
+      "k1-nkvo": {
+        "args": [
+          "-nkvo"
+        ],
+        "env": {
+          "ARGUS_KV_CPU_ATTENTION": "k1",
+          "ARGUS_KV_PREFILL": "gpu"
+        }
+      },
+      "tiers": {
+        "args": [
+          "-nkvo"
+        ],
+        "env": {
+          "ARGUS_KV_VRAM_BYTES": "auto",
+          "ARGUS_KV_PREFILL": "gpu"
+        }
+      },
+      "stock-gpu-kv-q8": {
+        "args": [
+          "-ctk",
+          "q8_0",
+          "-ctv",
+          "q8_0"
+        ],
+        "env": {}
+      },
+      "stock-nkvo-q8": {
+        "args": [
+          "-nkvo",
+          "-ctk",
+          "q8_0",
+          "-ctv",
+          "q8_0"
+        ],
+        "env": {}
+      },
+      "k1-nkvo-q8": {
+        "args": [
+          "-nkvo",
+          "-ctk",
+          "q8_0",
+          "-ctv",
+          "q8_0"
+        ],
+        "env": {
+          "ARGUS_KV_CPU_ATTENTION": "k1",
+          "ARGUS_KV_PREFILL": "gpu"
+        }
+      }
+    }
+  },
+  "settings": {
+    "server": "scratch/llama.cpp-v050/build-cuda/bin/llama-server",
+    "model": "scratch/models/Qwen3.6-35B-A3B-UD-Q4_K_M-MTP.gguf",
+    "configs": "docs/measurements/v080-m1-2026-09-27/configs.json",
+    "only": [
+      "stock-gpu-kv",
+      "tiers",
+      "k1-nkvo",
+      "stock-nkvo"
+    ],
+    "contexts": [
+      65536
+    ],
+    "repeats": 1,
+    "predict": 32,
+    "warmup_tokens": 2048,
+    "request_timeout": 21600,
+    "output": "docs/measurements/v080-m1-2026-09-27/results/qwen36-64k.json"
+  },
+  "sha256": {
+    "model": "0b21525e972670ed59e1812e170b27c26355381f0656ecc4e25617ece7dac58b",
+    "server": "1586bbb12ad678ed33cd4185375de6fd17de40ca5029fae7d0ae6f6fcaa9ab9e",
+    "harness": "090a859bcbb0a938b1b90dd95b77cd71bec40300bcda4f1baa9579977aa4d05a",
+    "libllama": "4a898e7807d4b3eb8d8e630159123f4ab1a69d16e30197684a92de10a568d21d"
+  },
+  "notes": [
+    "prefill_seconds and decode rate are the server's own timings",
+    "probe_late_ms: how late a thread asking to sleep 10 ms woke up, during the request",
+    "one fresh server per run; fixed prompt and seed; no prompt-cache reuse",
+    "warmup_tokens > 0: one unmeasured request of that many tokens first, in the same server"
+  ],
+  "runs": [
+    {
+      "config": "stock-gpu-kv",
+      "context": 65536,
+      "error": "RuntimeError: server exited during startup",
+      "peaks": {},
+      "server_log": [
+        "0.03.869.164 E ggml_gallocr_reserve_n_impl: failed to allocate CUDA0 buffer of size 841031808",
+        "0.03.869.165 E graph_reserve: failed to allocate compute buffers",
+        "0.03.872.826 E srv  llama_server: exiting due to model loading error"
+      ],
+      "log_tail": [
+        "0.02.584.901 W model has unused tensor blk.40.ffn_down_exps.weight (size = 184549376 bytes) -- ignoring",
+        "0.02.584.911 W model has unused tensor blk.40.ffn_gate_exps.weight (size = 150994944 bytes) -- ignoring",
+        "0.02.584.914 W model has unused tensor blk.40.ffn_up_exps.weight (size = 150994944 bytes) -- ignoring",
+        "0.02.584.917 W model has unused tensor blk.40.ffn_gate_inp_shexp.weight (size = 4096 bytes) -- ignoring",
+        "0.02.584.921 W model has unused tensor blk.40.ffn_gate_shexp.weight (size = 1114112 bytes) -- ignoring",
+        "0.02.584.925 W model has unused tensor blk.40.ffn_up_shexp.weight (size = 1114112 bytes) -- ignoring",
+        "0.02.584.928 W model has unused tensor blk.40.ffn_down_shexp.weight (size = 1114112 bytes) -- ignoring",
+        "0.02.584.932 W model has unused tensor blk.40.nextn.eh_proj.weight (size = 8912896 bytes) -- ignoring",
+        "0.02.584.936 W model has unused tensor blk.40.nextn.enorm.weight (size = 8192 bytes) -- ignoring",
+        "0.02.584.939 W model has unused tensor blk.40.nextn.hnorm.weight (size = 8192 bytes) -- ignoring",
+        "0.02.584.949 W model has unused tensor blk.40.nextn.shared_head_norm.weight (size = 8192 bytes) -- ignoring",
+        "0.03.869.151 E ggml_backend_cuda_buffer_type_alloc_buffer: allocating 802.07 MiB on device 0: cudaMalloc failed: out of memory",
+        "0.03.869.164 E ggml_gallocr_reserve_n_impl: failed to allocate CUDA0 buffer of size 841031808",
+        "0.03.869.165 E graph_reserve: failed to allocate compute buffers",
+        "0.03.872.388 E llama_init_from_model: failed to initialize the context: failed to allocate compute pp buffers",
+        "0.03.872.397 E cmn  common_init_: failed to create context with model 'scratch/models/Qwen3.6-35B-A3B-UD-Q4_K_M-MTP.gguf'",
+        "0.03.872.400 E cmn  common_init_: failed to create context with model 'scratch/models/Qwen3.6-35B-A3B-UD-Q4_K_M-MTP.gguf'",
+        "0.03.872.404 E srv    load_model: failed to create_context with model 'scratch/models/Qwen3.6-35B-A3B-UD-Q4_K_M-MTP.gguf'",
+        "0.03.872.406 I srv    operator(): operator(): cleaning up before exit...",
+        "0.03.872.826 E srv  llama_server: exiting due to model loading error"
+      ],
+      "repeat": 0
+    },
+    {
+      "config": "tiers",
+      "context": 65536,
+      "command": [
+        "-m",
+        "scratch/models/Qwen3.6-35B-A3B-UD-Q4_K_M-MTP.gguf",
+        "-c",
+        "65536",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "56965",
+        "--no-webui",
+        "-np",
+        "1",
+        "-fa",
+        "on",
+        "-ngl",
+        "99",
+        "--cpu-moe",
+        "-t",
+        "4",
+        "--cpu-mask",
+        "0xF",
+        "--cpu-strict",
+        "1",
+        "--cache-ram",
+        "0",
+        "-b",
+        "2048",
+        "-ub",
+        "2048",
+        "-nkvo"
+      ],
+      "env": {
+        "ARGUS_KV_VRAM_BYTES": "auto",
+        "ARGUS_KV_PREFILL": "gpu"
+      },
+      "wall_seconds": 244.796799406,
+      "prompt_tokens": 65440,
+      "prefill_seconds": 242.243,
+      "prefill_tokens_per_second": 270.1419648864983,
+      "decode_tokens": 32,
+      "decode_seconds": 2.518672,
+      "decode_tokens_per_second": 12.308073460934969,
+      "server_cpu_cores": 1.027995466487427,
+      "answer": "\n\n<think>\n\n</think>\n\n536254. The museum catalogued forty ceramic bowls recovered from the dry lake bed. Engineers measured the bridge cables every",
+      "needle_found": true,
+      "coexistence": {
+        "swap_in_pages": 0,
+        "swap_out_pages": 256,
+        "major_faults": 390,
+        "iowait_fraction": 0.0008257091159305793,
+        "min_mem_available_bytes": 24506363904,
+        "probe_wakeups": 24186,
+        "probe_late_ms": {
+          "p50": 0.0853280000592347,
+          "p99": 0.6016549998457774,
+          "max": 5.246568000293337
+        }
+      },
+      "peaks": {
+        "rss_bytes": 24213983232,
+        "argus_mapped_rss_bytes": 0,
+        "vram_bytes": 3772776448
+      },
+      "server_log": [
+        "ARGUS KV tiers: cells [0, 34560) of 65536 mirrored in device memory (675.0 MiB, budget 677.8 MiB, auto)",
+        "ARGUS S1: decode attention on the GPU mirror",
+        "ARGUS S1: split decode attention (GPU mirror + K1 on host)",
+        "ARGUS K1: decode attention on host KV (f16/f16, head dim 256, 16/2 heads)"
+      ],
+      "repeat": 0
+    },
+    {
+      "config": "k1-nkvo",
+      "context": 65536,
+      "command": [
+        "-m",
+        "scratch/models/Qwen3.6-35B-A3B-UD-Q4_K_M-MTP.gguf",
+        "-c",
+        "65536",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "60011",
+        "--no-webui",
+        "-np",
+        "1",
+        "-fa",
+        "on",
+        "-ngl",
+        "99",
+        "--cpu-moe",
+        "-t",
+        "4",
+        "--cpu-mask",
+        "0xF",
+        "--cpu-strict",
+        "1",
+        "--cache-ram",
+        "0",
+        "-b",
+        "2048",
+        "-ub",
+        "2048",
+        "-nkvo"
+      ],
+      "env": {
+        "ARGUS_KV_CPU_ATTENTION": "k1",
+        "ARGUS_KV_PREFILL": "gpu"
+      },
+      "wall_seconds": 245.4189522710003,
+      "prompt_tokens": 65440,
+      "prefill_seconds": 242.114141,
+      "prefill_tokens_per_second": 270.2857409720649,
+      "decode_tokens": 32,
+      "decode_seconds": 3.268275,
+      "decode_tokens_per_second": 9.485125945644109,
+      "server_cpu_cores": 1.0412806249690636,
+      "answer": "\n\n<think>\n\n</think>\n\n536254. The museum catalogued forty ceramic bowls recovered from the dry lake bed. Engineers measured the bridge cables every",
+      "needle_found": true,
+      "coexistence": {
+        "swap_in_pages": 0,
+        "swap_out_pages": 0,
+        "major_faults": 339,
+        "iowait_fraction": 0.0002795908822871551,
+        "min_mem_available_bytes": 24311283712,
+        "probe_wakeups": 24238,
+        "probe_late_ms": {
+          "p50": 0.08651400024973534,
+          "p99": 1.0910270004751508,
+          "max": 5.139611000449804
+        }
+      },
+      "peaks": {
+        "rss_bytes": 24265183232,
+        "argus_mapped_rss_bytes": 0,
+        "vram_bytes": 3066036224
+      },
+      "server_log": [
+        "ARGUS K1: decode attention on host KV (f16/f16, head dim 256, 16/2 heads)"
+      ],
+      "repeat": 0
+    },
+    {
+      "config": "stock-nkvo",
+      "context": 65536,
+      "command": [
+        "-m",
+        "scratch/models/Qwen3.6-35B-A3B-UD-Q4_K_M-MTP.gguf",
+        "-c",
+        "65536",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "47967",
+        "--no-webui",
+        "-np",
+        "1",
+        "-fa",
+        "on",
+        "-ngl",
+        "99",
+        "--cpu-moe",
+        "-t",
+        "4",
+        "--cpu-mask",
+        "0xF",
+        "--cpu-strict",
+        "1",
+        "--cache-ram",
+        "0",
+        "-b",
+        "2048",
+        "-ub",
+        "2048",
+        "-nkvo"
+      ],
+      "env": {},
+      "wall_seconds": 288.3216808729994,
+      "prompt_tokens": 65440,
+      "prefill_seconds": 271.654673,
+      "prefill_tokens_per_second": 240.89407068657343,
+      "decode_tokens": 32,
+      "decode_seconds": 16.634352,
+      "decode_tokens_per_second": 1.8636133225989209,
+      "server_cpu_cores": 1.3780441304204674,
+      "answer": "\n\n<think>\n\n</think>\n\n536254. The museum catalogued forty ceramic bowls recovered from the dry lake bed. Engineers measured the bridge cables every",
+      "needle_found": true,
+      "coexistence": {
+        "swap_in_pages": 0,
+        "swap_out_pages": 0,
+        "major_faults": 1076,
+        "iowait_fraction": 0.0002724995999013811,
+        "min_mem_available_bytes": 24330153984,
+        "probe_wakeups": 28482,
+        "probe_late_ms": {
+          "p50": 0.08219199957238722,
+          "p99": 1.0014609999780075,
+          "max": 5.5232610004532035
+        }
+      },
+      "peaks": {
+        "rss_bytes": 24387129344,
+        "argus_mapped_rss_bytes": 0,
+        "vram_bytes": 3095396352
+      },
+      "server_log": [
+        "5.00.312.501 W ~llama_context:      CUDA0 compute buffer size of 856.1016 MiB, does not match expectation of 770.1016 MiB"
+      ],
+      "repeat": 0
+    }
+  ],
+  "summary": [
+    {
+      "config": "k1-nkvo",
+      "context": 65536,
+      "completed": 1,
+      "prefill_seconds": {
+        "min": 242.114141,
+        "median": 242.114141,
+        "max": 242.114141
+      },
+      "decode_tokens_per_second": {
+        "min": 9.485125945644109,
+        "median": 9.485125945644109,
+        "max": 9.485125945644109
+      }
+    },
+    {
+      "config": "stock-gpu-kv",
+      "context": 65536,
+      "completed": 0
+    },
+    {
+      "config": "stock-nkvo",
+      "context": 65536,
+      "completed": 1,
+      "prefill_seconds": {
+        "min": 271.654673,
+        "median": 271.654673,
+        "max": 271.654673
+      },
+      "decode_tokens_per_second": {
+        "min": 1.8636133225989209,
+        "median": 1.8636133225989209,
+        "max": 1.8636133225989209
+      }
+    },
+    {
+      "config": "tiers",
+      "context": 65536,
+      "completed": 1,
+      "prefill_seconds": {
+        "min": 242.243,
+        "median": 242.243,
+        "max": 242.243
+      },
+      "decode_tokens_per_second": {
+        "min": 12.308073460934969,
+        "median": 12.308073460934969,
+        "max": 12.308073460934969
+      }
+    }
+  ]
+}

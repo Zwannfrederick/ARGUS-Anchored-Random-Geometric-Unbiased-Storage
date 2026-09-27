@@ -254,6 +254,53 @@ Kanıt: [`test_unsupported_model_falls_back_to_stock_kv_at_load`](../tests/test_
 
 Gözlemlenebilirlik (`ARGUS_KV_STATS_PATH`, `ARGUS_KV_PROFILE`): [README_TR](../README_TR.md).
 
+### 2.11 v0.8: llama.cpp'nin kendi KV'si üzerinde KV katmanları (`v08-kv.patch`)
+
+v0.8 yeni bir store kurmuyor. llama.cpp'nin `-nkvo` ile RAM'de tuttuğu kendi KV cache'i en
+alt katman, yani gerçeğin kendisi. ARGUS bunun hangi parçasının *ayrıca* nerede tutulacağına
+ve attention'ın hangi parçasının nerede *hesaplanacağına* karar veriyor. `ARGUS_KV_DIR`
+gerekmiyor.
+
+```text
+                   host RAM (pinned)  — her katmanın her hücresi: gerçek
+                   ├── hücreler [0, G)   ──yazma-geçişli──►  cihaz aynası (VRAM)
+                   └── hücreler [G, n)
+decode (≤ 16 token)       GPU kernel'i [0, G) üzerinde ─┐
+                          CPU'da K1 [G, n) üzerinde      ┴─► log-sum-exp birleştirme ─► çıktı
+prefill (büyük batch)     host view'unun tek PCIe kopyası ─► stock CUDA flash attention (P2)
+sabit boyutlu durum       recurrent state, kayan pencere: VRAM'de kalır (yerleştirilmez)
+```
+
+| mekanizma | ayar | kaynak |
+|---|---|---|
+| K1: her KV head'i tüm query head'leri için bir kez okuyan CPU decode attention | `ARGUS_KV_CPU_ATTENTION=k1` | `ggml_decode_attention.{h,cpp}`, `ggml_decode_simd.h` |
+| Aynalar: her katmanın ilk G hücresi VRAM'de, compute buffer'lardan sonra boyutlanır | `ARGUS_KV_VRAM_BYTES=<bayt>\|auto`, `ARGUS_KV_VRAM_MARGIN` | `ggml_kv_tiers.{h,cpp}` |
+| S1: ayna üzerinde GPU kısmi sonuçları, K1 ile birleşir | aynalarla otomatik | `ggml_split_attention.{h,cu}` |
+| P2: host KV üzerinde prefill attention'ı GPU'da | `ARGUS_KV_PREFILL=gpu` | `ggml_kv_tiers.cpp`, graf kancası |
+| `-nkvo` altında sabit boyutlu durum GPU'da | ARGUS KV'yi yönettiğinde otomatik | `llama-memory-hybrid.cpp`, `llama-kv-cache-iswa.cpp` kancaları |
+
+- **Ayna değişmezi.** Bir graf okuduğunda aynanın [0, G) satırları host satırlarına eşittir.
+  Eklemeler ikisine birden yazar; K shift, durum geri yükleme ve `clear` aynayı yeniler.
+- **Eklemeler.** Decode batch'lerinde tek bir GPU kernel'i yeni satırları F16'ya çevirir
+  (en yakına, eşitlikte çifte yuvarlama; GGML'in CPU dönüşümüyle bayt bayt aynı) ve pinned
+  host satırlarına cihaz eşlemesi üzerinden, ayna satırlarına da doğrudan yazar. Prefill
+  batch'lerinde llama.cpp'nin `set_rows`'u ve aynanınki kullanılır: GGML, GPU attention için
+  host view'unu split başlarken kopyalar; aynı split'te kuyruğa alınmış bir ekleme o anda
+  henüz çalışmamıştır.
+- **Sıralama.** Ayna aynı CUDA stream'inde sonradan okunur; K1 host hücrelerini bir CPU
+  split'inde, GGML girdileri için GPU'yu senkronize ettikten sonra okur.
+- **Düğüm yerleşimi.** GPU düğümleri CUDA'ya, K1 düğümleri CPU'ya açıkça atanır. GGML'in CPU
+  backend'i her custom op'u kabul ettiği için scheduler aksi hâlde K1'deki CPU atamasını GPU
+  komşularına yayar.
+- **Kesinlik.** K1, GPU kernel'i ve birleştirme F32'de biriktirir. Her yol float64
+  referansının fp32 yuvarlama sınırı içindedir ([`test_ggml_decode_attention.cpp`](../tests/cpp/test_ggml_decode_attention.cpp),
+  [`test_ggml_split_attention.cpp`](../tests/cpp/test_ggml_split_attention.cpp)); K1 her thread sayısında bit-exact aynıdır.
+- **Gözlenebilirlik.** Ayna boyutu ve her decode yolunun ilk kullanımı için stderr'e birer
+  satır yazılır, llama.cpp'nin log seviyesinden bağımsız. Uzun bağlam harness'ı, istenen yolu
+  gözlemlenmeyen bir koşuyu reddeder.
+
+Ölçümler: [K1](measurements/v080-k1-2026-09-27/README.md), [M1](measurements/v080-m1-2026-09-27/README.md).
+
 ---
 
 ## 3. HuggingFace yolu

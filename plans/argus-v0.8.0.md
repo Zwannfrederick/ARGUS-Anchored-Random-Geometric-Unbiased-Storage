@@ -176,6 +176,42 @@ tokens per turn, time to first token, RAM they hold. Build only what is missing,
 likely a disk session tier that reuses the verified v0.5–v0.7 store, eviction that
 demotes instead of drops, and one budget shared with the planner (P1).
 
+## Progress (2026-09-27)
+
+Code: `v0.8-dev`. Every number links to its measurement directory.
+
+- **K1 — done, gate not met on this configuration.** 9.3–10.4x faster than stock on f16 at
+  131K cells, 5–6x on q8_0/q4_0, and ~5000x closer to float64 (stock rounds q and the value
+  sum to F16). 26.1 GB/s against the 30 GB/s gate: with turbo disabled K1 is FMA-bound
+  (4096 multiply-adds per KiB for 8 query heads), which UI-Mate (half the work per byte,
+  36.3 GB/s) and quantized KV (same time per element as f16) both confirm.
+  [v080-k1](../docs/measurements/v080-k1-2026-09-27/README.md)
+- **Z1 — met by a different route.** No new store: llama.cpp's own KV (`-nkvo`) is the RAM
+  bottom tier, in pinned memory when ARGUS mirrors it; nothing needs `ARGUS_KV_DIR`. The
+  disk tier moves to R1 (sessions), the only place where it is read once per use.
+- **S1 — implemented.** A write-through device mirror of each layer's first G cells; decode
+  attention on the GPU over the mirror and K1 over the rest, merged by log-sum-exp in the
+  same graph; a context the mirror holds never leaves the GPU. Appends are written to host
+  and mirror by one GPU kernel. Mirror invariant: its rows equal the host rows whenever a
+  graph reads them (shift, restore and clear refresh it). Correct within fp32 rounding of
+  float64 in every tested shape, and end to end identical to stock greedy output.
+- **P1 (first step) — mirrors sized from free VRAM** after the context has reserved its
+  compute buffers (`ARGUS_KV_VRAM_BYTES=auto`).
+- **New, P2: prefill attention on the GPU over host KV** (`ARGUS_KV_PREFILL=gpu`). Stock
+  `-nkvo` runs prefill attention on the CPU; the prefill batch's arithmetic intensity
+  (every KV byte serves 2048 tokens x 8 heads) makes one PCIe copy of the view per batch
+  far cheaper. The measured crossover is about 8 tokens (K1: 4.9 ns per row and cell-head;
+  PCIe: 330 ns per KiB).
+- **New rule from M1: fixed-size state stays on the GPU.** Stock `-nkvo` moves every
+  memory to the host, including Qwen3.6's recurrent state (30 of 40 layers) and Gemma 4's
+  sliding-window cache, so those layers run on the CPU: at 8K, Qwen3.6 decode fell from
+  24.5 to 6.6 tok/s, not from attention. When ARGUS manages KV, state of fixed size that
+  every token reads in full stays in device memory; only the growing global KV is placed.
+- **M1 so far (Qwen3.6, 32K filled, decode tok/s):** stock GPU KV 22.47, stock `-nkvo`
+  3.15, K1 13.23, tiers 19.65 (first kernel). Prefill is dominated by streaming the
+  experts across PCIe (~7 s per 2048-token batch), not by KV.
+  [v080-m1](../docs/measurements/v080-m1-2026-09-27/README.md)
+
 ## Success
 
 - Qwen3.6 at 262K filled decodes several times faster than stock `-nkvo` (projection:
