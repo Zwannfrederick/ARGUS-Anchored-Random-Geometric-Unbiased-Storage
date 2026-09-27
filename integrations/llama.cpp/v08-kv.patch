@@ -1,0 +1,52 @@
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -77,6 +77,11 @@
+     set_source_files_properties("${ARGUS_CORE_DIR}/ggml_disk_gpu.cpp" PROPERTIES SKIP_UNITY_BUILD_INCLUSION ON)
+     target_include_directories(llama PRIVATE "${ARGUS_CORE_DIR}" ../ggml/src)
+     target_compile_definitions(llama PRIVATE LLAMA_ARGUS_HOST)
++    # K1 decode attention: SIMD kernels need the CPU's own ISA (AVX2 or AVX-512); scalar otherwise.
++    target_sources(llama PRIVATE "${ARGUS_CORE_DIR}/ggml_decode_attention.cpp")
++    if (GGML_NATIVE)
++        set_source_files_properties("${ARGUS_CORE_DIR}/ggml_decode_attention.cpp" PROPERTIES COMPILE_OPTIONS "-march=native")
++    endif()
+     if (GGML_CUDA)
+         enable_language(CUDA)
+         target_sources(llama PRIVATE "${ARGUS_CORE_DIR}/ggml_cuda_attention.cu" "${ARGUS_CORE_DIR}/ggml_kv_policy.cpp")
+--- a/src/llama-graph.cpp
++++ b/src/llama-graph.cpp
+@@ -1,5 +1,6 @@
+ #include "llama-graph.h"
+ #ifdef LLAMA_ARGUS_HOST
++#include "ggml_decode_attention.h"
+ #include "ggml_host_buffer.h"
+ #ifdef ARGUS_CUDA
+ #include "ggml_cuda_attention.h"
+@@ -2607,9 +2608,9 @@
+                float   kq_scale,
+                  int   il) const {
+ #ifdef LLAMA_ARGUS_HOST
+-    if (ggml_tensor * paged = argus_ggml_paged_attention(ctx0, q, k, v, kq_mask,
+-            kq_b || sinks || v_mla || hparams.attn_soft_cap || hparams.f_max_alibi_bias != 0.0f || arch == LLM_ARCH_GROK,
+-            kq_scale)) {
++    const bool argus_unsupported =
++        kq_b || sinks || v_mla || hparams.attn_soft_cap || hparams.f_max_alibi_bias != 0.0f || arch == LLM_ARCH_GROK;
++    if (ggml_tensor * paged = argus_ggml_paged_attention(ctx0, q, k, v, kq_mask, argus_unsupported, kq_scale)) {
+         ggml_tensor * cur = ggml_reshape_2d(ctx0, paged, paged->ne[0]*paged->ne[1], paged->ne[2]);
+         ggml_backend_t target_backend = backend_cpu;
+ #ifdef ARGUS_CUDA
+@@ -2629,6 +2630,15 @@
+         ggml_build_forward_expand(gf, cur);
+         return cur;
+     }
++    // K1: decode attention over llama.cpp's own host KV (-nkvo), each KV head read once per
++    // call. ARGUS-owned KV took the path above.
++    if (ggml_tensor * decoded = argus_ggml_decode_attention(ctx0, q, k, v, kq_mask, argus_unsupported, kq_scale)) {
++        ggml_backend_sched_set_tensor_backend(sched, decoded->src[4], backend_cpu);
++        ggml_backend_sched_set_tensor_backend(sched, decoded, backend_cpu);
++        ggml_tensor * cur = ggml_reshape_2d(ctx0, decoded, decoded->ne[0]*decoded->ne[1], decoded->ne[2]);
++        ggml_build_forward_expand(gf, cur);
++        return cur;
++    }
+ #endif
+     const bool v_trans = v->nb[1] > v->nb[2];
+ 

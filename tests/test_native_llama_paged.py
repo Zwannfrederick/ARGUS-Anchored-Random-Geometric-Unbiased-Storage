@@ -53,6 +53,16 @@ def test_paged_kernel_matches_double_precision_reference(tmp_path):
     assert result.stdout.count("max_error=") == 7
 
 
+@pytest.mark.parametrize("isa", [["-march=native"], []], ids=["simd", "scalar"])
+def test_decode_attention_k1_matches_reference_at_every_thread_count(tmp_path, isa):
+    binary = _compile(tmp_path, "tests/cpp/test_ggml_decode_attention.cpp",
+                      [str(ROOT / "argus_cache/csrc/ggml_decode_attention.cpp"), *isa],
+                      ["-lggml-base", "-lggml-cpu", "-lggml"])
+    result = subprocess.run([binary], capture_output=True, text=True, timeout=1200)
+    assert result.returncode == 0, result.stderr[-2000:]
+    assert result.stdout.count("k1_error=") == 10 and result.stdout.endswith("ok\n")
+
+
 def test_paged_workers_release_coordination_between_invocations(tmp_path):
     binary = _compile(tmp_path, "tests/cpp/test_ggml_paged_coordination.cpp",
                       [str(ROOT / "argus_cache/csrc/ggml_host_buffer.cpp"),

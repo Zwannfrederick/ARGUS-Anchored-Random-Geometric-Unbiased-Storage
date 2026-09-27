@@ -1,7 +1,8 @@
 # Experimental llama.cpp host KV ownership seam
 
 Pinned upstream revision: `54315813269112dd0baed7112ec87ad93a8218ca`.
-Patches (in order): `host-kv.patch`, then `cuda-kv.patch`.
+Patches (in order): `host-kv.patch`, `cuda-kv.patch`, then `v08-kv.patch` (v0.8: K1 decode
+attention over llama.cpp's own host KV, `ARGUS_KV_CPU_ATTENTION=k1`).
 Implementation: `argus_cache/csrc/ggml_*`.
 
 The patch routes `llama_kv_cache` tensor allocation to ARGUS-owned, file-backed
