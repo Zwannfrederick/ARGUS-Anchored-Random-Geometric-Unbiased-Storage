@@ -25,18 +25,17 @@ the CPU with `--cpu-moe`), f16 KV.
 | 8K (probe) | 24.45 | 6.64 ¹ | 20.42 | 22.32 | 0.91x |
 | 32K | **22.47** | 3.15 | 13.23 | 20.12 | 0.90x |
 | 64K | **does not start** ² | 1.86 | 9.49 | **12.31** | **6.6x** |
-| 128K | — | **did not finish** ³ | 4.41 | **6.18** | — |
+| 128K | — | 1.02 ³ | 4.41 | **6.18** | **6.0x** |
 
 ¹ Earlier build (8K probe), before recurrent state stayed on the GPU under ARGUS.
 ² The context fails to allocate its prefill compute buffer (841 MB) next to 1.3 GB of KV.
-³ Stock `-nkvo` at 128K was stopped after 15 minutes: the machine was thrashing. Swap
-(4 GB zram + 512 MB file) was full, the server sat in uninterruptible disk wait, only
-11.8 GB of the 22.6 GB model file stayed resident and was re-read from disk at ~300 MB/s
-(iowait 9–10%). At that rate every prefill batch takes ~75 s instead of ~7 s. The K1 and
-tiers runs at 128K, which run prefill attention on the GPU, completed without this.
-Hypothesis to test: stock's CPU prefill attention adds host compute buffers (the 2048 x
-131K F32 mask alone is 1 GB, plus its F16 copy) to 2.6 GB of pageable KV, and that pushes
-22.6 GB of mmapped weights out of 31.9 GB of RAM. Not yet measured.
+³ Measured on 2026-09-28 on a freshly booted machine (`results/qwen36-128k-stock-nkvo.*`,
+with a 1 s `vmstat` timeline): no swap traffic to speak of (33 pages in), iowait 0.04%. The
+first attempt, on 2026-09-27, was stopped after 15 minutes because the machine was
+thrashing (swap full, the model re-read from disk at ~300 MB/s). That was the machine's
+accumulated state — it was the last run of the evening, with swap already filled by the
+paused desktop apps — not a property of stock `-nkvo`: at 128K its host footprint (20.7 GB
+mapped model, 2.56 GB KV, 592 MB compute) is within 0.1 GB of the ARGUS tiers run's.
 
 Every run found the hidden fact (`needle_found`), including tiers at 128K.
 
@@ -56,7 +55,7 @@ Every run found the hidden fact (`needle_found`), including tiers at 128K.
 |---|---:|---:|---:|
 | 32K | 111.6 s | 128.9 s | 113.8 s |
 | 64K | — | 271.7 s | 242.2 s |
-| 128K | — | did not finish (thrashing) | 540.3 s (K1 run: 544.8 s) |
+| 128K | — | 597.8 s | 540.3 s (K1 run: 544.8 s) |
 
 **Prefill is dominated by expert weights, not KV.** With `--cpu-moe`, llama.cpp copies
 every expert of every layer (≈ 21 GB) across PCIe (3.1 GB/s) for each prefill batch: ≈ 7 s
@@ -69,6 +68,7 @@ cost (29 s at 64K); it cannot touch the expert traffic. Next steps are in the ha
 | run | swap in/out (pages) | major faults | iowait | probe late, p99 / max |
 |---|---:|---:|---:|---:|
 | tiers 64K | 0 / 256 | 390 | 0.08% | 0.60 / 5.2 ms |
+| stock `-nkvo` 128K | 33 / 0 | 4179 | 0.04% | 0.49 / 8.5 ms |
 
 (Every run's record is in its JSON: `coexistence`.) No sustained iowait in any run; the
 probe thread asking to wake every 10 ms was late by under a millisecond at p99.
