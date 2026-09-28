@@ -444,6 +444,20 @@
  llama_memory_status llama_memory_hybrid_context::get_status() const {
      return status;
  }
+--- a/src/llama-kv-cache-iswa.h
++++ b/src/llama-kv-cache-iswa.h
+@@ -145,6 +145,11 @@
+ 
+     // the index of the next ubatch to process
+     size_t i_next = 0;
++#ifdef LLAMA_ARGUS_HOST
++public:
++    bool argus_seek(uint32_t i) override;
++private:
++#endif
+ 
+     std::vector<llama_ubatch> ubatches;
+ 
 --- a/src/llama-kv-cache-iswa.cpp
 +++ b/src/llama-kv-cache-iswa.cpp
 @@ -1,4 +1,7 @@
@@ -470,6 +484,21 @@
 +            v_trans, offload_swa, unified, size_swa, n_seq_max, n_pad,
              hparams.n_swa, hparams.swa_type, mem_other_swa, filter_swa, reuse, share);
  }
+ 
+@@ -329,6 +338,14 @@
+     return true;
+ }
+ 
++#ifdef LLAMA_ARGUS_HOST
++bool llama_kv_cache_iswa_context::argus_seek(uint32_t i) {
++    if (!ctx_base->argus_seek(i) || !ctx_swa->argus_seek(i)) { return false; }
++    i_next = i;
++    return true;
++}
++#endif
++
+ bool llama_kv_cache_iswa_context::apply() {
+     assert(!llama_memory_status_is_fail(status));
  
 --- a/src/llama-context.h
 +++ b/src/llama-context.h
@@ -609,7 +638,7 @@
  int llama_context::decode(const llama_batch & batch_inp) {
      // MTP hook batches carry both token (next-token id) and embd (h_nextn row),
      // so accept either present rather than requiring exactly one.
-@@ -1808,8 +1887,39 @@
+@@ -1808,8 +1887,40 @@
      int64_t n_outputs_prev = 0;
      int64_t n_tokens_prev  = 0;
  
@@ -619,7 +648,8 @@
 +    std::vector<llama_ubatch> argus_ubatches;
 +    std::vector<std::vector<float>> argus_hidden;
 +    const bool argus_layers = argus_expert_cache_ready() && argus_layer_prefill_requested() &&
-+        model.arch == LLM_ARCH_QWEN35MOE && !cparams.embeddings && batch_inp.token &&
++        (model.arch == LLM_ARCH_QWEN35MOE || (model.arch == LLM_ARCH_GEMMA4 && !model.per_layer_tok_embd)) &&
++        !cparams.embeddings && batch_inp.token &&
 +        cparams.ctx_type == LLAMA_CONTEXT_TYPE_DEFAULT && n_tokens_all > cparams.n_ubatch;
 +    if (argus_layers) {
 +        argus_kv_mirrors_detach();  // the expert cache may use the mirrors' memory
@@ -649,7 +679,7 @@
  
          // count the outputs in this ubatch
          {
-@@ -1854,6 +1964,13 @@
+@@ -1854,6 +1965,13 @@
                  memory->seq_rm(s, pos_min[s], -1);
              }
  
@@ -663,7 +693,7 @@
              switch (status) {
                  case GGML_STATUS_ABORTED:      return  2;
                  case GGML_STATUS_ALLOC_FAILED: return -2;
-@@ -1983,7 +2100,17 @@
+@@ -1983,7 +2101,17 @@
  
          n_outputs_prev += n_outputs;
          n_tokens_prev  += ubatch.n_tokens;
@@ -723,3 +753,45 @@
      cur = inpL;
  
      // post-norm hidden state feeds both the LM head and the MTP seed below
+--- a/src/models/gemma4.cpp
++++ b/src/models/gemma4.cpp
+@@ -181,7 +181,14 @@
+         inp_per_layer = project_per_layer_inputs(inpL, inp_per_layer);
+     }
+ 
+-    for (int il = 0; il < n_layer; ++il) {
++#ifdef LLAMA_ARGUS_HOST
++    // ARGUS layer-major prefill: a pass may build only some layers; after layer 0 the input
++    // is the previous layer's output, given as the ubatch's embeddings (not scaled again).
++    const int il_begin = (int) argus_layer_begin, il_end = (int) argus_layer_end;
++#else
++    const int il_begin = 0, il_end = n_layer;
++#endif
++    for (int il = il_begin; il < il_end; ++il) {
+         const int64_t n_embd_head = hparams.n_embd_head_k(il);
+         GGML_ASSERT(n_embd_head == hparams.n_embd_head_v(il));
+ 
+@@ -400,6 +407,23 @@
+         // input for next layer
+         inpL = cur;
+     }
++#ifdef LLAMA_ARGUS_HOST
++    if (il_begin > 0 || il_end < n_layer) {
++        // A pass over some layers still sets every memory and position input, including those
++        // only the other kind of layer reads: keep them in the graph so they are allocated.
++        for (ggml_tensor * t : {inp_pos, inp_out_ids, inp_attn->self_k_idxs, inp_attn->self_v_idxs,
++                                inp_attn->self_k_idxs_swa, inp_attn->self_v_idxs_swa,
++                                inp_attn->self_kq_mask, inp_attn->self_kq_mask_swa}) {
++            if (t) { ggml_build_forward_expand(gf, t); }
++        }
++    }
++    if (il_end < n_layer) {  // an intermediate pass: its output is the hidden state
++        res->t_embd = inpL;
++        ggml_set_output(inpL);
++        ggml_build_forward_expand(gf, inpL);
++        return;
++    }
++#endif
+     cur = inpL;
+ 
+     cur = build_norm(cur,
