@@ -35,3 +35,32 @@ the attention stay.
   measured. 15.6 GB at ~3.2 GB/s is ≈ 4.9 s: the fixed part is expert transfer.
 - **The link also idles.** The mean during prefill is 2.36 GB/s, with seconds at zero: the
   copies do not overlap the GPU's compute. About a quarter of the link time is unused.
+
+## P3: layer-major prefill (measured)
+
+`ARGUS_PREFILL=layers` runs every ubatch of a llama_decode call through one layer before the
+next, so each layer's experts cross PCIe once per call instead of once per ubatch. The
+expert cache borrows the KV mirrors' device memory while they are detached (VRAM shared by
+phase); the mirrors are refilled from host KV afterwards. The server runs with `-b 131072`
+so one call holds the whole prompt. Configurations: [`configs-layers.json`](configs-layers.json).
+
+| context | batch-major (ub 2048) | layer-major (ub 2048) | speed-up | decode, batch → layer |
+|---|---:|---:|---:|---:|
+| 5.3K (ub 1024, one call) | 34.0 s | 18.0 s | 1.89x | 25.5 → 25.5, 48 greedy tokens identical |
+| 16K | 55.9 s | 32.0 s | 1.75x | 22.8 → 23.1 |
+| 32K | 114.3 s | **59.1 s** | **1.93x** | 21.27 → 20.93 |
+| 64K | 242.2 s ¹ | **130.4 s** | **1.86x** | 12.31 ¹ → 12.21 |
+| 128K | 540.3 s ¹ | not taken ² | — | 6.18 ¹ → 5.85 |
+
+¹ From [M1](../v080-m1-2026-09-27/README.md) (same configuration, previous day).
+² At 128K the automatic budget left 386.6 MiB, below the 498 MiB cache; prefill stayed
+batch-major (the harness flags the run). The context's compute buffer still reserves ~500
+MiB for llama.cpp's per-batch expert copies, which layer-major prefill never uses. Next
+step: when P3 is on, run every prefill batch layer-major and reserve the compute buffer
+without those copies, giving that memory to the cache and the mirrors.
+
+- Results: `results/qwen36-layers.json` (16K/32K, before VRAM sharing: 32K decode fell to
+  15.9 because the cache took mirror memory), `results/qwen36-shared-32k.json`,
+  `results/qwen36-shared-long.json` (with VRAM sharing).
+- Every layer-major run found the hidden fact; the harness requires the server log line
+  `ARGUS P3: layer-major prefill of`.

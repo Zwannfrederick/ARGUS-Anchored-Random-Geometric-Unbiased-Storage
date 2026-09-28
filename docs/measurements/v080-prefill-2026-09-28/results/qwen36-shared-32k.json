@@ -1,0 +1,283 @@
+{
+  "generated": "2026-09-28T19:36:29+0300",
+  "git": {
+    "commit": "444f57e3613a2799fcad1c51eabee56c68fd26dd",
+    "dirty_files": 10
+  },
+  "host": {
+    "platform": "Linux-7.2.7-zen1-1-zen-x86_64-with-glibc2.44",
+    "cpu_count": 8,
+    "turbo_disabled": "1"
+  },
+  "model": "Qwen3.6-35B-A3B-UD-Q4_K_M-MTP.gguf",
+  "configs": {
+    "server_args": [
+      "-np",
+      "1",
+      "-fa",
+      "on",
+      "-ngl",
+      "99",
+      "--cpu-moe",
+      "-t",
+      "4",
+      "--cpu-mask",
+      "0xF",
+      "--cpu-strict",
+      "1",
+      "--cache-ram",
+      "0",
+      "-nkvo"
+    ],
+    "configs": {
+      "batches-ub2048": {
+        "args": [
+          "-b",
+          "2048",
+          "-ub",
+          "2048"
+        ],
+        "env": {
+          "ARGUS_KV_VRAM_BYTES": "auto",
+          "ARGUS_KV_PREFILL": "gpu"
+        }
+      },
+      "layers-ub2048": {
+        "args": [
+          "-b",
+          "131072",
+          "-ub",
+          "2048"
+        ],
+        "env": {
+          "ARGUS_KV_VRAM_BYTES": "auto",
+          "ARGUS_KV_PREFILL": "gpu",
+          "ARGUS_PREFILL": "layers"
+        }
+      },
+      "layers-ub1024": {
+        "args": [
+          "-b",
+          "131072",
+          "-ub",
+          "1024"
+        ],
+        "env": {
+          "ARGUS_KV_VRAM_BYTES": "auto",
+          "ARGUS_KV_PREFILL": "gpu",
+          "ARGUS_PREFILL": "layers"
+        }
+      }
+    }
+  },
+  "settings": {
+    "server": "scratch/llama.cpp-v050/build-cuda/bin/llama-server",
+    "model": "scratch/models/Qwen3.6-35B-A3B-UD-Q4_K_M-MTP.gguf",
+    "configs": "docs/measurements/v080-prefill-2026-09-28/configs-layers.json",
+    "only": [
+      "batches-ub2048",
+      "layers-ub2048"
+    ],
+    "contexts": [
+      32768
+    ],
+    "repeats": 1,
+    "predict": 32,
+    "warmup_tokens": 512,
+    "request_timeout": 21600,
+    "output": "docs/measurements/v080-prefill-2026-09-28/results/qwen36-shared-32k.json"
+  },
+  "sha256": {
+    "model": "0b21525e972670ed59e1812e170b27c26355381f0656ecc4e25617ece7dac58b",
+    "server": "1586bbb12ad678ed33cd4185375de6fd17de40ca5029fae7d0ae6f6fcaa9ab9e",
+    "harness": "b465f3dea980d59a64767938e3ee67727f0f4bb13319b7aa4a651936b5c670c6",
+    "libllama": "6e45fcd2886f9b730f72e8fd5cff46b4dd7d23d8bd4648919452cd6365399b99"
+  },
+  "notes": [
+    "prefill_seconds and decode rate are the server's own timings",
+    "probe_late_ms: how late a thread asking to sleep 10 ms woke up, during the request",
+    "one fresh server per run; fixed prompt and seed; no prompt-cache reuse",
+    "warmup_tokens > 0: one unmeasured request of that many tokens first, in the same server"
+  ],
+  "runs": [
+    {
+      "config": "batches-ub2048",
+      "context": 32768,
+      "command": [
+        "-m",
+        "scratch/models/Qwen3.6-35B-A3B-UD-Q4_K_M-MTP.gguf",
+        "-c",
+        "32768",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "40381",
+        "--no-webui",
+        "-np",
+        "1",
+        "-fa",
+        "on",
+        "-ngl",
+        "99",
+        "--cpu-moe",
+        "-t",
+        "4",
+        "--cpu-mask",
+        "0xF",
+        "--cpu-strict",
+        "1",
+        "--cache-ram",
+        "0",
+        "-nkvo",
+        "-b",
+        "2048",
+        "-ub",
+        "2048"
+      ],
+      "env": {
+        "ARGUS_KV_VRAM_BYTES": "auto",
+        "ARGUS_KV_PREFILL": "gpu"
+      },
+      "wall_seconds": 115.73405891699986,
+      "prompt_tokens": 32672,
+      "prefill_seconds": 114.251887,
+      "prefill_tokens_per_second": 285.9646423170236,
+      "decode_tokens": 32,
+      "decode_seconds": 1.457713,
+      "decode_tokens_per_second": 21.266188886289687,
+      "server_cpu_cores": 1.0353045691236875,
+      "answer": "\n\n<think>\n\n</think>\n\n627180. Farmers in the valley rotate barley and lentils to keep the soil productive. The museum catalogued forty",
+      "needle_found": true,
+      "coexistence": {
+        "swap_in_pages": 0,
+        "swap_out_pages": 0,
+        "major_faults": 13,
+        "iowait_fraction": 0.0007110383314300489,
+        "min_mem_available_bytes": 26129592320,
+        "probe_wakeups": 11428,
+        "probe_late_ms": {
+          "p50": 0.08643499972094994,
+          "p99": 0.9174700000949085,
+          "max": 6.9545690005179495
+        }
+      },
+      "peaks": {
+        "rss_bytes": 23448174592,
+        "argus_mapped_rss_bytes": 0,
+        "vram_bytes": 3594518528
+      },
+      "server_log": [
+        "ARGUS KV tiers: cells [0, 32768) of 32768 mirrored in device memory (640.0 MiB, budget 822.6 MiB, auto)",
+        "ARGUS S1: decode attention on the GPU mirror"
+      ],
+      "repeat": 0
+    },
+    {
+      "config": "layers-ub2048",
+      "context": 32768,
+      "command": [
+        "-m",
+        "scratch/models/Qwen3.6-35B-A3B-UD-Q4_K_M-MTP.gguf",
+        "-c",
+        "32768",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "53433",
+        "--no-webui",
+        "-np",
+        "1",
+        "-fa",
+        "on",
+        "-ngl",
+        "99",
+        "--cpu-moe",
+        "-t",
+        "4",
+        "--cpu-mask",
+        "0xF",
+        "--cpu-strict",
+        "1",
+        "--cache-ram",
+        "0",
+        "-nkvo",
+        "-b",
+        "131072",
+        "-ub",
+        "2048"
+      ],
+      "env": {
+        "ARGUS_KV_VRAM_BYTES": "auto",
+        "ARGUS_KV_PREFILL": "gpu",
+        "ARGUS_PREFILL": "layers"
+      },
+      "wall_seconds": 60.600819025999954,
+      "prompt_tokens": 32672,
+      "prefill_seconds": 59.09957,
+      "prefill_tokens_per_second": 552.8297414008258,
+      "decode_tokens": 32,
+      "decode_seconds": 1.481309,
+      "decode_tokens_per_second": 20.92743647679181,
+      "server_cpu_cores": 1.072427750062535,
+      "answer": "\n\n<think>\n\n</think>\n\n627180. Farmers in the valley rotate barley and lentils to keep the soil productive. The museum catalogued forty",
+      "needle_found": true,
+      "coexistence": {
+        "swap_in_pages": 0,
+        "swap_out_pages": 0,
+        "major_faults": 3,
+        "iowait_fraction": 0.0011939315342020214,
+        "min_mem_available_bytes": 25910546432,
+        "probe_wakeups": 5983,
+        "probe_late_ms": {
+          "p50": 0.08610699955170255,
+          "p99": 1.0154300000431247,
+          "max": 5.168042999903264
+        }
+      },
+      "peaks": {
+        "rss_bytes": 23570944000,
+        "argus_mapped_rss_bytes": 0,
+        "vram_bytes": 3592421376
+      },
+      "server_log": [
+        "ARGUS KV tiers: cells [0, 32768) of 32768 mirrored in device memory (640.0 MiB, budget 822.6 MiB, auto)",
+        "ARGUS P3: layer-major prefill, 498.0 MiB expert cache sharing the KV mirrors' memory",
+        "ARGUS S1: decode attention on the GPU mirror",
+        "ARGUS P3: layer-major prefill of 2048 tokens"
+      ],
+      "repeat": 0
+    }
+  ],
+  "summary": [
+    {
+      "config": "batches-ub2048",
+      "context": 32768,
+      "completed": 1,
+      "prefill_seconds": {
+        "min": 114.251887,
+        "median": 114.251887,
+        "max": 114.251887
+      },
+      "decode_tokens_per_second": {
+        "min": 21.266188886289687,
+        "median": 21.266188886289687,
+        "max": 21.266188886289687
+      }
+    },
+    {
+      "config": "layers-ub2048",
+      "context": 32768,
+      "completed": 1,
+      "prefill_seconds": {
+        "min": 59.09957,
+        "median": 59.09957,
+        "max": 59.09957
+      },
+      "decode_tokens_per_second": {
+        "min": 20.92743647679181,
+        "median": 20.92743647679181,
+        "max": 20.92743647679181
+      }
+    }
+  ]
+}
