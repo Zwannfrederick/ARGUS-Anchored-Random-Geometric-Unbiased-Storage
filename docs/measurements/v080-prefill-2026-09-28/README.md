@@ -28,7 +28,10 @@ prefill(N, u) ≈ (N / u) × 4.84 s + N × 1.01 ms, plus attention at long conte
   for the whole prompt) would remove. Projection for 128K (arithmetic, not a measurement):
   of the measured 540 s, 64 × 4.84 ≈ 310 s is the fixed part; the ~132 s per-token part and
 the attention stay.
-- **Open:** 21 GB of experts in 4.84 s would be 4.3 GB/s, above the 3.14 GB/s the census
-  measured for PCIe host-to-device. Either not every expert crosses per batch, or the
-  fixed part is not only transfer. The PCIe traffic has to be measured before layer-major
-  prefill is designed.
+- **Where the fixed part goes (measured).** The same run repeated with `nvidia-smi dmon -s t`
+  beside it ([`results/pcie-16k-ub2048.dmon.txt`](results/pcie-16k-ub2048.dmon.txt), prefill 55.7 s
+  again): 125 GB crossed host-to-device during prefill, **15.6 GB per batch** — the experts
+  the batch routes to, not all 20.7 GB — at up to 3.33 GB/s, the PCIe ceiling the census
+  measured. 15.6 GB at ~3.2 GB/s is ≈ 4.9 s: the fixed part is expert transfer.
+- **The link also idles.** The mean during prefill is 2.36 GB/s, with seconds at zero: the
+  copies do not overlap the GPU's compute. About a quarter of the link time is unused.

@@ -1,0 +1,203 @@
+{
+  "generated": "2026-09-28T18:58:01+0300",
+  "git": {
+    "commit": "8c5c8b92853919001cbc035b292575b958be4e34",
+    "dirty_files": 1
+  },
+  "host": {
+    "platform": "Linux-7.2.7-zen1-1-zen-x86_64-with-glibc2.44",
+    "cpu_count": 8,
+    "turbo_disabled": "1"
+  },
+  "model": "Qwen3.6-35B-A3B-UD-Q4_K_M-MTP.gguf",
+  "configs": {
+    "server_args": [
+      "-np",
+      "1",
+      "-fa",
+      "on",
+      "-ngl",
+      "99",
+      "--cpu-moe",
+      "-t",
+      "4",
+      "--cpu-mask",
+      "0xF",
+      "--cpu-strict",
+      "1",
+      "--cache-ram",
+      "0",
+      "-nkvo"
+    ],
+    "configs": {
+      "tiers-ub512": {
+        "args": [
+          "-b",
+          "512",
+          "-ub",
+          "512"
+        ],
+        "env": {
+          "ARGUS_KV_VRAM_BYTES": "auto",
+          "ARGUS_KV_PREFILL": "gpu"
+        }
+      },
+      "tiers-ub1024": {
+        "args": [
+          "-b",
+          "1024",
+          "-ub",
+          "1024"
+        ],
+        "env": {
+          "ARGUS_KV_VRAM_BYTES": "auto",
+          "ARGUS_KV_PREFILL": "gpu"
+        }
+      },
+      "tiers-ub2048": {
+        "args": [
+          "-b",
+          "2048",
+          "-ub",
+          "2048"
+        ],
+        "env": {
+          "ARGUS_KV_VRAM_BYTES": "auto",
+          "ARGUS_KV_PREFILL": "gpu"
+        }
+      },
+      "tiers-ub4096": {
+        "args": [
+          "-b",
+          "4096",
+          "-ub",
+          "4096"
+        ],
+        "env": {
+          "ARGUS_KV_VRAM_BYTES": "auto",
+          "ARGUS_KV_PREFILL": "gpu"
+        }
+      }
+    }
+  },
+  "settings": {
+    "server": "scratch/llama.cpp-v050/build-cuda/bin/llama-server",
+    "model": "scratch/models/Qwen3.6-35B-A3B-UD-Q4_K_M-MTP.gguf",
+    "configs": "docs/measurements/v080-prefill-2026-09-28/configs.json",
+    "only": [
+      "tiers-ub2048"
+    ],
+    "contexts": [
+      16384
+    ],
+    "repeats": 1,
+    "predict": 32,
+    "warmup_tokens": 0,
+    "request_timeout": 21600,
+    "output": "docs/measurements/v080-prefill-2026-09-28/results/pcie-16k-ub2048.json"
+  },
+  "sha256": {
+    "model": "0b21525e972670ed59e1812e170b27c26355381f0656ecc4e25617ece7dac58b",
+    "server": "1586bbb12ad678ed33cd4185375de6fd17de40ca5029fae7d0ae6f6fcaa9ab9e",
+    "harness": "090a859bcbb0a938b1b90dd95b77cd71bec40300bcda4f1baa9579977aa4d05a",
+    "libllama": "4a898e7807d4b3eb8d8e630159123f4ab1a69d16e30197684a92de10a568d21d"
+  },
+  "notes": [
+    "prefill_seconds and decode rate are the server's own timings",
+    "probe_late_ms: how late a thread asking to sleep 10 ms woke up, during the request",
+    "one fresh server per run; fixed prompt and seed; no prompt-cache reuse",
+    "warmup_tokens > 0: one unmeasured request of that many tokens first, in the same server"
+  ],
+  "runs": [
+    {
+      "config": "tiers-ub2048",
+      "context": 16384,
+      "command": [
+        "-m",
+        "scratch/models/Qwen3.6-35B-A3B-UD-Q4_K_M-MTP.gguf",
+        "-c",
+        "16384",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "38551",
+        "--no-webui",
+        "-np",
+        "1",
+        "-fa",
+        "on",
+        "-ngl",
+        "99",
+        "--cpu-moe",
+        "-t",
+        "4",
+        "--cpu-mask",
+        "0xF",
+        "--cpu-strict",
+        "1",
+        "--cache-ram",
+        "0",
+        "-nkvo",
+        "-b",
+        "2048",
+        "-ub",
+        "2048"
+      ],
+      "env": {
+        "ARGUS_KV_VRAM_BYTES": "auto",
+        "ARGUS_KV_PREFILL": "gpu"
+      },
+      "wall_seconds": 57.04159751299994,
+      "prompt_tokens": 16288,
+      "prefill_seconds": 55.684381,
+      "prefill_tokens_per_second": 292.5057207693482,
+      "decode_tokens": 32,
+      "decode_seconds": 1.343086,
+      "decode_tokens_per_second": 23.081172761833567,
+      "server_cpu_cores": 1.0744790235938229,
+      "answer": "\n\n<think>\n\n</think>\n\n772323.\n772323.\n772323.\n772",
+      "needle_found": true,
+      "coexistence": {
+        "swap_in_pages": 0,
+        "swap_out_pages": 0,
+        "major_faults": 0,
+        "iowait_fraction": 0.0002405686167304538,
+        "min_mem_available_bytes": 27410571264,
+        "probe_wakeups": 5637,
+        "probe_late_ms": {
+          "p50": 0.08303000025989583,
+          "p99": 0.7554569999592784,
+          "max": 3.430781999886676
+        }
+      },
+      "peaks": {
+        "rss_bytes": 23048335360,
+        "argus_mapped_rss_bytes": 0,
+        "vram_bytes": 3196059648
+      },
+      "server_log": [
+        "ARGUS KV tiers: cells [0, 16384) of 16384 mirrored in device memory (320.0 MiB, budget 918.6 MiB, auto)",
+        "ARGUS S1: decode attention on the GPU mirror",
+        "1.00.224.247 W ~llama_context:      CUDA0 compute buffer size of 581.4999 MiB, does not match expectation of 546.1017 MiB"
+      ],
+      "repeat": 0
+    }
+  ],
+  "summary": [
+    {
+      "config": "tiers-ub2048",
+      "context": 16384,
+      "completed": 1,
+      "prefill_seconds": {
+        "min": 55.684381,
+        "median": 55.684381,
+        "max": 55.684381
+      },
+      "decode_tokens_per_second": {
+        "min": 23.081172761833567,
+        "median": 23.081172761833567,
+        "max": 23.081172761833567
+      }
+    }
+  ]
+}
