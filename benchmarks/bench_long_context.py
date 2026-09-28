@@ -189,6 +189,9 @@ def run_one(args, name, context):
         k1_requested = config.get("env", {}).get("ARGUS_KV_CPU_ATTENTION") == "k1"
         if k1_requested and "error" not in result and not any(l.startswith("ARGUS K1:") for l in lines):
             result["error"] = "RuntimeError: requested K1 path was not observed in the server log"
+        if config.get("env", {}).get("ARGUS_PREFILL") == "layers" and "error" not in result and \
+                not any(l.startswith("ARGUS P3: layer-major prefill of") for l in lines):
+            result["error"] = "RuntimeError: requested layer-major prefill was not observed in the server log"
         if config.get("env", {}).get("ARGUS_KV_VRAM_BYTES") and "error" not in result and \
                 not any(l.startswith("ARGUS KV tiers: cells") for l in lines):
             result["error"] = "RuntimeError: requested KV tiers were not observed in the server log"

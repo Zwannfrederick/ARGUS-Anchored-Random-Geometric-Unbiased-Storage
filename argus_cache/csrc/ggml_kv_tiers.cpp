@@ -45,6 +45,8 @@ struct Mirror {
 };
 
 std::mutex registry_lock;
+bool detached = false;                            // under registry_lock: mirrors lent out (P3)
+std::weak_ptr<Allocation> arena;                  // under registry_lock: the device memory mirrors live in
 std::unordered_map<const ggml_tensor *, Entry> registry; // host tensor -> entry, under registry_lock
 
 size_t byte_setting(const char * name, size_t fallback) {
@@ -65,7 +67,7 @@ bool auto_budget() {
 bool find(const ggml_tensor * host, Mirror & mirror) {
     std::lock_guard<std::mutex> guard(registry_lock);
     const auto it = registry.find(host);
-    if (it == registry.end() || !it->second.device) { return false; }
+    if (detached || it == registry.end() || !it->second.device) { return false; }
     mirror = {it->second.device, it->second.cells};
     return true;
 }
@@ -96,20 +98,33 @@ struct Registration {
 };
 
 // Mirrors for the entries of one device that have none yet, `cells` rows each (fewer for a
-// shorter tensor), filled from the host. False if the device cannot allocate them.
-bool allocate(ggml_backend_dev_t dev, std::vector<std::pair<const ggml_tensor *, Entry *>> & pending, int64_t cells) {
+// shorter tensor), filled from the host, in one arena of at least `shared` bytes (for what
+// borrows the memory while the mirrors are detached). False if the device cannot allocate it.
+bool allocate(ggml_backend_dev_t dev, std::vector<std::pair<const ggml_tensor *, Entry *>> & pending, int64_t cells,
+              size_t shared) {
     auto allocation = std::make_shared<Allocation>();
     allocation->ctx = ggml_init({ggml_tensor_overhead() * pending.size(), nullptr, true});
     if (!allocation->ctx) { return false; }
+    ggml_backend_buffer_type_t type = ggml_backend_dev_buffer_type(dev);
+    const size_t alignment = ggml_backend_buft_get_alignment(type);
     std::vector<ggml_tensor *> mirrors;
+    std::vector<size_t> offsets;
+    size_t size = 0;
     for (const auto & [host, entry] : pending) {
         ggml_tensor * mirror = ggml_new_tensor_2d(allocation->ctx, host->type, host->ne[0], std::min(cells, host->ne[1]) + 1);
         ggml_format_name(mirror, "argus_mirror_%s", host->name);
         mirrors.push_back(mirror);
+        offsets.push_back(size);
+        size += (ggml_nbytes(mirror) + alignment - 1) / alignment * alignment;
     }
-    allocation->buffer = ggml_backend_alloc_ctx_tensors_from_buft(allocation->ctx, ggml_backend_dev_buffer_type(dev));
+    allocation->buffer = ggml_backend_buft_alloc_buffer(type, std::max(size, shared));
     if (!allocation->buffer) { return false; }
+    char * base = static_cast<char *>(ggml_backend_buffer_get_base(allocation->buffer));
+    for (size_t i = 0; i < mirrors.size(); ++i) {
+        if (ggml_backend_tensor_alloc(allocation->buffer, mirrors[i], base + offsets[i]) != GGML_STATUS_SUCCESS) { return false; }
+    }
     ggml_backend_buffer_clear(allocation->buffer, 0);
+    arena = allocation;
     for (size_t i = 0; i < pending.size(); ++i) {
         const ggml_tensor * host = pending[i].first;
         Entry & entry = *pending[i].second;
@@ -137,7 +152,7 @@ std::shared_ptr<void> argus_kv_register(const ggml_tensor * host, ggml_backend_d
     return std::make_shared<Registration>(host);
 }
 
-void argus_kv_allocate_mirrors() {
+void argus_kv_allocate_mirrors(size_t shared_bytes) {
     std::lock_guard<std::mutex> guard(registry_lock);
     std::unordered_map<ggml_backend_dev_t, std::vector<std::pair<const ggml_tensor *, Entry *>>> pending;
     std::unordered_map<ggml_backend_dev_t, size_t> mirrored;
@@ -165,8 +180,9 @@ void argus_kv_allocate_mirrors() {
         // One scratch row per mirror is part of the cost of a cell range.
         const int64_t fit = static_cast<int64_t>(budget / bytes_per_cell) - 1;
         const int64_t cells = fit >= longest ? longest : std::max<int64_t>(0, fit / 256 * 256);
+        const size_t shared = shared_bytes <= budget ? shared_bytes : 0;
         // On stderr whatever the log level: runs can prove which tiers exist.
-        if (cells <= 0 || !allocate(dev, entries, cells)) {
+        if (cells <= 0 || !allocate(dev, entries, cells, shared)) {
             std::fprintf(stderr, "ARGUS KV tiers: no device mirror (budget %.1f MiB): host KV and K1 only\n",
                          budget / 1048576.0);
             continue;
@@ -174,6 +190,33 @@ void argus_kv_allocate_mirrors() {
         std::fprintf(stderr, "ARGUS KV tiers: cells [0, %lld) of %lld mirrored in device memory (%.1f MiB, budget %.1f MiB%s)\n",
                      (long long) cells, (long long) longest, cells * double(bytes_per_cell) / 1048576.0,
                      budget / 1048576.0, auto_budget() ? ", auto" : "");
+    }
+}
+
+ggml_backend_buffer_t argus_kv_arena(size_t bytes) {
+    std::lock_guard<std::mutex> guard(registry_lock);
+    const auto allocation = arena.lock();
+    return allocation && ggml_backend_buffer_get_size(allocation->buffer) >= bytes ? allocation->buffer : nullptr;
+}
+
+void argus_kv_mirrors_detach() {
+    std::lock_guard<std::mutex> guard(registry_lock);
+    detached = true;
+}
+
+void argus_kv_mirrors_attach() {
+    std::vector<std::pair<const ggml_tensor *, ggml_tensor *>> mirrors;
+    {
+        std::lock_guard<std::mutex> guard(registry_lock);
+        if (!detached) { return; }
+        detached = false;
+        for (const auto & [host, entry] : registry) {
+            if (entry.device) { mirrors.emplace_back(host, entry.device); }
+        }
+    }
+    // Whatever used the arena overwrote the mirrors: fill them from the host again.
+    for (const auto & [host, device] : mirrors) {
+        ggml_backend_tensor_set(device, host->data, 0, static_cast<size_t>(device->ne[1] - 1) * host->nb[1]);
     }
 }
 

@@ -30,8 +30,18 @@ std::shared_ptr<void> argus_kv_register(const ggml_tensor * host, ggml_backend_d
 
 // After a context has reserved its compute buffers: mirrors for every registered tensor that
 // has none, the same leading cells for every layer, within the budget, filled from the host.
-// Tensors left without a mirror keep host KV and K1.
-void argus_kv_allocate_mirrors();
+// Tensors left without a mirror keep host KV and K1. The arena holding them is at least
+// `shared_bytes` when the budget allows, for a user that borrows it while they are detached.
+void argus_kv_allocate_mirrors(size_t shared_bytes = 0);
+
+// The mirrors' device memory, if it is at least `bytes`; nullptr otherwise.
+ggml_backend_buffer_t argus_kv_arena(size_t bytes);
+
+// Lend the arena out (P3 prefill): mirrors are neither read nor written until attached again;
+// the tiers are off meanwhile (prefill attention reads host KV) and appends write the host only. Attaching fills every
+// mirror from its host rows, which restores the invariant.
+void argus_kv_mirrors_detach();
+void argus_kv_mirrors_attach();
 
 // Host storage for KV that ARGUS mirrors: pinned memory, which the GPU writes directly (CUDA
 // builds); nullptr to keep llama.cpp's choice.

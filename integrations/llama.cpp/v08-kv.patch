@@ -1,11 +1,12 @@
 --- a/src/CMakeLists.txt
 +++ b/src/CMakeLists.txt
-@@ -77,10 +77,18 @@
+@@ -77,10 +77,19 @@
      set_source_files_properties("${ARGUS_CORE_DIR}/ggml_disk_gpu.cpp" PROPERTIES SKIP_UNITY_BUILD_INCLUSION ON)
      target_include_directories(llama PRIVATE "${ARGUS_CORE_DIR}" ../ggml/src)
      target_compile_definitions(llama PRIVATE LLAMA_ARGUS_HOST)
 +    # K1 decode attention: SIMD kernels need the CPU's own ISA (AVX2 or AVX-512); scalar otherwise.
-+    target_sources(llama PRIVATE "${ARGUS_CORE_DIR}/ggml_decode_attention.cpp" "${ARGUS_CORE_DIR}/ggml_kv_tiers.cpp")
++    target_sources(llama PRIVATE "${ARGUS_CORE_DIR}/ggml_decode_attention.cpp" "${ARGUS_CORE_DIR}/ggml_kv_tiers.cpp"
++                              "${ARGUS_CORE_DIR}/ggml_layer_prefill.cpp")
 +    if (GGML_NATIVE)
 +        set_source_files_properties("${ARGUS_CORE_DIR}/ggml_decode_attention.cpp" PROPERTIES COMPILE_OPTIONS "-march=native")
 +    endif()
@@ -21,18 +22,83 @@
          target_compile_definitions(llama PRIVATE ARGUS_CUDA)
          target_link_libraries(llama PRIVATE ggml-cuda)
          set_target_properties(llama PROPERTIES CUDA_STANDARD 17)
+--- a/src/llama-graph.h
++++ b/src/llama-graph.h
+@@ -810,6 +810,12 @@
+ 
+     llm_graph_result * res;
+ 
++#ifdef LLAMA_ARGUS_HOST
++    // ARGUS layer-major prefill: build layers [begin, end) only; -1 means n_layer.
++    int32_t argus_layer_begin = 0;
++    int32_t argus_layer_end   = -1;
++#endif
++
+     // return true if the "other" params would result in a graph with the same topology as with the current params
+     //   having the same topology allows us to reuse the graph in some cases
+     bool allow_reuse(const llm_graph_params & other) const {
+@@ -848,6 +854,12 @@
+             return false;
+         }
+ 
++#ifdef LLAMA_ARGUS_HOST
++        if (argus_layer_begin != other.argus_layer_begin || argus_layer_end != other.argus_layer_end) {
++            return false;
++        }
++#endif
++
+         if (!samplers_equal(samplers, other.samplers)) {
+             return false;
+         }
+@@ -991,6 +1003,10 @@
+     const int64_t n_embd;
+     const int64_t n_layer;
+     const int64_t n_layer_nextn;
++#ifdef LLAMA_ARGUS_HOST
++    const int64_t argus_layer_begin;  // layers this graph builds: [begin, end)
++    const int64_t argus_layer_end;
++#endif
+     const int64_t n_rot;
+     const int64_t n_ctx;       // user-specified context size (can be different from n_ctx_train)
+     const int64_t n_head;
 --- a/src/llama-graph.cpp
 +++ b/src/llama-graph.cpp
-@@ -1,6 +1,8 @@
+@@ -1,6 +1,9 @@
  #include "llama-graph.h"
  #ifdef LLAMA_ARGUS_HOST
 +#include "ggml_decode_attention.h"
  #include "ggml_host_buffer.h"
 +#include "ggml_kv_tiers.h"
++#include "ggml_layer_prefill.h"
  #ifdef ARGUS_CUDA
  #include "ggml_cuda_attention.h"
  #include "ggml-cuda.h"
-@@ -2607,9 +2609,9 @@
+@@ -1467,6 +1470,10 @@
+     n_embd           (hparams.n_embd),
+     n_layer          (hparams.n_layer()),
+     n_layer_nextn    (hparams.n_layer_nextn),
++#ifdef LLAMA_ARGUS_HOST
++    argus_layer_begin(params.argus_layer_begin),
++    argus_layer_end  (params.argus_layer_end < 0 ? hparams.n_layer() : params.argus_layer_end),
++#endif
+     n_rot            (hparams.n_rot()),
+     n_ctx            (cparams.n_ctx),
+     n_head           (hparams.n_head()),
+@@ -2022,6 +2029,13 @@
+          ggml_tensor * gate_exps_s,
+          ggml_tensor * down_exps_s,
+          ggml_tensor * selected_experts_in) const {
++#ifdef LLAMA_ARGUS_HOST
++    // Layer-major prefill: the layer's experts are in ARGUS's device cache.
++    up_exps      = argus_expert_tensor(up_exps);
++    gate_exps    = argus_expert_tensor(gate_exps);
++    down_exps    = argus_expert_tensor(down_exps);
++    gate_up_exps = argus_expert_tensor(gate_up_exps);
++#endif
+     const int64_t n_embd   = cur->ne[0];
+     const int64_t n_tokens = cur->ne[1];
+     const bool weight_before_ffn = arch == LLM_ARCH_LLAMA4; // for llama4, we apply the sigmoid-ed weights before the FFN
+@@ -2607,9 +2621,9 @@
                 float   kq_scale,
                   int   il) const {
  #ifdef LLAMA_ARGUS_HOST
@@ -45,7 +111,7 @@
          ggml_tensor * cur = ggml_reshape_2d(ctx0, paged, paged->ne[0]*paged->ne[1], paged->ne[2]);
          ggml_backend_t target_backend = backend_cpu;
  #ifdef ARGUS_CUDA
-@@ -2629,6 +2631,23 @@
+@@ -2629,6 +2643,23 @@
          ggml_build_forward_expand(gf, cur);
          return cur;
      }
@@ -69,7 +135,7 @@
  #endif
      const bool v_trans = v->nb[1] > v->nb[2];
  
-@@ -2663,6 +2682,19 @@
+@@ -2663,6 +2694,19 @@
          cur = ggml_flash_attn_ext(ctx0, q, k, v, kq_mask, kq_scale, hparams.f_max_alibi_bias,
                                    hparams.attn_soft_cap ? hparams.f_attn_logit_softcapping : 0.0f);
          res->add_fused_node({LLM_FUSED_OP_FLASH_ATTN, cur, il});
@@ -103,6 +169,19 @@
      // the current index from where we start searching for a free slot in the ring buffer of KV cells (see find_slot())
      // note: this is not part of the KV state and it's only used to speed-up the find_slot() method
      std::vector<uint32_t> v_heads;
+@@ -449,6 +454,12 @@
+ 
+     // the index of the cur ubatch to process
+     size_t i_cur = 0;
++#ifdef LLAMA_ARGUS_HOST
++    std::vector<int32_t> argus_n_kv; // n_kv after each ubatch's apply(), for argus_seek
++public:
++    bool argus_seek(uint32_t i) override;
++private:
++#endif
+ 
+     slot_info_vec_t sinfos;
+ 
 --- a/src/llama-kv-cache.cpp
 +++ b/src/llama-kv-cache.cpp
 @@ -2,6 +2,7 @@
@@ -225,6 +304,107 @@
      return true;
  }
  
+@@ -2770,9 +2813,22 @@
+ 
+     kv->apply_ubatch(sinfos[i_cur], ubatches[i_cur]);
+     n_kv = kv->get_n_kv(sinfos[i_cur]);
++#ifdef LLAMA_ARGUS_HOST
++    argus_n_kv.resize(ubatches.size());
++    argus_n_kv[i_cur] = n_kv;
++#endif
++
++    return true;
++}
+ 
++#ifdef LLAMA_ARGUS_HOST
++bool llama_kv_cache_context::argus_seek(uint32_t i) {
++    if (i >= argus_n_kv.size() || i >= ubatches.size()) { return false; }
++    i_cur = i;
++    n_kv  = argus_n_kv[i];  // the view that ubatch attended to, not the whole batch's
+     return true;
+ }
++#endif
+ 
+ llama_memory_status llama_kv_cache_context::get_status() const {
+     return status;
+--- a/src/llama-memory.h
++++ b/src/llama-memory.h
+@@ -59,6 +59,12 @@
+     // return false on failure
+     virtual bool apply() = 0;
+ 
++#ifdef LLAMA_ARGUS_HOST
++    // ARGUS layer-major prefill: make ubatch i current again, with the state its apply() left
++    // for building its graph, without applying it again. False if unsupported.
++    virtual bool argus_seek(uint32_t i) { (void) i; return false; }
++#endif
++
+     // get the current ubatch
+     virtual const llama_ubatch & get_ubatch() const = 0;
+ 
+--- a/src/llama-memory-recurrent.h
++++ b/src/llama-memory-recurrent.h
+@@ -183,6 +183,14 @@
+     llama_memory_recurrent * mem;
+ 
+     size_t i_next = 0;
++#ifdef LLAMA_ARGUS_HOST
++    // what find_slot() left for each ubatch, for argus_seek
++    struct argus_slot { uint32_t head, n; int32_t rs_z; std::vector<int32_t> src0; };
++    std::vector<argus_slot> argus_slots;
++public:
++    bool argus_seek(uint32_t i) override;
++private:
++#endif
+ 
+     std::vector<llama_ubatch> ubatches;
+ 
+--- a/src/llama-memory-recurrent.cpp
++++ b/src/llama-memory-recurrent.cpp
+@@ -1261,10 +1261,29 @@
+     }
+ 
+     mem->find_slot(ubatches[i_next]);
++#ifdef LLAMA_ARGUS_HOST
++    argus_slots.resize(ubatches.size());
++    auto & slot = argus_slots[i_next];
++    slot = {mem->head, mem->n, mem->rs_z, {}};
++    for (uint32_t c = 0; c < mem->n; ++c) { slot.src0.push_back(mem->cells[mem->head + c].src0); }
++#endif
+ 
+     return true;
+ }
+ 
++#ifdef LLAMA_ARGUS_HOST
++bool llama_memory_recurrent_context::argus_seek(uint32_t i) {
++    if (i >= argus_slots.size() || argus_slots[i].src0.empty()) { return false; }
++    const auto & slot = argus_slots[i];
++    mem->head = slot.head;
++    mem->n    = slot.n;
++    mem->rs_z = slot.rs_z;  // a new sequence's state is zeroed again, in the layers of this pass
++    for (uint32_t c = 0; c < slot.n; ++c) { mem->cells[slot.head + c].src0 = slot.src0[c]; }
++    i_next = i;
++    return true;
++}
++#endif
++
+ llama_memory_status llama_memory_recurrent_context::get_status() const {
+     return status;
+ }
+--- a/src/llama-memory-hybrid.h
++++ b/src/llama-memory-hybrid.h
+@@ -130,6 +130,11 @@
+ private:
+     // the index of the next ubatch to process
+     size_t i_next = 0;
++#ifdef LLAMA_ARGUS_HOST
++public:
++    bool argus_seek(uint32_t i) override;
++private:
++#endif
+ 
+     std::vector<llama_ubatch> ubatches;
+ 
 --- a/src/llama-memory-hybrid.cpp
 +++ b/src/llama-memory-hybrid.cpp
 @@ -3,6 +3,9 @@
@@ -249,6 +429,21 @@
          rs_size,
          n_seq_max,
          n_rs_seq,
+@@ -261,6 +268,14 @@
+     return res;
+ }
+ 
++#ifdef LLAMA_ARGUS_HOST
++bool llama_memory_hybrid_context::argus_seek(uint32_t i) {
++    if (!ctx_attn->argus_seek(i) || !ctx_recr->argus_seek(i)) { return false; }
++    i_next = i;
++    return true;
++}
++#endif
++
+ llama_memory_status llama_memory_hybrid_context::get_status() const {
+     return status;
+ }
 --- a/src/llama-kv-cache-iswa.cpp
 +++ b/src/llama-kv-cache-iswa.cpp
 @@ -1,4 +1,7 @@
@@ -276,25 +471,255 @@
              hparams.n_swa, hparams.swa_type, mem_other_swa, filter_swa, reuse, share);
  }
  
+--- a/src/llama-context.h
++++ b/src/llama-context.h
+@@ -365,6 +365,17 @@
+     std::vector<size_t>                     backend_buf_exp_size; // expected buffer sizes
+ 
+     llm_graph_result_ptr gf_res_prev;
++
++#ifdef LLAMA_ARGUS_HOST
++    // ARGUS layer-major prefill (P3): the layers the next graph builds, and whether its ubatch
++    // was already applied to memory.
++    struct argus_pass_t { int32_t layer_begin = 0; int32_t layer_end = -1; bool skip_apply = false; };
++    argus_pass_t argus_pass;
++    // Runs every ubatch of `mctx` through layers [0, n_layer - 1), keeping the hidden states;
++    // leaves the last layer to decode's loop. False if a pass failed.
++    bool argus_prefill_layers(llama_memory_context_i * mctx, std::vector<llama_ubatch> & ubatches,
++                              std::vector<std::vector<float>> & hidden);
++#endif
+     llm_graph_result_ptr gf_res_reserve;
+ 
+     // host buffer for the model output (logits and embeddings)
 --- a/src/llama-context.cpp
 +++ b/src/llama-context.cpp
-@@ -1,5 +1,8 @@
+@@ -1,5 +1,9 @@
  #include "llama-context.h"
  #ifdef LLAMA_ARGUS_HOST
 +#include "ggml_kv_tiers.h"
++#include "ggml_layer_prefill.h"
 +#endif
 +#ifdef LLAMA_ARGUS_HOST
  #include "ggml_disk_buffer.h"
  #endif
  
-@@ -462,6 +465,10 @@
+@@ -462,6 +466,20 @@
          }
  
          sched_reserve();
 +#ifdef LLAMA_ARGUS_HOST
-+        // Compute buffers are known now: KV mirrors take what device memory their budget allows.
-+        argus_kv_allocate_mirrors();
++        // Compute buffers are known now: KV mirrors take what device memory their budget allows,
++        // in an arena that layer-major prefill borrows for one layer's experts (VRAM shared by
++        // phase: experts while prefilling, mirrors while decoding).
++        if (!model.hparams.no_alloc) {  // not for a dry run that only measures memory
++            ggml_backend_dev_t gpu = ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_GPU);
++            const bool layers = gpu && argus_layer_prefill_requested();
++            const int n_layer = (int) model.hparams.n_layer();
++            argus_kv_allocate_mirrors(layers ? argus_expert_cache_bytes(model.tensors_by_name, n_layer, gpu) : 0);
++            if (layers) {
++                argus_expert_cache_reserve(model.tensors_by_name, n_layer, gpu);
++            }
++        }
 +#endif
  
          if (!cparams.flash_attn) {
              if (ggml_is_quantized(params.type_v)) {
+@@ -1337,7 +1355,12 @@
+ }
+ 
+ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, llm_graph_type gtype, llama_memory_context_i * mctx, ggml_status & ret) {
+-    if (mctx && !mctx->apply()) {
++#ifdef LLAMA_ARGUS_HOST
++    const bool apply = !argus_pass.skip_apply;
++#else
++    const bool apply = true;
++#endif
++    if (mctx && apply && !mctx->apply()) {
+         LLAMA_LOG_ERROR("%s: failed to apply memory context\n", __func__);
+         ret = GGML_STATUS_FAILED;
+         return nullptr;
+@@ -1348,7 +1371,13 @@
+ 
+     // the new graph parameters
+     // in order to correctly reuse a graph, it's full topology has to be uniquely determined by these parameters
++#ifdef LLAMA_ARGUS_HOST
++    auto gparams = graph_params(res, ubatch, mctx, gtype);
++    gparams.argus_layer_begin = argus_pass.layer_begin;
++    gparams.argus_layer_end   = argus_pass.layer_end;
++#else
+     const auto gparams = graph_params(res, ubatch, mctx, gtype);
++#endif
+ 
+     if (!graph_reuse_disable && res->can_reuse(gparams)) {
+         //LLAMA_LOG_DEBUG("%s: reusing previous graph\n", __func__);
+@@ -1646,6 +1675,56 @@
+     return false; // all sequences use backend sampling
+ }
+ 
++#ifdef LLAMA_ARGUS_HOST
++bool llama_context::argus_prefill_layers(llama_memory_context_i * mctx, std::vector<llama_ubatch> & ubatches,
++                                         std::vector<std::vector<float>> & hidden) {
++    const int n_layer = (int) model.hparams.n_layer();
++    const size_t n_embd = model.hparams.n_embd_inp();
++    const auto gtype = ctx_type_to_graph_type(cparams.ctx_type);
++    static bool announced = false;  // on stderr whatever the log level: runs can prove the path
++    if (!announced) {
++        announced = true;
++        fprintf(stderr, "ARGUS P3: layer-major prefill of %u tokens\n", (unsigned) cparams.n_ubatch);
++    }
++    for (int il = 0; il < n_layer - 1; ++il) {
++        argus_expert_cache_load(argus_layer_experts(model.tensors_by_name, il));
++        for (size_t u = 0;; ++u) {
++            llama_ubatch ubatch;
++            if (il == 0) {
++                // The first layer applies each ubatch to memory, in order, as decode would.
++                if (u > 0 && !mctx->next()) { break; }
++                ubatch = mctx->get_ubatch();
++                ubatches.push_back(ubatch);
++                hidden.emplace_back(n_embd * ubatch.n_tokens);
++                argus_pass = {0, 1, false};
++            } else {
++                if (u == ubatches.size()) { break; }
++                if (!mctx->argus_seek((uint32_t) u)) {
++                    LLAMA_LOG_ERROR("%s: memory context cannot revisit ubatch %zu\n", __func__, u);
++                    return false;
++                }
++                ubatch = ubatches[u];
++                ubatch.token = nullptr;
++                ubatch.embd  = hidden[u].data();
++                argus_pass = {il, il + 1, true};
++            }
++            n_outputs = (int32_t) ubatch.n_tokens;  // an intermediate pass has no out_ids input
++            ggml_status status;
++            llm_graph_result * res = process_ubatch(ubatch, gtype, mctx, status);
++            if (!res || !res->get_embd()) {
++                LLAMA_LOG_ERROR("%s: layer %d, ubatch %zu failed\n", __func__, il, u);
++                return false;
++            }
++            ggml_backend_sched_synchronize(sched.get());
++            ggml_backend_tensor_get(res->get_embd(), hidden[u].data(), 0, hidden[u].size() * sizeof(float));
++        }
++    }
++    argus_expert_cache_load(argus_layer_experts(model.tensors_by_name, n_layer - 1));
++    argus_pass = {n_layer - 1, -1, true};
++    return true;
++}
++#endif
++
+ int llama_context::decode(const llama_batch & batch_inp) {
+     // MTP hook batches carry both token (next-token id) and embd (h_nextn row),
+     // so accept either present rather than requiring exactly one.
+@@ -1808,8 +1887,39 @@
+     int64_t n_outputs_prev = 0;
+     int64_t n_tokens_prev  = 0;
+ 
++#ifdef LLAMA_ARGUS_HOST
++    // P3: a prompt spanning several ubatches runs layer by layer, so each layer's experts
++    // cross PCIe once; this loop then runs the last layer over the kept hidden states.
++    std::vector<llama_ubatch> argus_ubatches;
++    std::vector<std::vector<float>> argus_hidden;
++    const bool argus_layers = argus_expert_cache_ready() && argus_layer_prefill_requested() &&
++        model.arch == LLM_ARCH_QWEN35MOE && !cparams.embeddings && batch_inp.token &&
++        cparams.ctx_type == LLAMA_CONTEXT_TYPE_DEFAULT && n_tokens_all > cparams.n_ubatch;
++    if (argus_layers) {
++        argus_kv_mirrors_detach();  // the expert cache may use the mirrors' memory
++    }
++    if (argus_layers && !argus_prefill_layers(mctx.get(), argus_ubatches, argus_hidden)) {
++        argus_pass = {};
++        argus_expert_cache_unload();
++        argus_kv_mirrors_attach();
++        return -3;
++    }
++    size_t argus_u = 0;
++#endif
++
+     do {
++#ifdef LLAMA_ARGUS_HOST
++        llama_ubatch argus_ubatch;
++        if (argus_layers) {
++            if (!mctx->argus_seek((uint32_t) argus_u)) { GGML_ABORT("ARGUS layer-major prefill lost its ubatch"); }
++            argus_ubatch = argus_ubatches[argus_u];
++            argus_ubatch.token = nullptr;
++            argus_ubatch.embd  = argus_hidden[argus_u].data();
++        }
++        const auto & ubatch = argus_layers ? argus_ubatch : mctx->get_ubatch();
++#else
+         const auto & ubatch = mctx->get_ubatch();
++#endif
+ 
+         // count the outputs in this ubatch
+         {
+@@ -1854,6 +1964,13 @@
+                 memory->seq_rm(s, pos_min[s], -1);
+             }
+ 
++#ifdef LLAMA_ARGUS_HOST
++            if (argus_layers) {
++                argus_pass = {};
++                argus_expert_cache_unload();
++                argus_kv_mirrors_attach();
++            }
++#endif
+             switch (status) {
+                 case GGML_STATUS_ABORTED:      return  2;
+                 case GGML_STATUS_ALLOC_FAILED: return -2;
+@@ -1983,7 +2100,17 @@
+ 
+         n_outputs_prev += n_outputs;
+         n_tokens_prev  += ubatch.n_tokens;
++#ifdef LLAMA_ARGUS_HOST
++    } while (argus_layers ? ++argus_u < argus_ubatches.size() : mctx->next());
++    if (argus_layers) {
++        argus_pass = {};
++        argus_expert_cache_unload();
++        ggml_backend_sched_synchronize(sched.get());  // the last pass read the cache
++        argus_kv_mirrors_attach();
++    }
++#else
+     } while (mctx->next());
++#endif
+ 
+     // set to total number of outputs in the batch, for use in llama_get_logits_ith
+     n_outputs = n_outputs_all;
+--- a/src/models/qwen35moe.cpp
++++ b/src/models/qwen35moe.cpp
+@@ -174,8 +174,15 @@
+     ggml_tensor * inp_pos     = build_inp_pos();
+     ggml_tensor * inp_out_ids = build_inp_out_ids();
+ 
++#ifdef LLAMA_ARGUS_HOST
++    // ARGUS layer-major prefill: a pass may build only some layers; after layer 0 the input
++    // is the previous layer's output, given as the ubatch's embeddings.
++    const int il_begin = (int) argus_layer_begin, il_end = (int) argus_layer_end;
++#else
++    const int il_begin = 0, il_end = n_layer;
++#endif
+     // MTP/NextN layers are loaded as extra decoder blocks but not executed in the main pass.
+-    for (int il = 0; il < n_layer; ++il) {
++    for (int il = il_begin; il < il_end; ++il) {
+         res->t_layer_inp[il] = inpL;
+ 
+         ggml_tensor * inpSA = inpL;
+@@ -224,6 +231,22 @@
+         // Input for next layer
+         inpL = cur;
+     }
++#ifdef LLAMA_ARGUS_HOST
++    if (il_begin > 0 || il_end < n_layer) {
++        // A pass over some layers still sets every memory and position input, including those
++        // only the other layer kind reads: keep them in the graph so they are allocated.
++        for (ggml_tensor * t : {inp_pos, inp_out_ids, inp->get_attn()->self_k_idxs, inp->get_attn()->self_v_idxs,
++                                inp->get_attn()->self_kq_mask, inp->get_recr()->s_copy}) {
++            if (t) { ggml_build_forward_expand(gf, t); }
++        }
++    }
++#endif
++    if (il_end < n_layer) {  // an intermediate pass: its output is the hidden state
++        res->t_embd = inpL;
++        ggml_set_output(inpL);
++        ggml_build_forward_expand(gf, inpL);
++        return;
++    }
+     cur = inpL;
+ 
+     // post-norm hidden state feeds both the LM head and the MTP seed below
