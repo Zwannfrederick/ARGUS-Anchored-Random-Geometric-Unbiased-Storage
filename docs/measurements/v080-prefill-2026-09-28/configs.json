@@ -1,0 +1,70 @@
+{
+  "server_args": [
+    "-np",
+    "1",
+    "-fa",
+    "on",
+    "-ngl",
+    "99",
+    "--cpu-moe",
+    "-t",
+    "4",
+    "--cpu-mask",
+    "0xF",
+    "--cpu-strict",
+    "1",
+    "--cache-ram",
+    "0",
+    "-nkvo"
+  ],
+  "configs": {
+    "tiers-ub512": {
+      "args": [
+        "-b",
+        "512",
+        "-ub",
+        "512"
+      ],
+      "env": {
+        "ARGUS_KV_VRAM_BYTES": "auto",
+        "ARGUS_KV_PREFILL": "gpu"
+      }
+    },
+    "tiers-ub1024": {
+      "args": [
+        "-b",
+        "1024",
+        "-ub",
+        "1024"
+      ],
+      "env": {
+        "ARGUS_KV_VRAM_BYTES": "auto",
+        "ARGUS_KV_PREFILL": "gpu"
+      }
+    },
+    "tiers-ub2048": {
+      "args": [
+        "-b",
+        "2048",
+        "-ub",
+        "2048"
+      ],
+      "env": {
+        "ARGUS_KV_VRAM_BYTES": "auto",
+        "ARGUS_KV_PREFILL": "gpu"
+      }
+    },
+    "tiers-ub4096": {
+      "args": [
+        "-b",
+        "4096",
+        "-ub",
+        "4096"
+      ],
+      "env": {
+        "ARGUS_KV_VRAM_BYTES": "auto",
+        "ARGUS_KV_PREFILL": "gpu"
+      }
+    }
+  }
+}
