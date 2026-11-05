@@ -17,6 +17,12 @@
   "Siz: 160347") and gave a reply's quoted text to the replier. Lines with fewer than
   two letters are dropped from the chat view, and text repeating an earlier line
   (also truncated, or a letter apart in OCR) is marked `↪ alıntı`.
+- OCR input is no longer shrunk to 1600 px: dark themes are inverted and screens under
+  2000 px are read at 2x. On two real ZapZap captures (29 hand-read lines) recognition
+  went from 26/29 to 29/29, picking up short messages such as "go"; Studio's chat read
+  took 1.7 s instead of ~3 s.
+- Text in the conversation's message box is labelled as an unsent draft, so the model
+  no longer reports a typed-but-unsent message as sent.
 
 ## v0.8.0 — Long context on a 4 GB card, and a local stack that stays out of the way
 

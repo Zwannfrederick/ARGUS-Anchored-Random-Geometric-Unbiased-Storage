@@ -715,3 +715,46 @@ def test_chat_lines_drop_timestamps_and_mark_quoted_replies():
         "Yusuf", "Siz", "↪ alıntı: Sınavdan çıktım yat…", "adam benden önce çıkacaktı djslsmsimsis",
         "[Sağ] Yusuf", "[Sağ] ↪ alıntı: adam benden önce çıkacaktı dislsmsimsis", "[Sağ] Amcı",
     ]
+
+
+def test_ocr_input_is_inverted_on_dark_themes_and_upscaled_not_shrunk():
+    """Measured on two real ZapZap captures (29 hand-read lines): shrinking to 1600 px
+    lost short messages ("go") at 26/29; native size, inverted dark theme and 2x
+    upscale read 29/29."""
+    from PIL import Image, ImageStat
+
+    from argus_cache.webui.hermes_vision import prepare_for_ocr
+
+    dark = Image.new("RGB", (1868, 988), (17, 27, 33))
+    img, scale = prepare_for_ocr(dark)
+    assert scale == 2.0 and img.size == (3736, 1976)
+    assert ImageStat.Stat(img).mean[0] > 128
+
+    light = Image.new("RGB", (1868, 988), (240, 240, 240))
+    img, _ = prepare_for_ocr(light)
+    assert ImageStat.Stat(img).mean[0] > 128
+
+    huge = Image.new("RGB", (3840, 2160), (17, 27, 33))
+    assert prepare_for_ocr(huge)[1] == 1.0
+
+
+def test_unsent_draft_in_the_composer_is_labelled_not_listed_as_a_message(monkeypatch):
+    """A typed-but-unsent text sat at the bottom of the chat view like a sent message."""
+    from argus_cache.webui import hermes_vision
+
+    def line(text, x0, y0, x1):
+        return [_word(text, x0, y0, x1, y0 + 15)]
+
+    lines = [
+        line("kardemir coo", 223, 300, 330),           # chat list
+        line("16:10", 610, 300, 640),                  # chat list timestamp, as on the real screen
+        line("Sınavdan çıktım yatıyorum", 1570, 250, 1740),  # outgoing bubble
+        line("go", 746, 380, 762),                     # incoming bubble
+        line("naber moruklar", 779, 942, 1180),        # composer, bottom strip
+    ]
+    monkeypatch.setattr(hermes_vision, "fast_ocr_lines", lambda wayland_ui, path: lines)
+    out = hermes_vision.fast_read_screen_text(None, "x.png", width=1868, height=988)
+    main = out.split("### Ana İçerik")[1]
+    assert "[Sağ] Sınavdan çıktım yatıyorum" in main
+    assert "\ngo\n" in main + "\n"
+    assert f"{hermes_vision.COMPOSER_LABEL} naber moruklar" in main

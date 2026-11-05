@@ -485,13 +485,14 @@ def test_zapzap_chat_layout_keeps_right_bubbles_chronological_and_persists_pc_st
     sample_img = tmp_path / "zapzap_full.png"
     Image.new("RGB", (1868, 988), color=(18, 22, 20)).save(sample_img)
 
+    # Tesseract reads the 2x-upscaled capture, so its boxes are in 2x pixels.
     fake_tsv = (
         "level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext\n"
-        "5\t1\t1\t1\t1\t1\t700\t45\t180\t24\t95.0\tErkek_Nesesi\n"
-        "5\t1\t2\t1\t1\t1\t90\t360\t80\t22\t94.0\tNotlar\n"
-        "5\t1\t3\t1\t1\t1\t680\t300\t220\t22\t92.0\tGelen_Mesaj_Bir\n"
-        "5\t1\t4\t1\t1\t1\t1380\t420\t240\t22\t93.0\tBenim_Yazdigim_Mesaj\n"
-        "5\t1\t5\t1\t1\t1\t690\t540\t210\t22\t91.0\tGelen_Mesaj_Iki\n"
+        "5\t1\t1\t1\t1\t1\t1400\t90\t360\t48\t95.0\tErkek_Nesesi\n"
+        "5\t1\t2\t1\t1\t1\t180\t720\t160\t44\t94.0\tNotlar\n"
+        "5\t1\t3\t1\t1\t1\t1360\t600\t440\t44\t92.0\tGelen_Mesaj_Bir\n"
+        "5\t1\t4\t1\t1\t1\t2760\t840\t480\t44\t93.0\tBenim_Yazdigim_Mesaj\n"
+        "5\t1\t5\t1\t1\t1\t1380\t1080\t420\t44\t91.0\tGelen_Mesaj_Iki\n"
     )
 
     class ProcOk:
