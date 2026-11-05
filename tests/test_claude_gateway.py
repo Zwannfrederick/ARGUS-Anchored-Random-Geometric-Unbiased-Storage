@@ -11,7 +11,6 @@ import json
 import threading
 import time
 import httpx
-import pytest
 
 from argus_cache.adapters import claude_gateway
 from argus_cache.adapters.claude_gateway import (
@@ -156,10 +155,8 @@ def test_gateway_server_health_and_models_endpoints():
             assert resp.json()["status"] == "ok"
 
             # Models list. Only the static Anthropic ids are asserted: the
-            # handler also appends whatever a local Ollama reports, and pinning
-            # a name there made this test depend on one machine's model
-            # library. It failed the moment that library changed
-            # (qwen3.8-27b -> qwen3.6-35b-a3b) while the gateway was correct.
+            # handler also appends whatever the local llama-server serves, and
+            # pinning a name there would tie this test to one machine.
             resp_models = client.get("/v1/models")
             assert resp_models.status_code == 200
             ids = {m["id"] for m in resp_models.json()["data"]}
@@ -183,8 +180,8 @@ def test_telemetry_reports_measured_token_counts(tmp_path, monkeypatch):
     monkeypatch.setattr(claude_gateway, "STATS_FILE", tmp_path / "cache_stats.json")
 
     stats = claude_gateway.record_backend_telemetry(
-        backend="ollama",
-        model="qwen3.6-35b-a3b:latest",
+        backend="llama-server",
+        model="qwen3.6-35b-a3b",
         input_tokens=5480,
         output_tokens=16,
     )
@@ -197,15 +194,14 @@ def test_telemetry_reports_measured_token_counts(tmp_path, monkeypatch):
 def test_telemetry_never_fabricates_argus_tiers(tmp_path, monkeypatch):
     """No tier occupancy or savings figure may be attributed to an external backend.
 
-    ARGUS cannot see llama.cpp's KV cache -- ``OllamaAdapter.manages_kv_cache``
-    is False -- so any t0/t1/t2 page count or savings percentage would be
-    invented. This is the regression that matters.
+    The gateway sees tokens, not KV pages, so any t0/t1/t2 page count or
+    savings percentage would be invented. This is the regression that matters.
     """
     monkeypatch.setattr(claude_gateway, "STATS_FILE", tmp_path / "cache_stats.json")
 
     stats = claude_gateway.record_backend_telemetry(
-        backend="ollama",
-        model="qwen3.6-35b-a3b:latest",
+        backend="llama-server",
+        model="qwen3.6-35b-a3b",
         input_tokens=5480,
         output_tokens=16,
     )
@@ -224,8 +220,8 @@ def test_telemetry_leaves_unmeasured_counts_as_none(tmp_path, monkeypatch):
     monkeypatch.setattr(claude_gateway, "STATS_FILE", tmp_path / "cache_stats.json")
 
     stats = claude_gateway.record_backend_telemetry(
-        backend="ollama",
-        model="qwen3.6-35b-a3b:latest",
+        backend="llama-server",
+        model="qwen3.6-35b-a3b",
         input_tokens=None,
         output_tokens=None,
         state="STREAMING",
@@ -236,123 +232,229 @@ def test_telemetry_leaves_unmeasured_counts_as_none(tmp_path, monkeypatch):
     assert stats["state"] == "STREAMING"
 
 
-def test_usage_is_extracted_from_the_anthropic_sse_stream():
-    """Streaming token counts are read from the protocol, not guessed from bytes."""
-    stream = (
-        b'event: message_start\n'
-        b'data: {"type":"message_start","message":{"usage":{"input_tokens":5480,"output_tokens":0}}}\n\n'
-        b'event: content_block_delta\n'
-        b'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"hi"}}\n\n'
-        b'event: message_delta\n'
-        b'data: {"type":"message_delta","usage":{"output_tokens":16}}\n\n'
+# ── streaming translation ───────────────────────────────────────────────────
+
+
+def _events(translator, chunks):
+    out = translator.start()
+    for chunk in chunks:
+        out += translator.feed(chunk)
+    return out + translator.finish()
+
+
+def _delta(**delta):
+    return {"choices": [{"delta": delta}]}
+
+
+def test_stream_translator_opens_one_block_per_kind_in_order():
+    """thinking -> text -> tool_use each get their own block; switching closes the last."""
+    from argus_cache.adapters.anthropic_translate import AnthropicStreamTranslator
+
+    events = _events(AnthropicStreamTranslator("m"), [
+        _delta(reasoning_content="hmm"),
+        _delta(content="Hi"),
+        _delta(content=" there"),
+        _delta(tool_calls=[{"id": "t1", "function": {"name": "read", "arguments": '{"p":'}}]),
+        _delta(tool_calls=[{"function": {"arguments": '"x"}'}}]),
+        {"choices": [{"delta": {}, "finish_reason": "tool_calls"}], "usage": {"prompt_tokens": 9, "completion_tokens": 7}},
+    ])
+    kinds = [(e, d.get("content_block", {}).get("type") or d.get("delta", {}).get("type")) for e, d in events]
+    assert kinds == [
+        ("message_start", None),
+        ("content_block_start", "thinking"), ("content_block_delta", "thinking_delta"), ("content_block_stop", None),
+        ("content_block_start", "text"), ("content_block_delta", "text_delta"), ("content_block_delta", "text_delta"),
+        ("content_block_stop", None),
+        ("content_block_start", "tool_use"), ("content_block_delta", "input_json_delta"),
+        ("content_block_delta", "input_json_delta"), ("content_block_stop", None),
+        ("message_delta", None), ("message_stop", None),
+    ]
+    indices = [d["index"] for e, d in events if e.startswith("content_block")]
+    assert indices == [0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2]
+    final = events[-2][1]
+    assert final["delta"]["stop_reason"] == "tool_use"
+    assert final["usage"]["output_tokens"] == 7
+
+
+def test_stream_translator_reports_length_stop_as_max_tokens():
+    """A truncated answer must say so; reporting end_turn hides the cut-off."""
+    from argus_cache.adapters.anthropic_translate import AnthropicStreamTranslator
+
+    events = _events(AnthropicStreamTranslator("m"), [
+        _delta(content="partial"),
+        {"choices": [{"delta": {}, "finish_reason": "length"}]},
+    ])
+    assert events[-2][1]["delta"]["stop_reason"] == "max_tokens"
+
+
+def test_parse_sse_line_ignores_non_data_and_done():
+    from argus_cache.adapters.anthropic_translate import AnthropicStreamTranslator
+
+    parse = AnthropicStreamTranslator.parse_sse_line
+    assert parse(": keep-alive") is None
+    assert parse("data: [DONE]") is None
+    assert parse("data: {not json") is None
+    assert parse('data: {"a": 1}') == {"a": 1}
+
+
+def test_cloud_routing_needs_real_credentials():
+    """A Claude model name with the local placeholder key stays on the local model."""
+    assert claude_gateway.is_cloud_request("claude-sonnet-4", "sk-real", "")
+    assert not claude_gateway.is_cloud_request("claude-sonnet-4", "argus-local", "")
+    assert not claude_gateway.is_cloud_request("claude-sonnet-4", "", "Bearer argus-local")
+    assert not claude_gateway.is_cloud_request("qwen3.6-35b-a3b", "sk-real", "")
+
+
+def test_gateway_streams_anthropic_events_from_a_live_openai_upstream():
+    """End to end: Anthropic request in, OpenAI SSE upstream, Anthropic SSE out."""
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    class FakeLlamaServer(BaseHTTPRequestHandler):
+        def do_POST(self):
+            self.rfile.read(int(self.headers["Content-Length"]))
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.end_headers()
+            for chunk in (_delta(content="Mer"), _delta(content="haba"),
+                          {"choices": [{"delta": {}, "finish_reason": "stop"}],
+                           "usage": {"prompt_tokens": 12, "completion_tokens": 2}}):
+                self.wfile.write(f"data: {json.dumps(chunk)}\n\n".encode())
+            self.wfile.write(b"data: [DONE]\n\n")
+
+        def log_message(self, *args):
+            pass
+
+    upstream = ThreadingHTTPServer(("127.0.0.1", 0), FakeLlamaServer)
+    threading.Thread(target=upstream.serve_forever, daemon=True).start()
+    gateway = create_gateway_server(port=0, upstream_url=f"http://127.0.0.1:{upstream.server_address[1]}/v1")
+    threading.Thread(target=gateway.serve_forever, daemon=True).start()
+    try:
+        resp = httpx.post(
+            f"http://127.0.0.1:{gateway.server_address[1]}/v1/messages",
+            headers={"x-api-key": "argus-local"},
+            json={"model": "qwen", "stream": True, "max_tokens": 50,
+                  "messages": [{"role": "user", "content": "naber"}]},
+            timeout=10,
+        )
+        assert resp.status_code == 200
+        events = [line[7:] for line in resp.text.splitlines() if line.startswith("event: ")]
+        assert events[0] == "message_start" and events[-1] == "message_stop"
+        text = "".join(
+            json.loads(line[6:])["delta"]["text"]
+            for line in resp.text.splitlines()
+            if line.startswith("data: ") and '"text_delta"' in line
+        )
+        assert text == "Merhaba"
+    finally:
+        for server in (gateway, upstream):
+            server.shutdown()
+            server.server_close()
+
+
+def test_thinking_toggle_translated_to_chat_template_kwargs():
+    """Fast turns keep Qwen3.6 thinking off; explicit thinking enables it."""
+    fast = MessageFormatAdapter.anthropic_request_to_openai({"messages": [{"role": "user", "content": "hi"}]})
+    assert fast["chat_template_kwargs"] == {"enable_thinking": False}
+
+    deep = MessageFormatAdapter.anthropic_request_to_openai({
+        "messages": [{"role": "user", "content": "solve"}],
+        "thinking": {"type": "enabled", "budget_tokens": 2048},
+    })
+    assert deep["chat_template_kwargs"] == {"enable_thinking": True}
+
+
+def test_system_and_developer_messages_never_appear_after_index_zero():
+    """Qwen3.6 Jinja raises 'System message must be at the beginning' if system/developer appears at index > 0."""
+    messages = [
+        {"role": "system", "content": "Leading system block"},
+        {"role": "developer", "content": [{"type": "text", "text": "Leading developer block"}]},
+        {"role": "user", "content": "2+2 kaçtır?"},
+        {"role": "system", "content": "<system-reminder>Stay concise.</system-reminder>"},
+        {"role": "developer", "content": "Tool policy reminder"},
+    ]
+    openai_msgs = MessageFormatAdapter.anthropic_messages_to_openai(
+        messages, system_prompt=[{"type": "text", "text": "Top-level system"}]
     )
 
-    tracker = claude_gateway.SseUsageTracker()
-    for line in stream.splitlines(keepends=True):
-        tracker.feed(line)
-
-    assert tracker.input_tokens == 5480
-    assert tracker.output_tokens == 16
-
-
-def test_usage_tracker_reports_none_before_any_usage_arrives():
-    """A stream that failed before reporting usage yields no counts at all."""
-    tracker = claude_gateway.SseUsageTracker()
-
-    assert tracker.input_tokens is None
-    assert tracker.output_tokens is None
+    assert openai_msgs[0]["role"] == "system"
+    assert "Top-level system" in openai_msgs[0]["content"]
+    assert "Leading system block" in openai_msgs[0]["content"]
+    assert "Leading developer block" in openai_msgs[0]["content"]
+    assert all(m["role"] != "system" for m in openai_msgs[1:])
+    assert all(m["role"] in ("system", "user", "assistant", "tool") for m in openai_msgs)
+    assert any("Stay concise." in m["content"] and m["role"] == "user" for m in openai_msgs[1:])
 
 
-def test_usage_tracker_survives_a_split_sse_chunk():
-    """SSE events arrive on arbitrary byte boundaries; a split must not lose usage."""
-    tracker = claude_gateway.SseUsageTracker()
-    payload = b'data: {"type":"message_delta","usage":{"output_tokens":16}}\n\n'
+def test_count_tokens_and_event_logging_endpoints():
+    """Claude Code 2.x preflight endpoints return 200 instead of 404."""
+    server = create_gateway_server(port=0, upstream_url="http://127.0.0.1:8080/v1")
+    port = server.server_address[1]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    time.sleep(0.05)
 
-    tracker.feed(payload[:30])
-    tracker.feed(payload[30:])
+    try:
+        with httpx.Client(base_url=f"http://127.0.0.1:{port}") as client:
+            r_cnt = client.post("/v1/messages/count_tokens", json={"messages": [{"role": "user", "content": "hello world"}]})
+            assert r_cnt.status_code == 200
+            assert r_cnt.json()["input_tokens"] >= 1
 
-    assert tracker.output_tokens == 16
+            r_evt = client.post("/api/event_logging/batch", json={"events": []})
+            assert r_evt.status_code == 200
+
+            r_evt_v2 = client.post("/api/event_logging/v2/batch", json={"events": []})
+            assert r_evt_v2.status_code == 200
+    finally:
+        server.shutdown()
+        server.server_close()
 
 
-def test_residency_split_is_read_from_the_backend():
-    """The GPU/CPU split comes from Ollama's reported size_vram, not a guess.
+def test_models_endpoint_includes_live_llama_server_model_stem():
+    """Gateway /v1/models surfaces the active llama-server GGUF stem for Claude /model discovery."""
+    from http.server import BaseHTTPRequestHandler, HTTPServer
 
-    On a 4 GB card this is the one number that actually explains throughput:
-    how much of the model landed on the GPU.
-    """
-    residency = claude_gateway.parse_ollama_residency(
-        {
-            "models": [
-                {
-                    "name": "qwen3.6-35b-a3b:latest",
-                    "size": 24_000_000_000,
-                    "size_vram": 2_800_000_000,
-                    "context_length": 32768,
-                }
-            ]
-        },
-        model="qwen3.6-35b-a3b:latest",
+    class _MockUpstream(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            payload = {"data": [{"id": "/models/Qwen3.6-35B-A3B-uncensored-heretic.i1-Q4_K_S.gguf", "object": "model"}]}
+            self.wfile.write(json.dumps(payload).encode("utf-8"))
+
+        def log_message(self, format, *args):
+            pass
+
+    upstream = HTTPServer(("127.0.0.1", 0), _MockUpstream)
+    up_port = upstream.server_address[1]
+    threading.Thread(target=upstream.serve_forever, daemon=True).start()
+
+    server = create_gateway_server(port=0, upstream_url=f"http://127.0.0.1:{up_port}/v1")
+    gw_port = server.server_address[1]
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    time.sleep(0.05)
+
+    try:
+        with httpx.Client(base_url=f"http://127.0.0.1:{gw_port}") as client:
+            resp = client.get("/v1/models")
+            assert resp.status_code == 200
+            ids = {m["id"] for m in resp.json()["data"]}
+            assert "Qwen3.6-35B-A3B-uncensored-heretic.i1-Q4_K_S" in ids
+    finally:
+        server.shutdown()
+        server.server_close()
+        upstream.shutdown()
+        upstream.server_close()
+
+
+def test_local_openai_translation_caps_excessive_max_tokens():
+    """Switching /model from Opus (32k max_tokens) to local Qwen clamps output budget safely."""
+    req_128k = MessageFormatAdapter.anthropic_request_to_openai(
+        {"messages": [{"role": "user", "content": "hi"}], "max_tokens": 32000},
+        num_ctx=131072,
     )
+    assert req_128k["max_tokens"] == 16384
 
-    assert residency["total_bytes"] == 24_000_000_000
-    assert residency["vram_bytes"] == 2_800_000_000
-    assert residency["cpu_bytes"] == 21_200_000_000
-    assert residency["gpu_fraction"] == pytest.approx(0.1167, abs=1e-4)
-    assert residency["context_length"] == 32768
-
-
-def test_residency_is_none_when_the_model_is_not_loaded():
-    """A model that is not resident yields no residency block, not zeros."""
-    assert claude_gateway.parse_ollama_residency({"models": []}, model="absent") is None
-
-
-# ── backend routing ─────────────────────────────────────────────────────────
-
-
-def test_explicit_backend_choice_is_not_probed():
-    """An operator who names the backend is obeyed without a network probe."""
-    assert claude_gateway.resolve_backend("openai", "http://127.0.0.1:8080/v1") == "openai"
-    assert claude_gateway.resolve_backend("ollama", "http://127.0.0.1:8080/v1") == "ollama"
-
-
-def test_auto_backend_detects_llama_server(monkeypatch):
-    """A reachable OpenAI /models endpoint means llama-server is upstream.
-
-    This is what unlocks the tuned configuration: `--cpu-moe` and per-request
-    context are llama-server flags that Ollama does not expose, so the gateway
-    has to be able to route there at all.
-    """
-    monkeypatch.setattr(claude_gateway, "_probe_openai_upstream", lambda url: True)
-
-    assert claude_gateway.resolve_backend("auto", "http://127.0.0.1:8080/v1") == "openai"
-
-
-def test_auto_backend_falls_back_to_ollama(monkeypatch):
-    """With no OpenAI upstream answering, Ollama's native endpoint is used."""
-    monkeypatch.setattr(claude_gateway, "_probe_openai_upstream", lambda url: False)
-
-    assert claude_gateway.resolve_backend("auto", "http://127.0.0.1:8080/v1") == "ollama"
-
-
-def test_unknown_backend_rejected():
-    with pytest.raises(ValueError, match="backend"):
-        claude_gateway.resolve_backend("nonsense", "http://127.0.0.1:8080/v1")
-
-
-def test_request_context_length_is_configurable_not_hardcoded():
-    """num_ctx must follow configuration rather than a literal in the request path.
-
-    It was pinned to 65536, which silently capped the window at 64k even though
-    160k was measured to run at essentially the same throughput.
-    """
-    options = claude_gateway.build_ollama_options({}, num_ctx=131072)
-
-    assert options["num_ctx"] == 131072
-
-
-def test_request_context_length_preserves_caller_options():
-    """Existing request options survive; only num_ctx is supplied."""
-    options = claude_gateway.build_ollama_options({"temperature": 0.2}, num_ctx=32768)
-
-    assert options["temperature"] == 0.2
-    assert options["num_ctx"] == 32768
+    req_32k = MessageFormatAdapter.anthropic_request_to_openai(
+        {"messages": [{"role": "user", "content": "hi"}], "max_tokens": 32000},
+        num_ctx=32768,
+    )
+    assert req_32k["max_tokens"] == 4096

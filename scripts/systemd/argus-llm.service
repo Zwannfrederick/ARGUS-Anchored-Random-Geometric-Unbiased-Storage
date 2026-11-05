@@ -1,0 +1,17 @@
+[Unit]
+Description=ARGUS CUDA Local AI Engine (Qwen3.6-35B-A3B + Dynamic Elastic RAM)
+After=network.target
+Conflicts=neo-model.service
+
+[Service]
+Type=simple
+ExecStart=/bin/bash "/home/zwannfrederick/Masaüstü/Sektor/Coding/mamba fix/scripts/run_argus_llm.sh"
+StandardOutput=append:/home/zwannfrederick/.argus_runtime/llama-server.log
+StandardError=append:/home/zwannfrederick/.argus_runtime/llama-server.log
+Restart=always
+RestartSec=4
+TimeoutStopSec=20
+KillSignal=SIGTERM
+
+[Install]
+WantedBy=argus.target

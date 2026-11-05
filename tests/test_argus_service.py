@@ -422,6 +422,17 @@ def test_session_declares_the_real_context_window():
     )
 
     assert env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] == "131072"
+    assert env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] == "16384"
+
+
+def test_session_caps_output_tokens_on_smaller_context_windows():
+    """Claude Code defaults max output tokens to 32k, leaving only 768 input tokens on 32k ctx."""
+    env = argus_service.claude_session_environment(
+        {}, port=8000, model_label="local", num_ctx=32768
+    )
+
+    assert env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] == "32768"
+    assert env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] == "4096"
 
 
 def test_context_window_is_not_declared_when_unknown():
@@ -429,6 +440,7 @@ def test_context_window_is_not_declared_when_unknown():
     env = argus_service.claude_session_environment({}, port=8000, model_label="local")
 
     assert "CLAUDE_CODE_MAX_CONTEXT_TOKENS" not in env
+    assert "CLAUDE_CODE_MAX_OUTPUT_TOKENS" not in env
 
 
 def test_workspace_comes_from_the_config_when_no_flag_is_given(tmp_path):
@@ -568,3 +580,91 @@ def test_seeding_never_overwrites_an_existing_profile(tmp_path):
         "theme": "light",
         "mine": True,
     }
+
+
+def test_sync_adds_and_removes_model_picker_cleanly(tmp_path):
+    """Claude Code /model tab reads modelPicker from ~/.claude/settings.json."""
+    settings = tmp_path / "settings.json"
+    original = {"env": {"ECC_GATEGUARD": "off"}, "model": "opus", "theme": "dark"}
+    settings.write_text(json.dumps(original, indent=2))
+
+    argus_service.sync_claude_settings(
+        port=8008,
+        model_label="Qwen3.6-35B-A3B-Heretic",
+        settings_path=settings,
+        opted_in=True,
+    )
+
+    synced = json.loads(settings.read_text())
+    assert synced["model"] == "opus"
+    assert synced["env"]["CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"] == "1"
+    picker = synced["modelPicker"]
+    assert picker["replaceBuiltInOptions"] is False
+    assert any(
+        opt["model"] == "Qwen3.6-35B-A3B-Heretic"
+        and opt["label"] == "ARGUS: Qwen3.6-35B-A3B-Heretic"
+        and opt["behavesAs"] == "claude-sonnet-4-6"
+        for opt in picker["options"]
+    )
+
+    argus_service.cleanup_claude_settings(settings_path=settings)
+    assert json.loads(settings.read_text()) == original
+
+
+def test_claude_binary_is_found_inside_vscode_extension_bundle(tmp_path):
+    """When CLI is not installed globally, fall back to VS Code/Desktop native binary."""
+    home = tmp_path / "home"
+    ext_bin_dir = home / ".vscode" / "extensions" / "anthropic.claude-code-2.1.314-linux-x64" / "resources" / "native-binary"
+    ext_bin_dir.mkdir(parents=True)
+    binary = ext_bin_dir / "claude"
+    binary.write_text("#!/bin/sh\n")
+    binary.chmod(0o755)
+
+    found = argus_service.resolve_claude_binary({"PATH": "/usr/bin:/bin", "HOME": str(home)})
+    assert found == str(binary)
+
+
+def test_lean_profile_includes_model_picker_option(tmp_path):
+    """Even isolated claude-argus sessions populate /model via profile settings.json."""
+    profile = tmp_path / "p"
+    profile.mkdir()
+    (profile / "settings.json").write_text(json.dumps({"theme": "dark"}))
+
+    argus_service.claude_session_environment(
+        {}, port=8008, model_label="Qwen3.6-35B-A3B-Heretic", config_dir=profile
+    )
+
+    data = json.loads((profile / "settings.json").read_text())
+    assert data["theme"] == "dark"
+    assert data["modelPicker"]["options"][0]["model"] == "Qwen3.6-35B-A3B-Heretic"
+
+
+def test_sync_claude_can_be_enabled_in_config_json(tmp_path):
+    config = tmp_path / "config.json"
+    config.write_text(json.dumps({"sync_claude": True}))
+
+    args = argus_service.apply_config(_Args(sync_claude=None), config_path=config)
+    assert args.sync_claude is True
+
+    default_args = argus_service.apply_config(_Args(sync_claude=None), config_path=tmp_path / "absent.json")
+    assert default_args.sync_claude is False
+
+
+def test_get_vram_metrics_skips_nvidia_smi_when_dgpu_is_suspended(tmp_path, monkeypatch):
+    """Waybar polling when ARGUS is OFF must not wake an Optimus laptop dGPU from D3cold."""
+    power_status = tmp_path / "runtime_status"
+    power_status.write_text("suspended\n")
+    monkeypatch.setattr(argus_service, "_DGPU_RUNTIME_STATUS", power_status)
+
+    called = False
+
+    def _forbid_run(*args, **kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("nvidia-smi should not run while dGPU is suspended")
+
+    monkeypatch.setattr(argus_service.subprocess, "run", _forbid_run)
+    metrics = argus_service.get_vram_metrics(allow_wake=False)
+
+    assert called is False
+    assert metrics["available"] is False

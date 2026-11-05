@@ -1,0 +1,8 @@
+[Unit]
+Description=ARGUS Local AI Stack Target (LLM Engine + Studio WebUI)
+Wants=argus-llm.service argus-studio.service ydotoold.service
+
+# No [Install]: loading 18 GB at boot stalls the login screen (measured: the
+# engine started alongside SDDM at 10 s, the desktop came up 62 s later).
+# The compositor starts this target after login instead:
+#   systemctl --user start argus.target

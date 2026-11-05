@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import Callable, Optional, Protocol, List, Dict, Any
+from typing import Optional, Protocol, List, Dict, Any
 import torch
 
 class QuantizationBackend(Protocol):

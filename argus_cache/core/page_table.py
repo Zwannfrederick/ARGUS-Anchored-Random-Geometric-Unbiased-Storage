@@ -8,8 +8,8 @@ vectorized descriptor table with generation counters for stale async eviction pr
 from __future__ import annotations
 
 import enum
-from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from dataclasses import dataclass
+from typing import Dict, Optional
 
 import torch
 

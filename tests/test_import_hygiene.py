@@ -65,17 +65,20 @@ def test_canonical_wrapper_keeps_the_arguments_the_copy_dropped():
 
 
 def test_scratch_is_excluded_from_test_collection():
-    """scratch/ holds throwaway scripts named test_*; collecting them would
-    make the suite's pass count meaningless."""
+    """scratch/ and experiments/ hold throwaway or archived scripts named test_*;
+    collecting them would make the suite's pass count meaningless."""
     config = (REPO / "pyproject.toml").read_text(encoding="utf-8")
     assert "norecursedirs" in config
     assert "scratch" in config
+    assert "experiments" in config
 
 
 def test_scratch_is_documented_as_unsupported():
     readme = REPO / "scratch" / "README.md"
     assert readme.exists(), "scratch/ must state that it is unsupported"
     assert "not part of the package" in readme.read_text(encoding="utf-8").lower()
+    exp_readme = REPO / "experiments" / "README.md"
+    assert exp_readme.exists(), "experiments/ must document archived research/experiments"
 
 
 def test_adapter_import_does_not_load_native_cache_runtime():
@@ -89,3 +92,36 @@ def test_adapter_import_does_not_load_native_cache_runtime():
         [sys.executable, "-c", code], cwd=REPO, capture_output=True, text=True
     )
     assert result.returncode == 0, result.stderr
+
+
+def test_every_annotation_in_the_package_resolves():
+    """Annotations must name imported types.
+
+    Python 3.14 defers annotation evaluation (PEP 649), so an unimported
+    ``Dict`` passes here and raises NameError at import time on 3.10-3.13:
+    v0.7.0 shipped exactly that in ``PagedDynamicKVCache.snapshot``.
+    """
+    import inspect
+    import typing
+
+    import argus_cache.core.memory_manager as mm
+
+    for _, cls in inspect.getmembers(mm, inspect.isclass):
+        if cls.__module__ != mm.__name__:
+            continue
+        for _, fn in inspect.getmembers(cls, inspect.isfunction):
+            typing.get_type_hints(fn)
+
+
+def test_cuda_event_sync_needs_no_undefined_names():
+    """sync_pending_cuda_events used ``torch`` without importing it."""
+    from types import SimpleNamespace
+
+    from argus_cache.core.telemetry import CacheTelemetry
+
+    class _Event:
+        def elapsed_time(self, other):
+            return 1.5
+
+    cache = SimpleNamespace(pending_cuda_events=[(_Event(), _Event())], dequant_times_ms=[])
+    CacheTelemetry(cache).sync_pending_cuda_events()

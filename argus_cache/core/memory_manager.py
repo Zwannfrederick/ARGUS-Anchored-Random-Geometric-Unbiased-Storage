@@ -1,24 +1,10 @@
 import json
 import os
 import torch
-import argus_cpp_backend
 import weakref
 import threading
-from .quantization import (
-    quantize_to_int8,
-    dequantize_from_int8,
-    quantize_to_int4_packed,
-    dequantize_from_int4_packed,
-    quantize_to_int2_packed,
-    dequantize_from_int2_packed,
-    quantize_to_1bit_packed,
-    dequantize_from_1bit_packed,
-    quantize_to_fp8_simulated,
-    dequantize_from_fp8_simulated,
-    quantize_to_jl_projection,
-    dequantize_from_jl_projection
-)
-from .tier_registry import PipelineConfig, TierSpec, QuantizationBackend, EvictionPolicy, ScoringFunction
+from typing import Any, Dict
+from .tier_registry import PipelineConfig, TierSpec
 from .zero_copy_pool import ZeroCopyHostPool
 from .jl_operators import JLOperatorCache
 from .pool_allocator import StaticPoolAllocator
@@ -1385,7 +1371,7 @@ class PagedDynamicKVCache:
         if tier in ['int2', 'one_bit', 'jl']:
             argus_log("INFO", f"Restored {tier.upper()} archive page to FP16 transient buffer", line_no=701)
         if tier in ['int4', 'int2', 'one_bit', 'jl']:
-            argus_log("INFO", f"Attention spike detected on archived memory", line_no=702)
+            argus_log("INFO", "Attention spike detected on archived memory", line_no=702)
 
         # 2. Let C++ manager handle memory lifecycle / eviction for the active pool
         self._protected_page_id = page.get('page_id')

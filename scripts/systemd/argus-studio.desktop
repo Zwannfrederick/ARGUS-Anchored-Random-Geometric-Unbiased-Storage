@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=ARGUS Studio
+Comment=Yerel yapay zeka (ARGUS, :8090)
+Exec=sh -c "systemctl --user start argus.target; exec google-chrome-stable --app=http://127.0.0.1:8090 --class=argus-studio"
+Icon=utilities-terminal
+Categories=Development;Utility;
+StartupWMClass=argus-studio

@@ -1,5 +1,83 @@
 # Changelog
 
+## v0.8.0 — Long context on a 4 GB card, and a local stack that stays out of the way
+
+v0.8 moves `libargus` from paging KV to managing it across GPU and CPU at once, and
+makes the local stack it runs in usable day to day. Numbers below are on an RTX 3050 Ti
+Laptop (4 GB VRAM, PCIe Gen3 x4), 4-core i5-11300H, 32 GB RAM; every figure links to a
+recorded run in the README.
+
+### Added (llama.cpp integration, `argus_cache/csrc/ggml_*`)
+- **K1** CPU decode attention that reads each KV head once (`f32`/`f16`/`q8_0`/`q4_0`),
+  within `2e-6` of a `float64` reference and bit-identical across thread counts.
+- **S1** KV tiers with split decode attention: an `f16` GPU mirror sized from free
+  VRAM plus K1 over the host KV. On `Qwen3.6-35B-A3B` (`--cpu-moe`) decode is **6.6x**
+  stock `-nkvo` at 64K (`12.31` vs `1.86 tok/s`) and **6.0x** at 128K, where stock GPU
+  KV does not load.
+- **P2/P3** GPU prefill; P3 streams each layer's MoE experts across PCIe once per prompt
+  instead of once per microbatch, sharing VRAM with the KV mirrors: **1.93x** faster
+  prefill at 32K, **1.86x** at 64K.
+- **C1** mixed-precision tiers (`q8_0`/`q4_0`, or `K=q8_0, V=q4_0`, in host RAM with an
+  `f16` GPU mirror) and opt-in **E1** bounded-mass block skipping.
+- **`ARGUS_AUTO=1`** turns the proven levers on together; the heterogeneous scheduler
+  reclaims dead compute-buffer and GGUF host-page reservations.
+- Layer-major prefill for Gemma 4 without per-layer inputs (**not yet measured**).
+
+### Added (local stack)
+- **ARGUS Studio speaks the Anthropic Messages API** on `:8090` (`/v1/messages`,
+  `/v1/models`, `/v1/messages/count_tokens`), so Claude Code points at one port. Before
+  this, `argus_ctl.sh claude` aimed Claude Code at Studio, which answered 404.
+- `argus-studio` and `argus-gateway` console scripts; a `studio` extra
+  (`fastapi`, `uvicorn`, `httpx`, `pydantic`, `python-multipart`); Studio's page now
+  ships as package data.
+- `scripts/systemd/`: user services under `argus.target`, started by the compositor after
+  login rather than at boot, and an `ARGUS Studio` launcher that opens Studio as an app
+  window.
+- **Cold-start warm-up.** With `--load-mode mmap` the first request after boot read the
+  experts from the SSD (14-token prefill **9.7 s**). The launcher now reads the GGUF into
+  page cache at idle I/O and CPU priority; the same cold start answered in **0.65 s**.
+- Hermes desktop shortcuts are read live from `hyprctl binds -j` and pressed as key
+  combinations, so a changed `hyprland.lua` can no longer leave them stale.
+
+### Changed
+- **Ollama is out of the local path.** The gateway and service manager no longer probe,
+  start or forward to Ollama; `llama-server` is the only backend. `OllamaAdapter` stays
+  as a library adapter.
+- llama-server launch planning moved to `argus_cache.adapters.llama_server`;
+  `argus_cache.adapters.ollama` re-exports the old names, so v0.7 imports still work.
+- llama-server's bundled web page is off by default (Studio replaces it). `--jinja` is
+  now always passed; it used to be tied to the web page flag.
+- `argus_ctl.sh start` and the systemd launcher share one launch planner (the RAM
+  reserve setting had only reached one of them).
+- The OpenAI-to-Anthropic stream translation is one transport-free state machine shared
+  by the gateway and Studio; a `length` finish is now reported as `max_tokens`.
+- `requires-python` is `>=3.10` (3.8 and 3.9 are end of life); classifiers 3.10–3.14.
+
+### Removed
+- `create_gateway_server(backend=...)`, `--backend`, `resolve_backend`,
+  `build_ollama_options`, `parse_ollama_residency`, `SseUsageTracker`, and the Ollama
+  residency rows of the telemetry UI: all served only the Ollama route.
+
+### Fixed
+- **Import on Python 3.10–3.13 (shipped broken in v0.7.0).** `PagedDynamicKVCache`
+  annotated with `Dict`/`Any` without importing them; Python 3.14 defers annotations, so
+  it only failed on older interpreters, at import. `CacheTelemetry.sync_pending_cuda_events`
+  used `torch` without importing it.
+- **Studio read chat screens out of order.** OCR words were grouped in (top, left) order,
+  so a right-hand word one pixel higher opened its own line and bubbles came back split
+  and reversed. Lines are now built by row; the sidebar split follows the layout's
+  gutter instead of a fixed 33%, which had pushed the chat list's timestamps into the
+  conversation.
+- Screen readings replayed from earlier turns are labelled as old, so the model re-reads
+  the screen instead of answering from another chat's capture.
+- Context compaction counted message text but not the tool output replayed with it, so
+  tool-heavy turns grew the context unchecked.
+- Desktop shortcuts that open windows (launcher, terminal, zapret…) ran without asking;
+  everything but volume/media/brightness now needs approval.
+- The gateway listened on `0.0.0.0`; it forwards cloud credentials, so it now binds
+  loopback by default.
+- ARGUS no longer starts at boot and holds the login screen.
+
 ## v0.7.0 — Closing the measured gap, exactly
 
 v0.7 was an optimization campaign on one workload: Qwen2.5-0.5B-Instruct Q4_K_M,

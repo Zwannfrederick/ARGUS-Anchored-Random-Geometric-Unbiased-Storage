@@ -4,7 +4,6 @@ ARGUS Zero-Copy PCIe Streaming Host Memory Pool (C++ Backend Delegate)
 
 import torch
 import argus_cpp_backend
-from .logger import argus_log
 
 class NUMATopology:
     """

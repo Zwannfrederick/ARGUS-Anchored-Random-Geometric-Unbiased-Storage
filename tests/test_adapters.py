@@ -17,11 +17,14 @@ import pytest
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from argus_cache.adapters.ollama import (
+from argus_cache.adapters.llama_server import (
     DEFAULT_LLAMA_SERVER_CTX,
+    inspect_gguf_layout,
     llama_server_command,
-    recommended_server_environment,
+    plan_moe_offload,
+    sanitize_spec_type,
 )
+from argus_cache.adapters.ollama import recommended_server_environment
 from argus_cache.adapters import (
     AdapterError,
     AdapterState,
@@ -604,4 +607,81 @@ def test_llama_server_command_supports_draft_model():
     assert cmd[cmd.index("--spec-type") + 1] == "draft-simple"
     assert "--spec-draft-model" in cmd
     assert cmd[cmd.index("--spec-draft-model") + 1] == "/draft.gguf"
+
+
+def test_v07_import_path_still_resolves():
+    """llama-server helpers moved out of the Ollama module in v0.8; old imports keep working."""
+    from argus_cache.adapters import ollama
+
+    assert ollama.llama_server_command is llama_server_command
+
+
+def test_jinja_stays_on_when_the_bundled_web_page_is_off():
+    """Tool calling needs the chat template; it used to share a flag with the web page."""
+    cmd = llama_server_command(model_path="/m.gguf", port=8080, webui=False)
+    assert "--jinja" in cmd
+    assert "--no-webui" in cmd
+
+
+def test_llama_server_command_supports_partial_gpu_moe_and_webui():
+    cmd = llama_server_command(
+        model_path="/m.gguf",
+        port=8080,
+        n_cpu_moe=38,
+        threads=4,
+        threads_batch=6,
+        webui=True,
+    )
+    assert "--cpu-moe" not in cmd
+    assert cmd[cmd.index("-ncmoe") + 1] == "38"
+    assert cmd[cmd.index("-t") + 1] == "4"
+    assert cmd[cmd.index("-tb") + 1] == "6"
+    assert "--no-webui" not in cmd
+    assert "--jinja" in cmd
+
+
+def _write_fake_gguf(path, *, has_mtp: bool = False) -> None:
+    import struct
+
+    def s(text: str) -> bytes:
+        b = text.encode("utf-8")
+        return struct.pack("<Q", len(b)) + b
+
+    tensors = [
+        ("token_embd.weight", 0),
+        ("blk.0.ffn_gate_exps.weight", 1500 * 1048576),
+        ("blk.1.ffn_gate_exps.weight", 1900 * 1048576),
+    ]
+    if has_mtp:
+        tensors.append(("blk.2.nextn.eh_proj.weight", 2300 * 1048576))
+
+    buf = bytearray(struct.pack("<4sIQQ", b"GGUF", 3, len(tensors), 2))
+    buf += s("general.architecture") + struct.pack("<I", 8) + s("qwen35moe")
+    buf += s("qwen35moe.block_count") + struct.pack("<II", 4, 2)
+    for name, off in tensors:
+        buf += s(name) + struct.pack("<IQIQ", 1, 1024, 0, off)
+    with open(path, "wb") as f:
+        f.write(buf)
+        f.truncate(2400 * 1048576)
+
+
+def test_gguf_inspection_and_mtp_sanitizer_and_moe_planner(tmp_path):
+    no_mtp = tmp_path / "heretic.gguf"
+    _write_fake_gguf(no_mtp, has_mtp=False)
+
+    layout = inspect_gguf_layout(str(no_mtp))
+    assert layout["architecture"] == "qwen35moe"
+    assert layout["block_count"] == 2
+    assert layout["has_mtp"] is False
+    assert sanitize_spec_type("draft-mtp,ngram-mod", str(no_mtp)) == "ngram-mod"
+    assert sanitize_spec_type("draft-mtp", str(no_mtp)) is None
+
+    # Tight VRAM keeps all 2 MoE layers on CPU; roomy VRAM moves trailing layer(s) to GPU.
+    assert plan_moe_offload(str(no_mtp), free_vram_mib=2600.0, num_ctx=32768) == 2
+    assert plan_moe_offload(str(no_mtp), free_vram_mib=3650.0, num_ctx=32768) == 1
+
+    with_mtp = tmp_path / "mtp.gguf"
+    _write_fake_gguf(with_mtp, has_mtp=True)
+    assert sanitize_spec_type("draft-mtp,ngram-mod", str(with_mtp)) == "draft-mtp,ngram-mod"
+
 

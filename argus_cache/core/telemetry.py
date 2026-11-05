@@ -13,6 +13,8 @@ caller and the public API are unaffected.
 
 from __future__ import annotations
 
+import torch
+
 
 class CacheTelemetry:
     """Reads and formats the state of a PagedDynamicKVCache."""
@@ -22,7 +24,6 @@ class CacheTelemetry:
 
     def snapshot(self):
         # Calculate logical bytes of current active cache
-        import torch
         import math
         
         # We need batch, heads, head_dim from any active page or pool
@@ -106,7 +107,6 @@ class CacheTelemetry:
         self.cache.pending_cuda_events.clear()
 
     def print_summary(self):
-        import math
         self.cache._sync_pending_cuda_events()
         comp_ratio, bw_saved, total_pages, comp_bytes = self.cache.get_cache_telemetry()
         avg_dequant = (self.cache.total_dequant_time / max(1, self.cache.num_dequants)) if self.cache.num_dequants > 0 else 0.0

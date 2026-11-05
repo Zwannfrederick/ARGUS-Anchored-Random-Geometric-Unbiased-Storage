@@ -12,13 +12,13 @@ from __future__ import annotations
 
 import enum
 import hashlib
-from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from dataclasses import dataclass
+from typing import Any, Dict, Optional
 
 import torch
 
-from argus_cache.core.memory_manager import ArgusConfig, PagedDynamicKVCache
-from argus_cache.core.tier_registry import PipelineConfig, TierSpec
+from argus_cache.core.memory_manager import PagedDynamicKVCache
+from argus_cache.core.tier_registry import PipelineConfig
 
 
 class LayerRole(str, enum.Enum):

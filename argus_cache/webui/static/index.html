@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="tr" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ARGUS Studio — Yerel Yapay Zeka, AR-GE ve Etüt Çalışma Alanı</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='14' fill='%2310b981'/%3E%3C/svg%3E" />
+  <link rel="stylesheet" href="/static/styles.css?v=7" />
+  <link rel="stylesheet" href="/static/chat.css?v=7" />
+  <link rel="stylesheet" href="/static/study_research.css?v=7" />
+</head>
+<body>
+  <div id="drop-overlay" class="drop-overlay" hidden>
+    <div class="drop-card">
+      <div class="drop-badge">OTOMATİK MARKDOWN DÖNÜŞÜMÜ</div>
+      <h2>Dosyaları Bırakın</h2>
+      <p>PDF, Word (.docx/.doc/.odt), Sunum (.pptx), Tablo (.xlsx/.csv), HTML ve Kod dosyaları ham yığın yerine yapılandırılmış <code>.md</code> bölümlerine çevrilir.</p>
+    </div>
+  </div>
+
+  <div class="studio-shell">
+    <!-- Left Sidebar -->
+    <aside id="sidebar" class="sidebar" aria-label="Sohbetler ve Belgeler">
+      <div class="brand-bar">
+        <div class="brand-id">
+          <span id="status-dot" class="status-dot offline" title="Motor durumu"></span>
+          <div>
+            <div class="brand-title">ARGUS STUDIO</div>
+            <div id="model-subtitle" class="brand-sub">Bağlanıyor…</div>
+          </div>
+        </div>
+        <button id="btn-theme" class="icon-btn" type="button" title="Koyu / Kağıt Etüt Teması" aria-label="Tema değiştir">
+          ◐
+        </button>
+      </div>
+
+      <button id="btn-new-chat" class="primary-btn full-btn" type="button">
+        <span>＋ Yeni Çalışma / Sohbet</span>
+      </button>
+
+      <div class="mode-switcher" role="tablist" aria-label="Çalışma Modu">
+        <button class="mode-tab active" data-mode="assistant" type="button" role="tab">⚡ Asistan &amp; PC</button>
+        <button class="mode-tab" data-mode="research" type="button" role="tab">🔬 Araştırma</button>
+        <button class="mode-tab" data-mode="study" type="button" role="tab">🎓 Ders Çalışma</button>
+        <button class="mode-tab" data-mode="draft" type="button" role="tab">📐 Fikir Taslağı</button>
+      </div>
+
+      <div class="sidebar-search">
+        <input id="session-filter" type="search" placeholder="Sohbetlerde ara…" aria-label="Sohbetlerde ara" />
+      </div>
+
+      <div class="sidebar-section-label">GEÇMİŞ OTURUMLAR</div>
+      <nav id="session-list" class="session-list" aria-label="Oturum listesi"></nav>
+
+      <div class="sidebar-docs-wrap">
+        <div class="sidebar-section-label">OTURUM BELGELERİ (.MD)</div>
+        <div id="session-docs" class="session-docs">
+          <div class="empty-hint">Henüz PDF/Word eklenmedi.</div>
+        </div>
+      </div>
+    </aside>
+
+    <!-- Center Chat Stage -->
+    <main class="chat-stage">
+      <header class="stage-header">
+        <div class="stage-header-left">
+          <button id="btn-toggle-sidebar" class="icon-btn" type="button" title="Kenar çubuğunu aç/kapat" aria-label="Kenar çubuğu">
+            ☰
+          </button>
+          <div>
+            <h1 id="active-session-title" class="stage-title">Yeni Sohbet</h1>
+            <div class="stage-meta">
+              <span id="active-mode-badge" class="meta-pill">Asistan &amp; PC</span>
+              <span id="ctx-badge" class="meta-pill tabular">128K Bağlam</span>
+              <span id="speed-badge" class="meta-pill tabular" hidden>⚡ -- tok/s</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="stage-header-right">
+          <button id="btn-compact-now" class="ghost-btn" type="button" title="Mesajları silmeden eski bağlamı Sohbet Özeti + Yapılanlar olarak sıkıştır">
+            <span>🗜️ Bağlamı Sıkıştır</span>
+          </button>
+          <button id="btn-workspace" class="ghost-btn" type="button" title="Yerel dosya erişimi için çalışma klasörü belirle">
+            <span>📁</span>
+            <span id="workspace-label">Klasör Seçilmedi (İzin Sorulur)</span>
+          </button>
+          <button id="btn-toggle-canvas" class="ghost-btn" type="button" title="Sağdaki Stüdyo panelini (Not, Test, Flashcard, AR-GE Durumu) aç">
+            <span>🎛️ Stüdyo Paneli</span>
+          </button>
+        </div>
+      </header>
+
+      <div id="research-loop-bar" class="research-loop-bar" hidden></div>
+
+      <section id="messages-scroll" class="messages-scroll" aria-live="polite">
+        <div id="empty-state" class="empty-state">
+          <div class="empty-kicker">YEREL · ÜCRETSİZ · DOĞRULANMIŞ ZEKÂ</div>
+          <h2 id="empty-heading">Bugün ne üzerinde çalışıyoruz?</h2>
+          <p id="empty-desc">Hermes ile masaüstünü kontrol edebilir, 5 adımlı bilimsel AR-GE döngüsüyle doğrulanmış araştırma yapabilir veya interaktif sınav ve flashcard oluşturabilirsin.</p>
+          <div id="starter-grid" class="starter-grid"></div>
+        </div>
+
+        <div id="compaction-banner-wrap" class="compaction-banner-wrap" hidden></div>
+        <div id="messages-list" class="messages-list"></div>
+      </section>
+
+      <!-- Composer -->
+      <footer class="composer-wrap">
+        <div id="workspace-bar" class="workspace-bar" hidden>
+          <label for="workspace-input">Aktif Çalışma Klasörü (bu klasör içi okuma serbesttir, yazma/düzenleme ve terminal komutları onay ister):</label>
+          <div class="workspace-row">
+            <input id="workspace-input" type="text" placeholder="/home/zwannfrederick/Masaüstü/Dersler veya proje yolu…" />
+            <button id="btn-save-workspace" class="primary-btn" type="button">Uygula</button>
+            <button id="btn-clear-workspace" class="ghost-btn" type="button">Temizle</button>
+          </div>
+        </div>
+
+        <div class="composer-box">
+          <div id="pending-attachments" class="pending-attachments" hidden></div>
+
+          <textarea
+            id="chat-input"
+            rows="2"
+            placeholder="Mesaj yaz, PDF/Word bırak, bilimsel hipotez doğrulat, test/flashcard iste veya PC'de işlem yaptır… (Enter gönderir)"
+          ></textarea>
+
+          <div class="composer-toolbar">
+            <div class="composer-tools-left">
+              <input
+                id="file-input"
+                type="file"
+                multiple
+                accept=".pdf,.docx,.doc,.odt,.pptx,.xlsx,.csv,.tsv,.rtf,.html,.htm,.md,.txt,.py,.js,.ts,.cpp,.c,.h,.rs,.go,.java,.json,.yaml,.yml,.sh,.sql"
+                hidden
+              />
+              <button id="btn-attach" class="tool-pill" type="button" title="PDF, Word, Sunum, Tablo veya Kod ekle (.md'ye çevrilir)">
+                📎 Belge Ekle (.md)
+              </button>
+              <button id="btn-web-toggle" class="tool-pill active" type="button" aria-pressed="true" title="Otomatik (gerektiğinde paralel arar) / Her Zaman / Kapalı">
+                🌐 Web: Otomatik
+              </button>
+              <button id="btn-pc-toggle" class="tool-pill active" type="button" aria-pressed="true" title="Hermes Masaüstü &amp; PC Kontrolü: Arka Plan Sanal Ekran (Oto / Hep) · Ön Plan · Kapalı">
+                👻 PC: Arka Plan (Oto)
+              </button>
+              <button id="btn-autocompact-toggle" class="tool-pill active" type="button" aria-pressed="true" title="Uzun sohbetlerde geçmiş mesajları silmeden otomatik özetler ve arşiv aramasını açar">
+                🔄 Oto Sıkıştırma: Açık
+              </button>
+              <button id="btn-think-toggle" class="tool-pill" type="button" aria-pressed="false" title="Açıkken düşünmeye (thinking) hiçbir token sınırı koyulmaz (n_predict=-1, reasoning_budget=-1); kapalıyken düşünme anında atlanır">
+                🧠 Düşünme: Kapalı
+              </button>
+            </div>
+
+            <div class="composer-tools-right">
+              <button id="btn-stop" class="danger-btn" type="button" hidden>■ Durdur</button>
+              <button id="btn-send" class="primary-btn send-btn" type="button">Gönder ↑</button>
+            </div>
+          </div>
+        </div>
+      </footer>
+    </main>
+
+    <!-- Right Studio Multi-Pane Panel (Notes, Interactive Quiz, Flashcards, Research State) -->
+    <aside id="canvas-panel" class="canvas-panel" hidden aria-label="Stüdyo Paneli">
+      <div class="canvas-header">
+        <input id="canvas-title-input" class="canvas-title-input" type="text" value="Çalışma Stüdyosu" aria-label="Taslak başlığı" />
+        <div class="canvas-actions">
+          <div id="canvas-notes-actions" class="canvas-actions">
+            <button id="btn-canvas-view" class="tab-mini active" type="button">Önizleme</button>
+            <button id="btn-canvas-edit" class="tab-mini" type="button">Düzenle</button>
+            <button id="btn-canvas-copy" class="icon-btn" type="button" title="Markdown kopyala">⧉</button>
+            <button id="btn-canvas-download" class="ghost-btn mini-btn" type="button" title=".md dosyası olarak indir">⬇ .md</button>
+          </div>
+          <button id="btn-close-canvas" class="icon-btn" type="button" title="Paneli kapat">✕</button>
+        </div>
+      </div>
+
+      <div class="dock-tabs" role="tablist" aria-label="Stüdyo Sekmeleri">
+        <button class="dock-tab active" data-dock="notes" type="button" role="tab">📝 Not (.md)</button>
+        <button class="dock-tab" data-dock="quiz" type="button" role="tab">🧪 Test</button>
+        <button class="dock-tab" data-dock="flashcards" type="button" role="tab">🃏 Kartlar</button>
+        <button class="dock-tab" data-dock="research" type="button" role="tab">🔬 AR-GE</button>
+      </div>
+
+      <div id="canvas-preview" class="canvas-preview md-prose">
+        <p class="empty-hint">Henüz bir not veya belge seçilmedi. Ders özeti/fikir taslağı isteyebilir ya da sol menüden dönüştürülmüş bir <code>.md</code> belgeye tıklayabilirsin.</p>
+      </div>
+
+      <div id="canvas-editor-wrap" class="canvas-editor-wrap" hidden>
+        <textarea id="canvas-textarea" class="canvas-textarea" spellcheck="false" placeholder="# Başlık&#10;&#10;Markdown notlarınızı buraya yazın…"></textarea>
+        <div class="canvas-editor-bar">
+          <span id="canvas-stats" class="tabular">0 karakter</span>
+          <button id="btn-canvas-save" class="primary-btn" type="button">Taslağı Kaydet</button>
+        </div>
+      </div>
+
+      <div id="dock-quiz-pane" class="dock-pane" hidden></div>
+      <div id="dock-flashcards-pane" class="dock-pane" hidden></div>
+      <div id="dock-research-pane" class="dock-pane" hidden></div>
+    </aside>
+  </div>
+
+  <script src="/static/markdown.js?v=7"></script>
+  <script src="/static/studio_panels.js?v=7"></script>
+  <script src="/static/study_deck.js?v=7"></script>
+  <script src="/static/app.js?v=8"></script>
+</body>
+</html>

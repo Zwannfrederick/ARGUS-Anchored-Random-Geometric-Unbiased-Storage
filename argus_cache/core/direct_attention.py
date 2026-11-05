@@ -7,7 +7,7 @@ and contiguous quantized block pools without materializing a context-sized FP16 
 from __future__ import annotations
 
 import math
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Optional, Tuple
 import torch
 
 from argus_cache.core.page_table import CodecKind, PlacementLocation, StructureOfArraysPageTable

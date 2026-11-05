@@ -6,7 +6,7 @@ eliminating per-page malloc fragmentation and enabling direct batch PCIe streami
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Set, Tuple
+from typing import List, Set, Tuple
 import torch
 
 from argus_cache.core.page_table import CodecKind, PlacementLocation

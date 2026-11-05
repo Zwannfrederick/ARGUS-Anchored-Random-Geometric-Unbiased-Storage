@@ -1,0 +1,18 @@
+[Unit]
+Description=ARGUS Studio WebUI & Hermes Background Desktop Agent (:8090)
+After=network.target argus-llm.service
+Wants=argus-llm.service ydotoold.service
+Conflicts=neo-gateway.service
+
+[Service]
+Type=simple
+Environment="PYTHONUNBUFFERED=1"
+ExecStart=/bin/bash "/home/zwannfrederick/Masaüstü/Sektor/Coding/mamba fix/scripts/run_argus_studio.sh"
+StandardOutput=append:/home/zwannfrederick/.argus_runtime/gateway.log
+StandardError=append:/home/zwannfrederick/.argus_runtime/gateway.log
+Restart=always
+RestartSec=2
+TimeoutStopSec=10
+
+[Install]
+WantedBy=argus.target

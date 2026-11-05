@@ -5,7 +5,7 @@ Displays real-time:
 - Operational State & Health Probes (OFF, STARTING, READY, ERROR)
 - GPU VRAM Allocation, Utilization & Headroom
 - KV Cache Tier Occupancy (ACTIVE FP16 vs q8_0 vs q4_0)
-- Upstream llama-server / Ollama Backend Connectivity
+- Upstream llama-server connectivity
 - Live Gateway Event Stream Logs
 """
 
@@ -20,15 +20,17 @@ from pathlib import Path
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from rich.align import Align
 from rich.console import Console
 from rich.layout import Layout
 from rich.live import Live
+from rich.markup import escape
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
-from scripts.argus_service import LOG_FILE, get_detailed_status
+from scripts.argus_service import LOG_FILE, RUNTIME_DIR, get_detailed_status
+
+ENGINE_LOG_FILE = RUNTIME_DIR / "llama-server.log"
 
 
 def create_header(status: dict) -> Panel:
@@ -102,15 +104,7 @@ def get_live_cache_stats() -> dict:
         "argus_managed": False,
         "input_tokens": None,
         "output_tokens": None,
-        "residency": None,
     }
-
-
-def _fmt_gib(value) -> str:
-    """Bytes as GiB, or an explicit dash when the figure was never measured."""
-    if not isinstance(value, (int, float)):
-        return "[dim]—[/]"
-    return f"{value / (1024 ** 3):.2f} GiB"
 
 
 def _fmt_count(value) -> str:
@@ -131,7 +125,6 @@ def create_tier_table() -> Panel:
     zeroed -- a zeroed tier still asserts the tier exists.
     """
     stats = get_live_cache_stats()
-    residency = stats.get("residency") or {}
 
     table = Table(expand=True, show_header=True, header_style="bold magenta")
     table.add_column("Metric", style="cyan", width=22)
@@ -143,18 +136,6 @@ def create_tier_table() -> Panel:
     table.add_row("Input tokens", _fmt_count(stats.get("input_tokens")), "backend usage")
     table.add_row("Output tokens", _fmt_count(stats.get("output_tokens")), "backend usage")
 
-    if residency:
-        gpu_pct = residency.get("gpu_fraction", 0.0) * 100
-        table.add_row("Model size", _fmt_gib(residency.get("total_bytes")), "ollama /api/ps")
-        table.add_row(
-            "Resident on GPU",
-            f"{_fmt_gib(residency.get('vram_bytes'))} ({gpu_pct:.0f}%)",
-            "ollama /api/ps",
-        )
-        table.add_row("Resident on CPU", _fmt_gib(residency.get("cpu_bytes")), "ollama /api/ps")
-        table.add_row("Context length", _fmt_count(residency.get("context_length")), "ollama /api/ps")
-    else:
-        table.add_row("Residency", "[dim]model not loaded[/]", "ollama /api/ps")
 
     managed = stats.get("argus_managed", False)
     note = (
@@ -166,46 +147,63 @@ def create_tier_table() -> Panel:
     return Panel(table, title=title, border_style="magenta")
 
 
+def _tail_lines(path: Path, count: int = 40) -> list[str]:
+    if not path.exists():
+        return []
+    try:
+        raw = subprocess.run(["tail", "-n", str(count), str(path)], capture_output=True, text=True, timeout=1.0).stdout
+        return [ln for ln in raw.splitlines() if ln.strip()]
+    except Exception:
+        return []
+
+
+def _style_log_line(prefix: str, line: str) -> str:
+    safe = escape(line.strip())
+    low = line.lower()
+    if "❌" in line or "error" in low or "exception" in low or "traceback" in low:
+        return f"[bold red]{prefix}{safe}[/]"
+    if "📥" in line or "request:" in low or "argus p3" in low or "lcp similarity" in low:
+        return f"[bold cyan]{prefix}{safe}[/]"
+    if "print_timing" in low or "tokens per second" in low or "listening on" in low or "starting" in low or "ready" in low:
+        return f"[bold green]{prefix}{safe}[/]"
+    return f"[dim white]{prefix}{safe}[/]"
+
+
 def create_logs_panel() -> Panel:
-    if not LOG_FILE.exists():
-        log_text = "[dim]No gateway logs recorded yet.[/dim]"
-    else:
-        try:
-            raw = subprocess.run(["tail", "-n", "8", str(LOG_FILE)], capture_output=True, text=True).stdout
-            lines = raw.strip().split("\n") if raw.strip() else []
-            formatted_lines = []
-            for l in lines:
-                if "❌" in l or "error" in l.lower():
-                    formatted_lines.append(f"[bold red]{l}[/]")
-                elif "📥" in l or "Request:" in l:
-                    formatted_lines.append(f"[bold cyan]{l}[/]")
-                elif "Starting" in l or "READY" in l:
-                    formatted_lines.append(f"[bold green]{l}[/]")
-                else:
-                    formatted_lines.append(f"[dim white]{l}[/]")
-            log_text = "\n".join(formatted_lines) or "[dim]Waiting for traffic...[/dim]"
-        except Exception:
-            log_text = "[dim]Error reading log file[/dim]"
+    gw_lines = [_style_log_line("[GW] ", ln) for ln in _tail_lines(LOG_FILE, 8)]
+    eng_raw = [
+        ln for ln in _tail_lines(ENGINE_LOG_FILE, 60)
+        if not ln.startswith("create_tensor:") and not ln.startswith("llama_model_loader: - kv")
+    ][-12:]
+    eng_lines = [_style_log_line("[LLM] ", ln) for ln in eng_raw]
+
+    sections: list[str] = []
+    if gw_lines:
+        sections.append("[bold cyan]── Claude Gateway (gateway.log) ──[/]\n" + "\n".join(gw_lines))
+    if eng_lines:
+        sections.append("[bold green]── ARGUS Engine (llama-server.log) ──[/]\n" + "\n".join(eng_lines))
+
+    log_text = "\n\n".join(sections) if sections else "[dim]Henüz log kaydı yok (istek bekleniyor)...[/dim]"
 
     return Panel(
         Text.from_markup(log_text),
-        title="[bold]Recent Gateway Logs (Active Session)[/]",
-        border_style="bright_black",
+        title="[bold]Canlı Loglar (Gateway & ARGUS llama-server)  •  Çıkış: Ctrl+C[/]",
+        border_style="cyan",
     )
 
 
 def make_layout(status: dict) -> Layout:
     layout = Layout()
-    layout.split(
-        Layout(name="header", size=3),
-        Layout(name="main", size=10),
-        Layout(name="tiers", size=9),
-        Layout(name="logs", ratio=1),
+    top = Layout(name="top", size=11)
+    top.split_row(
+        Layout(create_system_table(status), name="main", ratio=1),
+        Layout(create_tier_table(), name="tiers", ratio=1),
     )
-    layout["header"].update(create_header(status))
-    layout["main"].update(create_system_table(status))
-    layout["tiers"].update(create_tier_table())
-    layout["logs"].update(create_logs_panel())
+    layout.split(
+        Layout(create_header(status), name="header", size=3),
+        top,
+        Layout(create_logs_panel(), name="logs", ratio=1),
+    )
     return layout
 
 
