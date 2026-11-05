@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "argus_cache"
-version = "0.8.0"
+version = "0.8.1"
 description = "Paged KV-cache memory manager for LLM runtimes: GPU/pinned/RAM/disk tiers for llama.cpp with exact CUDA attention, plus a quantized-tier research path for HuggingFace"
 readme = "README.md"
 authors = [

@@ -1,6 +1,14 @@
 # Changelog
 
-## Unreleased
+## v0.8.1 — OCR adjustment
+
+A patch release for ARGUS Studio's screen reading. It also removes the Claude Code
+integration added in v0.8.0; anything that imported `claude_gateway` should pin
+`argus-cache==0.8.0`.
+
+A lighter OCR model was measured and not adopted: RapidOCR (PP-OCRv5 Latin, ONNX)
+read 26/29 of the same hand-read lines in 6.2 s against 29/29 in 3.5 s for the tuned
+Tesseract, missing short words ("go", "Amcı").
 
 ### Removed
 - **The Claude Code integration.** ARGUS Studio no longer serves the Anthropic Messages

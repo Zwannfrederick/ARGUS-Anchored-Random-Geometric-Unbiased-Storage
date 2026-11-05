@@ -14,7 +14,7 @@ nasıl yazılacağını, prefill sırasında MoE uzman ağırlıklarının PCIe 
 aktarılacağını ve decode attention'ın GPU ile CPU katmanlarını aynı anda nasıl
 okuyacağını yönetir.
 
-**Durum: v0.8.0.** RTX 3050 Ti Laptop (4 GB VRAM, PCIe Gen3 x4, 4 çekirdekli Intel
+**Durum: v0.8.1.** RTX 3050 Ti Laptop (4 GB VRAM, PCIe Gen3 x4, 4 çekirdekli Intel
 i5-11300H) üzerinde ölçülen sonuçlar:
 - **Heterojen CPU/GPU Execution Scheduler ve Uyarlanabilir RAM/VRAM Bellek Yöneticisi (`ARGUS_AUTO=1`):**
   `Qwen3.6-35B-A3B` (`Q4_K_M`, 4 GB VRAM + 32 GB RAM) üzerinde heterojen zamanlayıcı (`ARGUS_HETERO_SCHED=1`, `ARGUS_HETERO_OVERLAP=1`), `CUDA0` compute buffer içindeki `150 MiB` ölü MoE rezervasyonunu kaldırır, P3 graf rezervasyonunu 2-katmanlı zarfla sınırlar (`u_batch=512`, `n_outputs_max=16`), 30 Gated DeltaNet katmanındaki `480–960` gereksiz graf yeniden inşasını ve `34.23–132.87 GiB` boşa `kq_mask` yazımını önler, host GGUF `mmap` alanında `1,521.9 MiB` ölü sayfayı geri kazanır ve asenkron PCIe batching (`-%48.9` split sync gecikmesi) ile GPU `ffn_shexp` ve CPU `RoutedExperts` hesaplamalarını paralel örtüştürür. **32K** bağlamda `CUDA0` compute buffer **%80.0–%85.0** küçülür (`879.3 MiB` / `658.1 MiB` → **`132.03 MiB`**, **`524.0 MiB` net VRAM tasarrufu**), prefill hızı **`431.93 tok/s`** (`73.49 s`, önceki referansa göre **`+49.1%`**) seviyesine çıkar, decode hızı kısıtlı RAM baskısında **2.01 katına** (`p50: 516.29 ms → 259.85 ms`) ve sıcak RAM'de **`14.50–21.93 tok/s`** (`45.60 ms/tok`) düzeyine ulaşır. **64K (`65,536`)** bağlamda ise 4 GB VRAM üzerinde tüm KV hücreleri (**%100**, `1,280.0 MiB`) `S1` GPU aynasına sığar (`376.87 tok/s` prefill, `5.29 tok/s` medyan decode, 8K/32K/64K'da `3/3` multi-needle doğruluğu) ([Heterojen mimari raporu](docs/measurements/v080-libargus-2026-10-27/hetero_architecture_report.md)).
@@ -96,7 +96,7 @@ koşudur; her davranışın arkasında, o davranış bozulursa kırılan bir tes
 | `Gemma-4-26B-A4B` ve `UI-Mate-9B` üzerinde 32K–128K uçtan uca koşular | **Ölçülmedi** (kernel geometrileri `K1`/`S1` içinde doğrulandı) | — |
 | HuggingFace araştırma yolunda INT4, INT2, 1-bit veya JL katmanlarında model kalitesi | **Ölçülmedi**; yalnızca FP8 katmanına ulaşıldı | [Kalite](#kalite-huggingface-yolu) |
 
-Geliştirme makinesindeki yerel doğrulama paketleri (Python 3.14): Python **369 geçti, 27 atlandı**
+Geliştirme makinesindeki yerel doğrulama paketleri (Python 3.14): Python **375 geçti, 27 atlandı**
 (import/depo hijyeni dahil); native `llama.cpp` K1 (`simd` + `scalar`) ve S1/C1
 CUDA bölünmüş attention testleri **tamamı geçti**.
 

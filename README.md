@@ -12,7 +12,7 @@ ARGUS is not an inference server. It is the systems layer underneath one (`llama
 streams expert weights across PCIe, and how decode attention reads across GPU and
 CPU tiers at the same time.
 
-**Status: v0.8.0.** Measured results on an RTX 3050 Ti Laptop (4 GB VRAM, PCIe Gen3 x4,
+**Status: v0.8.1.** Measured results on an RTX 3050 Ti Laptop (4 GB VRAM, PCIe Gen3 x4,
 4-core Intel i5-11300H):
 - **Heterogeneous CPU/GPU Execution Scheduler & Adaptive RAM/VRAM Memory Manager (`ARGUS_AUTO=1`):**
   On `Qwen3.6-35B-A3B` (`Q4_K_M`, 4 GB VRAM + 32 GB RAM), the heterogeneous scheduler (`ARGUS_HETERO_SCHED=1`, `ARGUS_HETERO_OVERLAP=1`) eliminates `150 MiB` of dead MoE compute-buffer reservations, bounds P3 graph reservation to a 2-layer envelope (`u_batch=512`, `n_outputs_max=16`), eliminates 480–960 redundant Gated DeltaNet graph rebuilds and `34.23–132.87 GiB` of unused `kq_mask` CPU writes, reclaims `1,521.9 MiB` of non-active GGUF host pages, and overlaps GPU `ffn_shexp` with CPU `RoutedExperts` via asynchronous batched PCIe transfers (`-48.9%` split sync latency). At **32K**, `CUDA0` compute buffer drops by **80.0%–85.0%** (`879.3 MiB` / `658.1 MiB` → **`132.03 MiB`**, saving **`524.0 MiB` VRAM**), prefill reaches **`431.93 tok/s`** (`73.49 s`, **`+49.1%`** over prior baseline), and decode doubles (`2.01x`, `p50` cut from `516.29 ms` to `259.85 ms`) under constrained RAM pressure while reaching **`14.50–21.93 tok/s`** (`45.60 ms/tok`) in warm RAM. At **64K (`65,536`)**, 100% of KV cells (`1,280.0 MiB`) fit in the `S1` GPU mirror on 4 GB VRAM (`376.87 tok/s` prefill, `5.29 tok/s` median decode, `3/3` multi-needle accuracy across 8K, 32K, and 64K) ([Hetero report](docs/measurements/v080-libargus-2026-10-27/hetero_architecture_report.md)).
@@ -90,7 +90,7 @@ not been measured says **Not measured**.
 | End-to-end 32K–128K runs on `Gemma-4-26B-A4B` and `UI-Mate-9B` | **Not measured** (kernel geometries verified in `K1`/`S1`) | — |
 | Quality under INT4, INT2, 1-bit or JL tiers on the HuggingFace research path | **Not measured**; only FP8 was reached | [Quality](#quality-huggingface-path) |
 
-Local verification suites on the development machine (Python 3.14): Python **369 passed, 27 skipped**
+Local verification suites on the development machine (Python 3.14): Python **375 passed, 27 skipped**
 (import/repo hygiene included); native `llama.cpp` K1 (`simd` + `scalar`) and S1/C1
 CUDA split-attention suites **all passed**.
 
