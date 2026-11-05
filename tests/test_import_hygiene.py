@@ -16,6 +16,8 @@ from pathlib import Path
 import subprocess
 import sys
 
+import pytest
+
 REPO = Path(__file__).resolve().parent.parent
 
 
@@ -104,6 +106,8 @@ def test_every_annotation_in_the_package_resolves():
     import inspect
     import typing
 
+    pytest.importorskip("torch", reason="the cache manager needs torch; CI runs without it")
+    pytest.importorskip("argus_cpp_backend", reason="needs the compiled CUDA extension")
     import argus_cache.core.memory_manager as mm
 
     for _, cls in inspect.getmembers(mm, inspect.isclass):
@@ -117,6 +121,7 @@ def test_cuda_event_sync_needs_no_undefined_names():
     """sync_pending_cuda_events used ``torch`` without importing it."""
     from types import SimpleNamespace
 
+    pytest.importorskip("torch", reason="telemetry syncs CUDA events through torch; CI runs without it")
     from argus_cache.core.telemetry import CacheTelemetry
 
     class _Event:
