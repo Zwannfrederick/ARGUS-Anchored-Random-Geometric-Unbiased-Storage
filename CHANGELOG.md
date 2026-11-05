@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Removed
+- **The Claude Code integration.** ARGUS Studio no longer serves the Anthropic Messages
+  API, and the stdlib gateway (`argus_cache.adapters.claude_gateway`, the
+  `ClaudeGatewayHandler` / `create_gateway_server` / `MessageFormatAdapter` exports, the
+  `argus-gateway` script and the `gateway` extra), the Claude session launcher
+  (`claude_session`, `argus_ctl.sh claude`, `scripts/claude_argus.sh`,
+  `--sync-claude`) and the OpenAI-to-Anthropic translator are gone. ARGUS serves its own
+  Studio UI and an OpenAI-compatible API; it no longer touches `~/.claude/settings.json`.
+- The telemetry UI's per-request panel, whose only data source was the gateway.
+
 ## v0.8.0 — Long context on a 4 GB card, and a local stack that stays out of the way
 
 v0.8 moves `libargus` from paging KV to managing it across GPU and CPU at once, and

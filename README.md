@@ -57,7 +57,7 @@ Türkçe belge: [README_TR.md](README_TR.md)
 - [What ARGUS is and is not](#what-argus-is-and-is-not)
 - [Architecture: The Five Levers of `libargus`](#architecture-the-five-levers-of-libargus)
 - [Using `libargus` with llama.cpp](#using-libargus-with-llamacpp) — build, autonomous mode, tiers, disk modes, every setting
-- [Local stack: ARGUS Studio, Claude Code and the services](#local-stack-argus-studio-claude-code-and-the-services)
+- [Local stack: ARGUS Studio and the services](#local-stack-argus-studio-and-the-services)
 - [v0.8 results: Long-context tiers, MoE prefill, C1 & E1](#v08-results-long-context-tiers-moe-prefill-c1--e1)
 - [v0.7 results: Direct-disk paged KV](#v07-results-direct-disk-paged-kv)
 - [Reading the stock comparison](#reading-the-stock-comparison)
@@ -90,7 +90,7 @@ not been measured says **Not measured**.
 | End-to-end 32K–128K runs on `Gemma-4-26B-A4B` and `UI-Mate-9B` | **Not measured** (kernel geometries verified in `K1`/`S1`) | — |
 | Quality under INT4, INT2, 1-bit or JL tiers on the HuggingFace research path | **Not measured**; only FP8 was reached | [Quality](#quality-huggingface-path) |
 
-Local verification suites on the development machine (Python 3.14): Python **424 passed, 27 skipped**
+Local verification suites on the development machine (Python 3.14): Python **368 passed, 27 skipped**
 (import/repo hygiene included); native `llama.cpp` K1 (`simd` + `scalar`) and S1/C1
 CUDA split-attention suites **all passed**.
 
@@ -204,21 +204,20 @@ llama-server -m model.gguf -c 65536 -ngl 99 -fa on -nkvo -ctk q8_0 -ctv q4_0
 
 ---
 
-## Local stack: ARGUS Studio, Claude Code and the services
+## Local stack: ARGUS Studio and the services
 
 The repository also ships the stack it is developed on: an ARGUS-built
-`llama-server` plus **ARGUS Studio**, a chat UI that is also the Anthropic Messages
-endpoint for Claude Code. There is no Ollama in the path.
+`llama-server` plus **ARGUS Studio**, a local chat UI with permissioned tools.
+There is no Ollama in the path.
 
 | Port | What | Notes |
 |---|---|---|
 | `8080` | ARGUS `llama-server`, OpenAI API only | llama.cpp's bundled web page is off (`"webui": false`); Studio replaces it |
-| `8090` | ARGUS Studio | chat UI, `/v1/messages` + `/v1/models` + `/v1/messages/count_tokens` for Claude Code |
+| `8090` | ARGUS Studio | chat UI, documents, web search, Hermes desktop tools |
 
 ```bash
 pip install --no-build-isolation "argus-cache[studio]"   # FastAPI/uvicorn for Studio
 argus-studio --upstream http://127.0.0.1:8080/v1         # UI on :8090
-ANTHROPIC_BASE_URL=http://127.0.0.1:8090 ANTHROPIC_API_KEY=argus-local claude
 ```
 
 `scripts/install_systemd_service.sh` installs two user services under

@@ -63,7 +63,7 @@ English documentation: [README.md](README.md)
 - [ARGUS nedir ve ne değildir](#argus-nedir-ve-ne-değildir)
 - [Mimari: `libargus`'un Beş Kaldıracı](#mimari-libargusun-beş-kaldıracı)
 - [`libargus`'u llama.cpp ile kullanmak](#libargusu-llamacpp-ile-kullanmak) — derleme, otonom mod, katmanlar ve tüm ayarlar
-- [Yerel kullanım: ARGUS Studio, Claude Code ve servisler](#yerel-kullanım-argus-studio-claude-code-ve-servisler)
+- [Yerel kullanım: ARGUS Studio ve servisler](#yerel-kullanım-argus-studio-ve-servisler)
 - [v0.8 sonuçları: Uzun bağlam katmanları, MoE prefill, C1 ve E1](#v08-sonuçları-uzun-bağlam-katmanları-moe-prefill-c1-ve-e1)
 - [v0.7 sonuçları: Doğrudan disk sayfalı KV](#v07-sonuçları-doğrudan-disk-sayfalı-kv)
 - [Stock karşılaştırmasını okumak](#stock-karşılaştırmasını-okumak)
@@ -96,7 +96,7 @@ koşudur; her davranışın arkasında, o davranış bozulursa kırılan bir tes
 | `Gemma-4-26B-A4B` ve `UI-Mate-9B` üzerinde 32K–128K uçtan uca koşular | **Ölçülmedi** (kernel geometrileri `K1`/`S1` içinde doğrulandı) | — |
 | HuggingFace araştırma yolunda INT4, INT2, 1-bit veya JL katmanlarında model kalitesi | **Ölçülmedi**; yalnızca FP8 katmanına ulaşıldı | [Kalite](#kalite-huggingface-yolu) |
 
-Geliştirme makinesindeki yerel doğrulama paketleri (Python 3.14): Python **424 geçti, 27 atlandı**
+Geliştirme makinesindeki yerel doğrulama paketleri (Python 3.14): Python **368 geçti, 27 atlandı**
 (import/depo hijyeni dahil); native `llama.cpp` K1 (`simd` + `scalar`) ve S1/C1
 CUDA bölünmüş attention testleri **tamamı geçti**.
 
@@ -215,21 +215,19 @@ llama-server -m model.gguf -c 65536 -ngl 99 -fa on -nkvo -ctk q8_0 -ctv q4_0
 
 ---
 
-## Yerel kullanım: ARGUS Studio, Claude Code ve servisler
+## Yerel kullanım: ARGUS Studio ve servisler
 
 Depo, geliştirildiği yerel ortamı da içerir: ARGUS ile derlenmiş `llama-server` ve
-hem sohbet arayüzü hem de Claude Code için Anthropic Messages uç noktası olan
-**ARGUS Studio**. Yolda Ollama yoktur.
+izinli araçlara sahip yerel sohbet arayüzü **ARGUS Studio**. Yolda Ollama yoktur.
 
 | Port | Ne | Not |
 |---|---|---|
 | `8080` | ARGUS `llama-server`, yalnızca OpenAI API | llama.cpp'nin kendi web sayfası kapalı (`"webui": false`); yerine Studio var |
-| `8090` | ARGUS Studio | sohbet arayüzü; Claude Code için `/v1/messages`, `/v1/models`, `/v1/messages/count_tokens` |
+| `8090` | ARGUS Studio | sohbet arayüzü, belgeler, web araması, Hermes masaüstü araçları |
 
 ```bash
 pip install --no-build-isolation "argus-cache[studio]"   # Studio için FastAPI/uvicorn
 argus-studio --upstream http://127.0.0.1:8080/v1         # arayüz :8090'da
-ANTHROPIC_BASE_URL=http://127.0.0.1:8090 ANTHROPIC_API_KEY=argus-local claude
 ```
 
 `scripts/install_systemd_service.sh`, `argus.target` altında iki kullanıcı servisi

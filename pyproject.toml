@@ -41,17 +41,14 @@ dependencies = [
 
 # matplotlib and pytest were runtime dependencies through 0.3.0, but nothing
 # under argus_cache/ imports either one; they only serve the benchmarks and the
-# test suite. httpx is genuinely imported, but only by the optional Anthropic
-# gateway adapter, so it stays out of the base install too.
+# test suite. httpx is imported only by ARGUS Studio, so it lives in that extra.
 [project.optional-dependencies]
-gateway = ["httpx"]
-# ARGUS Studio (:8090): chat UI plus the Anthropic Messages API for Claude Code.
+# ARGUS Studio (:8090): the local chat UI.
 studio = ["fastapi", "uvicorn", "httpx", "pydantic", "python-multipart"]
 dev = ["pytest", "matplotlib", "httpx", "fastapi", "uvicorn", "pydantic", "python-multipart", "ruff"]
 
 [project.scripts]
 argus-studio = "argus_cache.webui.server:main"
-argus-gateway = "argus_cache.adapters.claude_gateway:main"
 
 [tool.setuptools.package-data]
 "argus_cache.webui" = ["static/*"]

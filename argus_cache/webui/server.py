@@ -19,7 +19,6 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from argus_cache.webui import DEFAULT_STUDIO_PORT
-from argus_cache.webui.anthropic_routes import register_anthropic_routes
 from argus_cache.webui.agent_loop import StreamManager, run_agent_stream, strip_fake_tool_echo
 from argus_cache.webui.compaction import (
     REPLAYED_TOOL_OUTPUT_CHARS,
@@ -562,8 +561,6 @@ def create_studio_app(
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
-
-    register_anthropic_routes(app, upstream_url)
 
     app.mount("/screenshots", StaticFiles(directory=str(store.screenshots_dir)), name="screenshots")
     if STATIC_DIR.is_dir():

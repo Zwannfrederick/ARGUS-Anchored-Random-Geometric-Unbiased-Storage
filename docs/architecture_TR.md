@@ -48,7 +48,7 @@ kararının gerekçesi ve ölçümleri: [`plans/argus-v0.7.0.md`](../plans/argus
 │ Kernel'ler        csrc/quantization_kernels.cu, Triton           │
 └──────────────────────────────────────────────────────────────────┘
 Runtime adapter'ları (kenarda, KV sahipliği yok): Ollama, vLLM (kapalı
-başarısız olur), Anthropic-Messages ↔ OpenAI gateway.
+başarısız olur).
 ```
 
 ---
@@ -411,7 +411,6 @@ fırlatmaz.
 |---|---|---|
 | Ollama | `EXTERNAL` | Hayır. Sadece ayar aktarımı ve zamanlama; canlı sunucuya karşı doğrulandı (2026-08-14) |
 | vLLM | `IN_PROCESS` | Hayır, kapalı başarısız olur. Gerçek entegrasyon `KVConnectorBase_V1` ve/veya özel bir `AttentionBackend` ister ([notlar](vllm-verification.md)) |
-| Messages gateway | HTTP | Hayır. Yerel bir `llama-server` için Anthropic Messages ↔ OpenAI chat completions çevirisi |
 | SGLang | — | Uygulanmadı; bir `RuntimeAdapter` alt sınıfı ve bir registry satırı yeter |
 
 ---

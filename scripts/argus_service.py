@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""ARGUS AI Service & Claude Code Gateway Manager (Start / Stop / Status / Chat / Web / Claude).
+"""ARGUS AI service manager (Start / Stop / Status / Chat / Web).
 
 Supports 4 rigorous operational states:
-- OFF      (Processes stopped, Claude Code using standard providers)
+- OFF      (Processes stopped)
 - STARTING (Gateway / llama-server booting, health probes in flight)
 - READY    (Gateway online + Backend healthy + Model loaded + ARGUS data plane ready)
 - ERROR    (Process failure, upstream unreachable, or memory abort)
@@ -24,18 +24,6 @@ import httpx
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from argus_cache.adapters.claude_session import (  # noqa: E402
-    LOCAL_PROFILE_DIR,
-    _CLAUDE_FALLBACK_PATHS,
-    claude_launch_argv,
-    claude_session_environment,
-    claude_settings_env,  # noqa: F401 - re-exported for tests
-    cleanup_claude_settings,
-    model_label_for,
-    reconcile_claude_settings,
-    resolve_claude_binary,
-    sync_claude_settings,  # noqa: F401 - re-exported for tests
-)
 from argus_cache.adapters.llama_server import (  # noqa: E402
     ARGUS_LLAMA_SERVER,
     DEFAULT_LLAMA_SERVER_CTX,
@@ -230,11 +218,7 @@ _CONFIG_DEFAULTS = {
     # llama-server's bundled page duplicates Studio on :8090; off saves its RAM.
     "webui": False,
     "nice_level": 5,
-    "sync_claude": False,
 }
-
-_CONFIG_ALIASES = {"workspace": "cwd"}
-
 
 def apply_config(args, config_path: Path = None):
     """Fill unset arguments from the persisted config, then from defaults."""
@@ -257,9 +241,6 @@ def apply_config(args, config_path: Path = None):
     for key, fallback in _CONFIG_DEFAULTS.items():
         if getattr(args, key, None) is None:
             setattr(args, key, config.get(key, fallback))
-    for config_key, arg_name in _CONFIG_ALIASES.items():
-        if getattr(args, arg_name, None) is None and config_key in config:
-            setattr(args, arg_name, config[config_key])
     return args
 
 
@@ -507,7 +488,6 @@ def cmd_stop(args) -> None:
 
     PID_FILE.unlink(missing_ok=True)
     subprocess.run(["fuser", "-k", f"{args.port}/tcp"], capture_output=True)
-    cleanup_claude_settings()
     time.sleep(0.2)
     print("✅ ARGUS Gateway stopped (Offline). VRAM & RAM released.")
 
@@ -520,7 +500,6 @@ def cmd_restart(args) -> None:
 
 def cmd_status(args) -> None:
     info = get_detailed_status(args.port, args.upstream)
-    healed = reconcile_claude_settings(port=args.port, gateway_ok=info["gateway_ok"])
 
     if getattr(args, "json", False):
         print(json.dumps(info, indent=2))
@@ -546,53 +525,7 @@ def cmd_status(args) -> None:
 
     if info["error_message"]:
         print(f"  Notice:             ⚠️  {info['error_message']}")
-    if healed:
-        print("  Notice:             ℹ️  cleared a stale Claude Code redirect")
     print("=" * 60 + "\n")
-
-
-def cmd_claude(args) -> int:
-    info = get_detailed_status(args.port, args.upstream)
-    if not info["gateway_ok"]:
-        if getattr(args, "auto_start", False):
-            print("🔄 ARGUS kapalı, yerel model otomatik başlatılıyor...")
-            cmd_start(args)
-            info = get_detailed_status(args.port, args.upstream)
-        if not info["gateway_ok"]:
-            print(f"❌ No gateway on port {args.port}. Start it with `argus_ctl.sh start`.")
-            return 1
-
-    binary = resolve_claude_binary()
-    if binary is None:
-        print(
-            "❌ Claude Code CLI not found. Looked on PATH and in "
-            + ", ".join(f"~/{p}" for p in _CLAUDE_FALLBACK_PATHS)
-            + f".\n   Install it, or launch with: ANTHROPIC_BASE_URL=http://127.0.0.1:{args.port} claude"
-        )
-        return 1
-
-    args = apply_config(args)
-    workspace = getattr(args, "cwd", None)
-    if workspace and not Path(workspace).is_dir():
-        print(f"❌ workspace {workspace!r} is not a directory")
-        return 1
-
-    label = model_label_for(getattr(args, "llama_server_model", None))
-    env = claude_session_environment(
-        os.environ,
-        port=args.port,
-        model_label=label,
-        num_ctx=getattr(args, "num_ctx", None) or DEFAULT_LLAMA_SERVER_CTX,
-        config_dir=None if getattr(args, "with_plugins", False) else LOCAL_PROFILE_DIR,
-    )
-    argv = claude_launch_argv(model_label=label, extra=getattr(args, "claude_args", []), binary=binary)
-    profile = "your profile" if getattr(args, "with_plugins", False) else "lean profile"
-    print(f"🚀 Claude Code -> http://127.0.0.1:{args.port} ({label}, {profile}, this session only)")
-    try:
-        return subprocess.call(argv, env=env, cwd=workspace or None)
-    except FileNotFoundError:
-        print(f"❌ could not execute {binary}")
-        return 1
 
 
 def _ensure_backend_for_interactive(args) -> str:
@@ -704,7 +637,7 @@ def cmd_chat(args) -> int:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="ARGUS AI Service & Claude Code Gateway Controller")
+    parser = argparse.ArgumentParser(description="ARGUS AI service controller")
     parser.add_argument("--port", type=int, default=DEFAULT_GATEWAY_PORT, help="Gateway port (default: 8008)")
     parser.add_argument("--upstream", type=str, default=DEFAULT_UPSTREAM_URL, help="Upstream OpenAI API endpoint")
     parser.add_argument("--json", action="store_true", help="Output status in JSON format")
@@ -730,14 +663,7 @@ def main() -> None:
     start_parser.add_argument("--mmap-policy", type=str, choices=["random", "normal", "sequential"], default=None)
     start_parser.add_argument("--spec-draft-p-min", type=float, default=None)
     start_parser.add_argument("--no-webui", dest="webui", action="store_false", default=None)
-    start_parser.add_argument("--sync-claude", action="store_true", default=None)
 
-    claude_parser = subparsers.add_parser("claude", help="Launch one Claude Code session bound to the gateway")
-    claude_parser.add_argument("--llama-server-model", type=str, default=None)
-    claude_parser.add_argument("--with-plugins", action="store_true")
-    claude_parser.add_argument("--auto-start", action="store_true", help="Auto-start ARGUS if currently offline")
-    claude_parser.add_argument("--cwd", type=str, default=None)
-    claude_parser.add_argument("claude_args", nargs=argparse.REMAINDER)
 
     chat_parser = subparsers.add_parser("chat", help="Interactive terminal chat with the loaded ARGUS model")
     chat_parser.add_argument("--think", action="store_true", help="Enable Qwen3.6 reasoning (<think>) mode")
@@ -756,7 +682,6 @@ def main() -> None:
         "start": cmd_start,
         "stop": cmd_stop,
         "status": cmd_status,
-        "claude": cmd_claude,
         "chat": cmd_chat,
         "web": cmd_web,
         "restart": cmd_restart,

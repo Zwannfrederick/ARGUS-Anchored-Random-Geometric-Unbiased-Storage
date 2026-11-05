@@ -11,7 +11,6 @@ Displays real-time:
 
 from __future__ import annotations
 
-import json
 import os
 import subprocess
 import sys
@@ -88,65 +87,6 @@ def create_system_table(status: dict) -> Panel:
     return Panel(table, title="[bold]Runtime Metrics[/]", border_style="blue")
 
 
-CACHE_STATS_FILE = Path.home() / ".argus_runtime" / "cache_stats.json"
-
-
-def get_live_cache_stats() -> dict:
-    if CACHE_STATS_FILE.exists():
-        try:
-            return json.loads(CACHE_STATS_FILE.read_text())
-        except (OSError, json.JSONDecodeError):
-            pass
-    return {
-        "state": "READY",
-        "backend": None,
-        "model": None,
-        "argus_managed": False,
-        "input_tokens": None,
-        "output_tokens": None,
-    }
-
-
-def _fmt_count(value) -> str:
-    """A count, distinguishing a measured zero from an absent measurement."""
-    if not isinstance(value, int):
-        return "[dim]—[/]"
-    return f"{value:,}"
-
-
-def create_tier_table() -> Panel:
-    """Render what the backend actually reported.
-
-    This panel used to show a T0/T1/T2 page cascade and a "% Memory Saved"
-    figure. None of it was measured: the gateway proxies to an external
-    runtime that owns its KV cache in another process, so ARGUS places no
-    pages there and can observe none. Those rows were computed from the token
-    count and fixed byte constants, which is why they are gone rather than
-    zeroed -- a zeroed tier still asserts the tier exists.
-    """
-    stats = get_live_cache_stats()
-
-    table = Table(expand=True, show_header=True, header_style="bold magenta")
-    table.add_column("Metric", style="cyan", width=22)
-    table.add_column("Value", justify="right", style="green")
-    table.add_column("Source", style="dim")
-
-    table.add_row("Backend", stats.get("backend") or "[dim]—[/]", "gateway")
-    table.add_row("Model", stats.get("model") or "[dim]—[/]", "request")
-    table.add_row("Input tokens", _fmt_count(stats.get("input_tokens")), "backend usage")
-    table.add_row("Output tokens", _fmt_count(stats.get("output_tokens")), "backend usage")
-
-
-    managed = stats.get("argus_managed", False)
-    note = (
-        "[green]ARGUS-managed KV cache[/]"
-        if managed
-        else "[yellow]KV cache owned by the backend process — not ARGUS-managed[/]"
-    )
-    title = f"[bold]Backend Telemetry[/]  [dim]•[/]  {note}"
-    return Panel(table, title=title, border_style="magenta")
-
-
 def _tail_lines(path: Path, count: int = 40) -> list[str]:
     if not path.exists():
         return []
@@ -187,21 +127,16 @@ def create_logs_panel() -> Panel:
 
     return Panel(
         Text.from_markup(log_text),
-        title="[bold]Canlı Loglar (Gateway & ARGUS llama-server)  •  Çıkış: Ctrl+C[/]",
+        title="[bold]Canlı Loglar (Studio & ARGUS llama-server)  •  Çıkış: Ctrl+C[/]",
         border_style="cyan",
     )
 
 
 def make_layout(status: dict) -> Layout:
     layout = Layout()
-    top = Layout(name="top", size=11)
-    top.split_row(
-        Layout(create_system_table(status), name="main", ratio=1),
-        Layout(create_tier_table(), name="tiers", ratio=1),
-    )
     layout.split(
         Layout(create_header(status), name="header", size=3),
-        top,
+        Layout(create_system_table(status), name="main", size=11),
         Layout(create_logs_panel(), name="logs", ratio=1),
     )
     return layout

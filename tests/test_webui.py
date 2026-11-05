@@ -558,62 +558,6 @@ def test_thinking_toggle_sets_unrestricted_budget_when_enabled(tmp_path, monkeyp
 
 
 
-def test_studio_serves_anthropic_messages_for_claude_code(tmp_path):
-    """Claude Code points ANTHROPIC_BASE_URL at :8090; /v1/messages must answer there.
-
-    It returned 404 once Studio took the port over from the stdlib gateway, which
-    left `argus_ctl.sh claude` launching a session that could never get a reply.
-    """
-    import threading
-    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-
-    class FakeLlamaServer(BaseHTTPRequestHandler):
-        def do_POST(self):
-            body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
-            self.send_response(200)
-            if body.get("stream"):
-                self.send_header("Content-Type", "text/event-stream")
-                self.end_headers()
-                for chunk in ({"choices": [{"delta": {"content": "Selam"}}]},
-                              {"choices": [{"delta": {}, "finish_reason": "stop"}],
-                               "usage": {"prompt_tokens": 5, "completion_tokens": 1}}):
-                    self.wfile.write(f"data: {json.dumps(chunk)}\n\n".encode())
-                self.wfile.write(b"data: [DONE]\n\n")
-                return
-            self.send_header("Content-Type", "application/json")
-            self.end_headers()
-            self.wfile.write(json.dumps({
-                "choices": [{"message": {"content": "Selam"}, "finish_reason": "stop"}],
-                "usage": {"prompt_tokens": 5, "completion_tokens": 1},
-            }).encode())
-
-        def log_message(self, *args):
-            pass
-
-    upstream = ThreadingHTTPServer(("127.0.0.1", 0), FakeLlamaServer)
-    threading.Thread(target=upstream.serve_forever, daemon=True).start()
-    try:
-        app = create_studio_app(storage_dir=tmp_path, upstream_url=f"http://127.0.0.1:{upstream.server_address[1]}/v1")
-        client = TestClient(app)
-        req = {"model": "qwen", "max_tokens": 20, "messages": [{"role": "user", "content": "naber"}]}
-
-        plain = client.post("/v1/messages", json=req)
-        assert plain.status_code == 200
-        assert plain.json()["content"] == [{"type": "text", "text": "Selam"}]
-
-        streamed = client.post("/v1/messages", json={**req, "stream": True})
-        assert streamed.status_code == 200
-        events = [line[7:] for line in streamed.text.splitlines() if line.startswith("event: ")]
-        assert events[0] == "message_start" and events[-1] == "message_stop"
-        assert '"text": "Selam"' in streamed.text
-
-        assert client.post("/v1/messages", json={"model": "x"}).status_code == 400
-        assert client.post("/v1/messages/count_tokens", json=req).json()["input_tokens"] > 0
-    finally:
-        upstream.shutdown()
-        upstream.server_close()
-
-
 def test_shortcuts_come_from_the_live_hyprland_bind_list():
     """The tool copied commands out of hyprland.lua and drifted when it changed.
     It now reads the compositor's binds and presses the key combination itself."""

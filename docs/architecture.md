@@ -47,8 +47,7 @@ choice was made, with measurements: [`plans/argus-v0.7.0.md`](../plans/argus-v0.
 │ Native engine    csrc/manager.cpp, tier_codec, zero_copy_pool    │
 │ Kernels          csrc/quantization_kernels.cu, Triton            │
 └──────────────────────────────────────────────────────────────────┘
-Runtime adapters (edge, no KV ownership): Ollama, vLLM (fails closed),
-Anthropic-Messages ↔ OpenAI gateway.
+Runtime adapters (edge, no KV ownership): Ollama, vLLM (fails closed).
 ```
 
 ---
@@ -404,7 +403,6 @@ idempotent (`initialize → activate → deactivate → shutdown`), teardown nev
 |---|---|---|
 | Ollama | `EXTERNAL` | No. Configuration pass-through and timings only; verified against a live server (2026-08-14) |
 | vLLM | `IN_PROCESS` | No — fails closed. A real integration needs `KVConnectorBase_V1` and/or a custom `AttentionBackend` ([notes](vllm-verification.md)) |
-| Messages gateway | HTTP | No. Translates Anthropic Messages ↔ OpenAI chat completions for a local `llama-server` |
 | SGLang | — | Not implemented; a subclass of `RuntimeAdapter` plus one registry line |
 
 ---
