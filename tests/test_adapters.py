@@ -685,3 +685,11 @@ def test_gguf_inspection_and_mtp_sanitizer_and_moe_planner(tmp_path):
     assert sanitize_spec_type("draft-mtp,ngram-mod", str(with_mtp)) == "draft-mtp,ngram-mod"
 
 
+
+
+def test_vision_projector_is_passed_only_when_configured():
+    """Seeing screenshots needs the model's mmproj; without one the server stays text-only."""
+    plain = llama_server_command(model_path="/m.gguf", port=8080)
+    assert "--mmproj" not in plain
+    vision = llama_server_command(model_path="/m.gguf", port=8080, mmproj="/p.gguf")
+    assert vision[vision.index("--mmproj") + 1] == "/p.gguf"

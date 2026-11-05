@@ -227,6 +227,7 @@ def llama_server_command(
     threads_batch: Optional[int] = None,
     webui: bool = False,
     cache_ram: Optional[int] = None,
+    mmproj: Optional[str] = None,
 ) -> List[str]:
     """Argument vector for a llama-server tuned for a small-VRAM machine.
 
@@ -319,4 +320,6 @@ def llama_server_command(
         cmd.extend(["--load-mode", load_mode])
     if cache_ram is not None:
         cmd.extend(["--cache-ram", str(cache_ram)])
+    if mmproj:
+        cmd.extend(["--mmproj", mmproj])
     return cmd

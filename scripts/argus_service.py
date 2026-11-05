@@ -213,6 +213,8 @@ _CONFIG_DEFAULTS = {
     "threads": None,
     "threads_batch": None,
     "cache_ram": None,
+    # Vision projector (mmproj GGUF) for screenshots; None keeps the server text-only.
+    "mmproj": None,
     "p3_min_tokens": None,
     "mmap_policy": None,
     # llama-server's bundled page duplicates Studio on :8090; off saves its RAM.
@@ -313,6 +315,7 @@ def plan_llama_server_launch(args) -> Tuple[List[str], Dict[str, str], Optional[
         threads_batch=threads_batch,
         webui=webui,
         cache_ram=effective_cache_ram,
+        mmproj=getattr(args, "mmproj", None),
     )
 
     env = dict(os.environ)
