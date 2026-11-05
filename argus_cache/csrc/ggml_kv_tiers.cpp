@@ -2,13 +2,13 @@
 // refreshes, and the split decode graph (see ggml_kv_tiers.h).
 #include "ggml_kv_tiers.h"
 #include "ggml_decode_attention.h"
+#include "argus_config.h"
 #ifdef ARGUS_CUDA
 #include "ggml_split_attention.h"
 #include "ggml-cuda.h"
 #endif
 
 #include <algorithm>
-#include <charconv>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -49,18 +49,27 @@ bool detached = false;                            // under registry_lock: mirror
 std::weak_ptr<Allocation> arena;                  // under registry_lock: the device memory mirrors live in
 std::unordered_map<const ggml_tensor *, Entry> registry; // host tensor -> entry, under registry_lock
 
-size_t byte_setting(const char * name, size_t fallback) {
-    const char * text = std::getenv(name);
-    if (!text || !*text) { return fallback; }
-    size_t value = 0;
-    const auto parsed = std::from_chars(text, text + std::strlen(text), value);
-    if (parsed.ec != std::errc{} || *parsed.ptr) { throw std::invalid_argument(std::string(name) + " must be a byte count"); }
-    return value;
-}
-
-bool auto_budget() {
-    const char * text = std::getenv("ARGUS_KV_VRAM_BYTES");
-    return text && std::string(text) == "auto";
+// Copy `cells` rows from `host` (F16, Q8_0, or Q4_0) into `device` (always F16 on GPU).
+void sync_mirror_from_host(const ggml_tensor * host, ggml_tensor * device, int64_t cells) {
+    if (cells <= 0 || !host || !device) { return; }
+    if (host->type == GGML_TYPE_F16) {
+        ggml_backend_tensor_set(device, host->data, 0, static_cast<size_t>(cells) * host->nb[1]);
+        return;
+    }
+#ifdef ARGUS_CUDA
+    if (argus_cuda_sync_mirror_from_host(host, device, cells)) { return; }
+#endif
+    const int64_t ne0 = host->ne[0], total = cells * ne0;
+    std::vector<float> tmp_f32(total);
+    std::vector<ggml_fp16_t> tmp_f16(total);
+    const auto to_float = ggml_get_type_traits(host->type)->to_float;
+    if (!to_float) { throw std::runtime_error("ARGUS KV mirror: host type has no to_float conversion"); }
+    for (int64_t c = 0; c < cells; ++c) {
+        const char * src = static_cast<const char *>(host->data) + c * host->nb[1];
+        to_float(src, tmp_f32.data() + c * ne0, ne0);
+    }
+    ggml_fp32_to_fp16_row(tmp_f32.data(), tmp_f16.data(), total);
+    ggml_backend_tensor_set(device, tmp_f16.data(), 0, total * sizeof(ggml_fp16_t));
 }
 
 // Entries keep their mirror while the cache that registered them lives, so the copy is enough.
@@ -111,7 +120,7 @@ bool allocate(ggml_backend_dev_t dev, std::vector<std::pair<const ggml_tensor *,
     std::vector<size_t> offsets;
     size_t size = 0;
     for (const auto & [host, entry] : pending) {
-        ggml_tensor * mirror = ggml_new_tensor_2d(allocation->ctx, host->type, host->ne[0], std::min(cells, host->ne[1]) + 1);
+        ggml_tensor * mirror = ggml_new_tensor_2d(allocation->ctx, GGML_TYPE_F16, host->ne[0], std::min(cells, host->ne[1]) + 1);
         ggml_format_name(mirror, "argus_mirror_%s", host->name);
         mirrors.push_back(mirror);
         offsets.push_back(size);
@@ -131,14 +140,15 @@ bool allocate(ggml_backend_dev_t dev, std::vector<std::pair<const ggml_tensor *,
         entry.device = mirrors[i];
         entry.cells = mirrors[i]->ne[1] - 1;
         entry.allocation = allocation;
-        ggml_backend_tensor_set(entry.device, host->data, 0, static_cast<size_t>(entry.cells) * host->nb[1]);
+        sync_mirror_from_host(host, entry.device, entry.cells);
     }
     return true;
 }
 } // namespace
 
 bool argus_kv_tiers_requested() {
-    return auto_budget() || byte_setting("ARGUS_KV_VRAM_BYTES", 0) > 0;
+    const ArgusConfig cfg = argus_get_config();
+    return cfg.vram_auto || cfg.vram_bytes > 0;
 }
 
 std::shared_ptr<void> argus_kv_register(const ggml_tensor * host, ggml_backend_dev_t dev) {
@@ -147,13 +157,14 @@ std::shared_ptr<void> argus_kv_register(const ggml_tensor * host, ggml_backend_d
     }
     {
         std::lock_guard<std::mutex> guard(registry_lock);
-        if (!registry.emplace(host, Entry{dev}).second) { throw std::logic_error("ARGUS KV tensor registered twice"); }
+        if (!registry.emplace(host, Entry{dev, nullptr, 0, nullptr}).second) { throw std::logic_error("ARGUS KV tensor registered twice"); }
     }
     return std::make_shared<Registration>(host);
 }
 
 void argus_kv_allocate_mirrors(size_t shared_bytes) {
     std::lock_guard<std::mutex> guard(registry_lock);
+    const ArgusConfig cfg = argus_get_config();
     std::unordered_map<ggml_backend_dev_t, std::vector<std::pair<const ggml_tensor *, Entry *>>> pending;
     std::unordered_map<ggml_backend_dev_t, size_t> mirrored;
     for (auto & [host, entry] : registry) {
@@ -161,21 +172,21 @@ void argus_kv_allocate_mirrors(size_t shared_bytes) {
         else { pending[entry.dev].emplace_back(host, &entry); }
     }
     for (auto & [dev, entries] : pending) {
-        size_t budget = 0;
-        if (auto_budget()) {
-            size_t free = 0, total = 0;
-            ggml_backend_dev_memory(dev, &free, &total);
-            const size_t margin = byte_setting("ARGUS_KV_VRAM_MARGIN", size_t(256) << 20);
-            budget = free > margin ? free - margin : 0;
-        } else {
-            const size_t limit = byte_setting("ARGUS_KV_VRAM_BYTES", 0);
-            budget = limit > mirrored[dev] ? limit - mirrored[dev] : 0;
-        }
         size_t bytes_per_cell = 0;
         int64_t longest = 0;
         for (const auto & [host, entry] : entries) {
-            bytes_per_cell += host->nb[1];
+            bytes_per_cell += ggml_row_size(GGML_TYPE_F16, host->ne[0]);
             longest = std::max(longest, host->ne[1]);
+        }
+        const size_t full_kv_bytes = static_cast<size_t>(longest + 1) * bytes_per_cell;
+        size_t budget = 0;
+        if (cfg.vram_auto) {
+            size_t free = 0, total = 0;
+            ggml_backend_dev_memory(dev, &free, &total);
+            budget = argus_plan_vram_budget(free, shared_bytes, cfg, full_kv_bytes);
+        } else {
+            const size_t limit = cfg.vram_bytes;
+            budget = limit > mirrored[dev] ? limit - mirrored[dev] : 0;
         }
         // One scratch row per mirror is part of the cost of a cell range.
         const int64_t fit = static_cast<int64_t>(budget / bytes_per_cell) - 1;
@@ -189,7 +200,7 @@ void argus_kv_allocate_mirrors(size_t shared_bytes) {
         }
         std::fprintf(stderr, "ARGUS KV tiers: cells [0, %lld) of %lld mirrored in device memory (%.1f MiB, budget %.1f MiB%s)\n",
                      (long long) cells, (long long) longest, cells * double(bytes_per_cell) / 1048576.0,
-                     budget / 1048576.0, auto_budget() ? ", auto" : "");
+                     budget / 1048576.0, cfg.vram_auto ? ", auto" : "");
     }
 }
 
@@ -216,7 +227,7 @@ void argus_kv_mirrors_attach() {
     }
     // Whatever used the arena overwrote the mirrors: fill them from the host again.
     for (const auto & [host, device] : mirrors) {
-        ggml_backend_tensor_set(device, host->data, 0, static_cast<size_t>(device->ne[1] - 1) * host->nb[1]);
+        sync_mirror_from_host(host, device, device->ne[1] - 1);
     }
 }
 
@@ -228,20 +239,22 @@ ggml_backend_buffer_type_t argus_kv_host_buffer_type() {
 #endif
 }
 
-ggml_tensor * argus_kv_append(ggml_context * ctx, ggml_tensor * host, ggml_tensor * rows, ggml_tensor * indices) {
+ggml_tensor * argus_kv_append(ggml_context * ctx, ggml_tensor * host, ggml_tensor * rows, ggml_tensor * indices,
+                              int64_t n_kv, int64_t min_idx) {
     Mirror mirror;
     if (!find(host, mirror)) { return nullptr; }
 #ifdef ARGUS_CUDA
-    // Decode batches only. Their attention is always built here: the mirror is read later on
-    // the same stream, the host cells by K1 after GGML synchronizes the GPU for its inputs.
-    // A prefill batch's attention may run on the GPU from a copy of the host view that GGML
-    // takes when the split starts, before an append queued in the same split has run.
+    const bool decode_batch = rows->ne[1] <= argus_k1_max_tokens();
+    const bool mirror_prefill = argus_get_config().prefill_on_gpu && n_kv > 0 && n_kv <= mirror.cells;
     if (host->buffer && ggml_backend_buffer_get_type(host->buffer) == ggml_backend_cuda_host_buffer_type() &&
-        rows->ne[1] <= argus_k1_max_tokens()) {
+        (decode_batch || mirror_prefill)) {
         if (ggml_tensor * appended = argus_ggml_cuda_tier_append(ctx, mirror.device, rows, indices, host)) { return appended; }
     }
+#else
+    (void) n_kv;
 #endif
     ggml_tensor * stored = ggml_set_rows(ctx, host, rows, indices);
+    if (min_idx >= mirror.cells) { return stored; }
     if (indices->type != GGML_TYPE_I64 && indices->type != GGML_TYPE_I32) {
         throw std::runtime_error("ARGUS KV mirror: unsupported row index type");
     }
@@ -252,10 +265,32 @@ ggml_tensor * argus_kv_append(ggml_context * ctx, ggml_tensor * host, ggml_tenso
     return ggml_set_rows(ctx, mirror.device, rows, clamped);
 }
 
+bool argus_kv_prefill_mirror_views(ggml_context * ctx, const ggml_tensor * q, ggml_tensor * & k, ggml_tensor * & v,
+                                   bool unsupported_features) {
+#ifdef ARGUS_CUDA
+    Mirror keys, values;
+    if (unsupported_features || !argus_get_config().prefill_on_gpu || q->ne[2] <= argus_k1_max_tokens() ||
+        !k || !v || !k->view_src || !v->view_src || k->view_offs != 0 || v->view_offs != 0 ||
+        k->ne[3] != 1 || v->ne[3] != 1 || !find(k->view_src, keys) || !find(v->view_src, values) ||
+        k->ne[2] > keys.cells || v->ne[2] > values.cells) {
+        return false;
+    }
+    const size_t k_nb1 = static_cast<size_t>(k->ne[0]) * sizeof(ggml_fp16_t), k_nb2 = keys.device->nb[1];
+    const size_t v_nb1 = static_cast<size_t>(v->ne[0]) * sizeof(ggml_fp16_t), v_nb2 = values.device->nb[1];
+    k = ggml_view_4d(ctx, keys.device, k->ne[0], k->ne[1], k->ne[2], 1, k_nb1, k_nb2, k_nb2 * k->ne[2], 0);
+    v = ggml_view_4d(ctx, values.device, v->ne[0], v->ne[1], v->ne[2], 1, v_nb1, v_nb2, v_nb2 * v->ne[2], 0);
+    return true;
+#else
+    (void) ctx; (void) q; (void) k; (void) v; (void) unsupported_features;
+    return false;
+#endif
+}
+
 void argus_kv_mirror_refresh(const ggml_tensor * host) {
+    const ggml_tensor * base = (host && host->view_src) ? host->view_src : host;
     Mirror mirror;
-    if (!find(host, mirror)) { return; }
-    ggml_backend_tensor_set(mirror.device, host->data, 0, static_cast<size_t>(mirror.cells) * host->nb[1]);
+    if (!find(base, mirror)) { return; }
+    sync_mirror_from_host(base, mirror.device, mirror.cells);
 }
 
 #ifdef ARGUS_CUDA
@@ -287,9 +322,11 @@ ggml_tensor * argus_kv_tiered_attention(ggml_context * ctx, ggml_backend_sched_t
         return nullptr;
     }
     const int64_t n_kv = k->ne[2], cells = std::min({keys.cells, values.cells, n_kv});
-    // The mirror has the host rows' layout, so the host view's strides apply from its first row.
-    ggml_tensor * k_gpu = ggml_view_3d(ctx, keys.device, k->ne[0], k->ne[1], cells, k->nb[1], k->nb[2], 0);
-    ggml_tensor * v_gpu = ggml_view_3d(ctx, values.device, v->ne[0], v->ne[1], cells, v->nb[1], v->nb[2], 0);
+    // The mirror is always F16 on the GPU even when host KV is quantized (Q8_0 / Q4_0).
+    const size_t k_f16_nb1 = static_cast<size_t>(k->ne[0]) * sizeof(ggml_fp16_t), k_f16_nb2 = keys.device->nb[1];
+    const size_t v_f16_nb1 = static_cast<size_t>(v->ne[0]) * sizeof(ggml_fp16_t), v_f16_nb2 = values.device->nb[1];
+    ggml_tensor * k_gpu = ggml_view_3d(ctx, keys.device, k->ne[0], k->ne[1], cells, k_f16_nb1, k_f16_nb2, 0);
+    ggml_tensor * v_gpu = ggml_view_3d(ctx, values.device, v->ne[0], v->ne[1], cells, v_f16_nb1, v_f16_nb2, 0);
     ggml_tensor * gpu_part = cells == n_kv ? argus_ggml_cuda_decode_attention(ctx, q, k_gpu, v_gpu, mask, scale)
                                            : argus_ggml_cuda_decode_partials(ctx, q, k_gpu, v_gpu, mask, 0, scale);
     if (!gpu_part) {
@@ -330,9 +367,7 @@ ggml_tensor * argus_kv_tiered_attention(ggml_context * ctx, ggml_backend_sched_t
 bool argus_kv_managed() { return argus_k1_enabled() || argus_kv_tiers_requested(); }
 
 bool argus_kv_prefill_on_gpu(const ggml_tensor * k, int64_t n_tokens) {
-    const char * text = std::getenv("ARGUS_KV_PREFILL");
-    if (!text || !*text || std::string(text) == "cpu") { return false; }
-    if (std::string(text) != "gpu") { throw std::runtime_error("ARGUS_KV_PREFILL must be cpu or gpu"); }
+    if (!argus_get_config().prefill_on_gpu) { return false; }
     const ggml_tensor * storage = k->view_src ? k->view_src : k;
     return n_tokens > argus_k1_max_tokens() && storage->buffer && ggml_backend_buffer_is_host(storage->buffer);
 }

@@ -1,0 +1,28 @@
+{
+  "captured_at": "2026-11-04T19:43:00+03:00",
+  "note": "Baseline snapshot of live :8080 server before ARGUS_P3_MIN_TOKENS & Prefix Cache rollout",
+  "runtime_config": {
+    "llama_server_model": "/home/zwannfrederick/Masaüstü/Sektor/Coding/mamba fix/scratch/models/Qwen3.6-35B-A3B-uncensored-heretic.i1-Q4_K_S.gguf",
+    "llama_server_port": 8080,
+    "studio_port": 8090,
+    "num_ctx": 131072,
+    "kv_cache_type": "q4_0",
+    "spec_type": "ngram-mod",
+    "spec_draft_n_max": 4,
+    "flash_attn": "on",
+    "load_mode": "mmap",
+    "cache_ram": 512,
+    "webui": true,
+    "nice_level": 5,
+    "sync_claude": false
+  },
+  "baseline_log_measurements": {
+    "p3_gate_before": "n_tokens_all > cparams.n_ubatch (strictly > 512)",
+    "task_2552_58026_tok_p3_gpu": {"tokens": 58026, "time_s": 124.70, "prefill_tps": 465.33, "peak_tps": 532.57},
+    "task_0_361_tok_warm_cpu": {"tokens": 361, "time_s": 8.01, "prefill_tps": 45.06},
+    "task_6610_680_tok_split_164_512_4": {"tokens": 680, "time_s": 75.42, "prefill_tps": 9.02},
+    "task_2700_78_tok_cold_mmap": {"tokens": 78, "time_s": 39.78, "prefill_tps": 1.96},
+    "task_6577_1434_tok_tail_512_miss": {"tokens": 1434, "time_s": 181.76, "prefill_tps": 7.89}
+  }
+}
+

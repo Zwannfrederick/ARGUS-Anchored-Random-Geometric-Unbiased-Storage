@@ -25,6 +25,7 @@ ggml_tensor * argus_cuda_external_op(ggml_context * ctx, int64_t ne0, int64_t ne
 ggml_tensor * argus_cuda_external_inplace(ggml_context * ctx, ggml_tensor * a, ggml_tensor ** args, int n_args,
                                           ArgusCudaKind kind, float scale, int64_t extra = 0);
 int32_t argus_cuda_external_kind(const ggml_tensor * tensor); // -1 for any other node
+bool argus_cuda_is_capturable(const ggml_tensor * tensor);    // true for pure-kernel v0.8 kinds (2..4)
 float argus_cuda_external_scale(const ggml_tensor * tensor);
 int64_t argus_cuda_external_extra(const ggml_tensor * tensor);
 

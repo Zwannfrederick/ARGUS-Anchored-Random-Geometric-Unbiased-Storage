@@ -16,10 +16,36 @@ struct ArgusK1Problem {
     const char * v;    size_t v_head_stride, v_cell_stride;
     const char * mask; ggml_type mask_type; size_t mask_token_stride; // mask[token][cell], F16 or F32; nullptr: none
     float scale;
+    float skip_eps = 0.0f;           // E1 bounded-mass page/cell skipping threshold (0 = exact mode)
+    bool multipole = true;           // Multipole V-centroid compensation + monopole/dipole K-box check
+    bool top_r = true;               // Top-r channel + Cauchy-Schwarz tail bound for Stage-1a K-boxes
+    const float * prior = nullptr;   // Optional GPU mirror partial [dv + 2, n_head_kv * rows] to seed watermarks
+    int64_t mask_cell0 = 0;          // Global starting cell offset of k/v view when split across GPU + CPU tiers
+    int32_t layer_il = 0;            // Layer index parsed from KV tensor name
 
     int64_t group() const { return n_head / n_head_kv; }
     int64_t rows() const { return n_tokens * group(); } // rows served by one KV head
 };
+
+constexpr int ARGUS_MAX_TRACKED_LAYERS = 128;
+
+struct ArgusK1Stats {
+    uint64_t total_blocks = 0;
+    uint64_t skipped_k_blocks = 0;
+    uint64_t skipped_v_blocks = 0;
+    uint64_t total_v_cells = 0;
+    uint64_t skipped_v_cells = 0;
+    uint64_t kernel_ns = 0;
+};
+
+ArgusK1Stats argus_k1_stats();
+ArgusK1Stats argus_k1_layer_stats(int il);
+void argus_k1_record_layer_stats(int il, uint64_t total_blocks, uint64_t skipped_k_blocks,
+                                 uint64_t skipped_v_blocks, uint64_t total_v_cells, uint64_t skipped_v_cells);
+void argus_register_external_stats(ArgusK1Stats (*get_layer_fn)(int il), void (*reset_fn)());
+int argus_parse_layer_il(const ggml_tensor * k);
+void argus_k1_reset_stats();
+void argus_k1_print_summary();
 
 // Cells are split into fixed chunks that depend only on n_kv, so the result is the same
 // bit for bit whatever the thread count. A task is one (KV head, chunk).

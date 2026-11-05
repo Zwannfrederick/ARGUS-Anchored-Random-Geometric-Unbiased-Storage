@@ -82,3 +82,7 @@ int64_t argus_cuda_external_extra(const ggml_tensor * tensor) {
 
 bool argus_ggml_is_cuda_attention(const ggml_tensor * tensor) { return argus_cuda_external_kind(tensor) == argus_kind_attention; }
 bool argus_ggml_is_cuda_set_rows(const ggml_tensor * tensor) { return argus_cuda_external_kind(tensor) == argus_kind_set_rows; }
+bool argus_cuda_is_capturable(const ggml_tensor * tensor) {
+    const int32_t kind = argus_cuda_external_kind(tensor);
+    return kind == argus_kind_decode_partials || kind == argus_kind_partials_reduce || kind == argus_kind_tier_append;
+}

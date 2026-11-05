@@ -69,7 +69,7 @@ def test_split_attention_gpu_and_k1_parts_match_reference(tmp_path):
                       ["-lllama", "-lggml-base", "-lggml-cpu", "-lggml-cuda", "-lggml"])
     result = subprocess.run([binary], capture_output=True, text=True, timeout=600)
     assert result.returncode == 0, result.stderr[-2000:]
-    assert result.stdout.count("error=") == 7 and result.stdout.endswith("ok\n")
+    assert result.stdout.count("error=") == 8 and result.stdout.endswith("ok\n")
 
 
 def test_paged_workers_release_coordination_between_invocations(tmp_path):

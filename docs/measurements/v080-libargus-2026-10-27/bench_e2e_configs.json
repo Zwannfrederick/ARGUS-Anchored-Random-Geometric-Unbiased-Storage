@@ -1,0 +1,33 @@
+{
+  "server_args": ["-ngl", "99", "-fa", "on", "-np", "1", "-b", "2048", "-ub", "2048", "--cache-ram", "0", "-t", "4"],
+  "configs": {
+    "stock-nkvo-f16": {
+      "args": ["-nkvo", "-ctk", "f16", "-ctv", "f16"],
+      "env": {}
+    },
+    "argus-auto-f16": {
+      "args": ["-nkvo", "-ctk", "f16", "-ctv", "f16"],
+      "env": {"ARGUS_AUTO": "1", "ARGUS_KV_VRAM_BYTES": "16777216"}
+    },
+    "argus-auto-c1-q8_0": {
+      "args": ["-nkvo", "-ctk", "q8_0", "-ctv", "q8_0"],
+      "env": {"ARGUS_AUTO": "1", "ARGUS_KV_VRAM_BYTES": "16777216"}
+    },
+    "argus-auto-c1-q4_0": {
+      "args": ["-nkvo", "-ctk", "q4_0", "-ctv", "q4_0"],
+      "env": {"ARGUS_AUTO": "1", "ARGUS_KV_VRAM_BYTES": "16777216"}
+    },
+    "argus-auto-c1-q8_0-e1-skip": {
+      "args": ["-nkvo", "-ctk", "q8_0", "-ctv", "q8_0"],
+      "env": {"ARGUS_AUTO": "1", "ARGUS_KV_VRAM_BYTES": "16777216", "ARGUS_KV_SKIP_EPS": "1e-4"}
+    },
+    "argus-auto-c1-k_q8-v_q4-skip": {
+      "args": ["-nkvo", "-ctk", "q8_0", "-ctv", "q4_0"],
+      "env": {"ARGUS_AUTO": "1", "ARGUS_KV_VRAM_BYTES": "16777216", "ARGUS_KV_SKIP_EPS": "1e-4"}
+    },
+    "argus-auto-full-mirror-k_q8-v_q4": {
+      "args": ["-nkvo", "-ctk", "q8_0", "-ctv", "q4_0"],
+      "env": {"ARGUS_AUTO": "1", "ARGUS_KV_SKIP_EPS": "1e-4"}
+    }
+  }
+}

@@ -1,0 +1,31 @@
+[
+  {
+    "label": "live_baseline",
+    "results": [
+      {
+        "target_tokens": 78,
+        "actual_tokens": 78,
+        "ttft_ms": 13809.8,
+        "prompt_eval_ms": 13804.7,
+        "prefill_tps": 5.65,
+        "majflt": 908,
+        "pswpin": 130,
+        "rss_mib": 15906.6,
+        "pss_mib": 15902.0,
+        "p3_batches": 0
+      },
+      {
+        "target_tokens": 680,
+        "actual_tokens": 682,
+        "ttft_ms": 35516.0,
+        "prompt_eval_ms": 35425.1,
+        "prefill_tps": 19.25,
+        "majflt": 1854,
+        "pswpin": 765,
+        "rss_mib": 15844.6,
+        "pss_mib": 15839.9,
+        "p3_batches": 3
+      }
+    ]
+  }
+]

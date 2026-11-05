@@ -65,11 +65,37 @@ struct Simd {
         const BlockQ4_0 & b = row[i / 32];
         __m128i bytes = _mm_loadu_si128(reinterpret_cast<const __m128i *>(b.qs));
         if (i % 32) { bytes = _mm_srli_epi16(bytes, 4); }
-        const __m512i q = _mm512_cvtepu8_epi32(_mm_and_si128(bytes, _mm_set1_epi8(0x0F)));
-        return _mm512_mul_ps(_mm512_sub_ps(_mm512_cvtepi32_ps(q), _mm512_set1_ps(8.0f)), _mm512_set1_ps(half_to_float(b.d)));
+        const __m128i s8 = _mm_sub_epi8(_mm_and_si128(bytes, _mm_set1_epi8(0x0F)), _mm_set1_epi8(8));
+        return _mm512_mul_ps(_mm512_cvtepi32_ps(_mm512_cvtepi8_epi32(s8)), _mm512_set1_ps(half_to_float(b.d)));
+    }
+    template <typename T>
+    static void load32(const T * row, int64_t i, V * out) {
+        out[0] = load(row, i);
+        out[1] = load(row, i + 16);
+    }
+    static void load32(const BlockQ8_0 * row, int64_t i, V * out) {
+        const BlockQ8_0 & b = row[i / 32];
+        const V vd = _mm512_set1_ps(half_to_float(b.d));
+        out[0] = _mm512_mul_ps(_mm512_cvtepi32_ps(_mm512_cvtepi8_epi32(_mm_loadu_si128(reinterpret_cast<const __m128i *>(b.qs)))), vd);
+        out[1] = _mm512_mul_ps(_mm512_cvtepi32_ps(_mm512_cvtepi8_epi32(_mm_loadu_si128(reinterpret_cast<const __m128i *>(b.qs + 16)))), vd);
+    }
+    static void load32(const BlockQ4_0 * row, int64_t i, V * out) {
+        const BlockQ4_0 & b = row[i / 32];
+        const V vd = _mm512_set1_ps(half_to_float(b.d));
+        const __m128i raw = _mm_loadu_si128(reinterpret_cast<const __m128i *>(b.qs));
+        const __m128i mask = _mm_set1_epi8(0x0F), off8 = _mm_set1_epi8(8);
+        const __m128i lo = _mm_sub_epi8(_mm_and_si128(raw, mask), off8);
+        const __m128i hi = _mm_sub_epi8(_mm_and_si128(_mm_srli_epi16(raw, 4), mask), off8);
+        out[0] = _mm512_mul_ps(_mm512_cvtepi32_ps(_mm512_cvtepi8_epi32(lo)), vd);
+        out[1] = _mm512_mul_ps(_mm512_cvtepi32_ps(_mm512_cvtepi8_epi32(hi)), vd);
     }
     static void store(float * p, V x) { _mm512_storeu_ps(p, x); }
     static V set1(float x) { return _mm512_set1_ps(x); }
+    static V mul(V a, V b) { return _mm512_mul_ps(a, b); }
+    static V add(V a, V b) { return _mm512_add_ps(a, b); }
+    static V sub(V a, V b) { return _mm512_sub_ps(a, b); }
+    static V abs(V x) { return _mm512_abs_ps(x); }
+    static V min(V a, V b) { return _mm512_min_ps(a, b); }
     static V fma(V a, V b, V c) { return _mm512_fmadd_ps(a, b, c); }
     static __m256 half(V x) { return _mm256_add_ps(_mm512_castps512_ps256(x), _mm512_extractf32x8_ps(x, 1)); }
     // ggml_v_expf (ARM optimized routine): max error 1.45358 + 0.5 ulp; exp(-inf) = 0.
@@ -113,11 +139,45 @@ struct Simd {
         const int j = i % 32;
         __m128i bytes = _mm_loadl_epi64(reinterpret_cast<const __m128i *>(b.qs + j % 16));
         if (j >= 16) { bytes = _mm_srli_epi16(bytes, 4); }
-        const __m256i q = _mm256_cvtepu8_epi32(_mm_and_si128(bytes, _mm_set1_epi8(0x0F)));
-        return _mm256_mul_ps(_mm256_sub_ps(_mm256_cvtepi32_ps(q), _mm256_set1_ps(8.0f)), _mm256_set1_ps(half_to_float(b.d)));
+        const __m128i s8 = _mm_sub_epi8(_mm_and_si128(bytes, _mm_set1_epi8(0x0F)), _mm_set1_epi8(8));
+        return _mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(s8)), _mm256_set1_ps(half_to_float(b.d)));
+    }
+    template <typename T>
+    static void load32(const T * row, int64_t i, V * out) {
+        out[0] = load(row, i);
+        out[1] = load(row, i + 8);
+        out[2] = load(row, i + 16);
+        out[3] = load(row, i + 24);
+    }
+    static void load32(const BlockQ8_0 * row, int64_t i, V * out) {
+        const BlockQ8_0 & b = row[i / 32];
+        const V vd = _mm256_set1_ps(half_to_float(b.d));
+        const __m128i q01 = _mm_loadu_si128(reinterpret_cast<const __m128i *>(b.qs));
+        const __m128i q23 = _mm_loadu_si128(reinterpret_cast<const __m128i *>(b.qs + 16));
+        out[0] = _mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(q01)), vd);
+        out[1] = _mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(_mm_srli_si128(q01, 8))), vd);
+        out[2] = _mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(q23)), vd);
+        out[3] = _mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(_mm_srli_si128(q23, 8))), vd);
+    }
+    static void load32(const BlockQ4_0 * row, int64_t i, V * out) {
+        const BlockQ4_0 & b = row[i / 32];
+        const V vd = _mm256_set1_ps(half_to_float(b.d));
+        const __m128i raw = _mm_loadu_si128(reinterpret_cast<const __m128i *>(b.qs));
+        const __m128i mask = _mm_set1_epi8(0x0F), off8 = _mm_set1_epi8(8);
+        const __m128i lo = _mm_sub_epi8(_mm_and_si128(raw, mask), off8);
+        const __m128i hi = _mm_sub_epi8(_mm_and_si128(_mm_srli_epi16(raw, 4), mask), off8);
+        out[0] = _mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(lo)), vd);
+        out[1] = _mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(_mm_srli_si128(lo, 8))), vd);
+        out[2] = _mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(hi)), vd);
+        out[3] = _mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(_mm_srli_si128(hi, 8))), vd);
     }
     static void store(float * p, V x) { _mm256_storeu_ps(p, x); }
     static V set1(float x) { return _mm256_set1_ps(x); }
+    static V mul(V a, V b) { return _mm256_mul_ps(a, b); }
+    static V add(V a, V b) { return _mm256_add_ps(a, b); }
+    static V sub(V a, V b) { return _mm256_sub_ps(a, b); }
+    static V abs(V x) { return _mm256_andnot_ps(_mm256_set1_ps(-0.0f), x); }
+    static V min(V a, V b) { return _mm256_min_ps(a, b); }
     static V fma(V a, V b, V c) { return _mm256_fmadd_ps(a, b, c); }
     static __m256 half(V x) { return x; }
     // ggml_v_expf (ARM optimized routine): max error 1.45358 + 0.5 ulp; exp(-inf) = 0.

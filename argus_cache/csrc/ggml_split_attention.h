@@ -24,3 +24,6 @@ ggml_tensor * argus_ggml_cuda_tier_append(ggml_context * ctx, ggml_tensor * mirr
 // like GGML flash attention's, so a context held by the mirror never leaves the GPU.
 ggml_tensor * argus_ggml_cuda_decode_attention(ggml_context * ctx, ggml_tensor * q, ggml_tensor * k, ggml_tensor * v,
                                                ggml_tensor * mask, float scale);
+
+// Copy/dequantize `cells` rows from pinned `host` (Q8_0 or Q4_0) directly into `device` (F16) on the GPU.
+bool argus_cuda_sync_mirror_from_host(const ggml_tensor * host, ggml_tensor * device, int64_t cells);

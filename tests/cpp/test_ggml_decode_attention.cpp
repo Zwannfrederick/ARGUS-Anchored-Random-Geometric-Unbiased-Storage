@@ -2,6 +2,7 @@
 // attention, and itself at other thread counts (the result must not change by one bit).
 // Usage: test_ggml_decode_attention
 #include "ggml_decode_attention.h"
+#include "argus_config.h"
 
 #include "ggml-alloc.h"
 #include "ggml-backend.h"
@@ -137,6 +138,99 @@ double max_error(const std::vector<float> & a, const std::vector<float> & b) {
 void require(bool condition, const std::string & what) {
     if (!condition) { throw std::runtime_error(what); }
 }
+
+void test_certified_skip_and_config() {
+    // 1. P3 128K VRAM budget planner: 642 MiB free VRAM with 498 MiB MoE expert cache fits via adaptive 64 MiB floor.
+    const size_t planned = argus_plan_vram_budget(642ULL << 20, 498ULL << 20, ArgusConfig{});
+    require(planned == (498ULL << 20), "128K P3 VRAM budget plan failed");
+
+    // 2. Unified autonomous config (ARGUS_AUTO=1) and programmatic override.
+    setenv("ARGUS_AUTO", "1", 1);
+    argus_reset_config();
+    const ArgusConfig auto_cfg = argus_get_config();
+    require(auto_cfg.auto_mode && auto_cfg.k1_enabled && auto_cfg.vram_auto &&
+            auto_cfg.prefill_on_gpu && auto_cfg.layer_prefill &&
+            auto_cfg.madv_random && auto_cfg.hetero_sched && auto_cfg.hetero_overlap &&
+            !auto_cfg.multipole_enabled && !auto_cfg.top_r_enabled &&
+            !auto_cfg.moe_cache_enabled && auto_cfg.skip_eps == 0.0f,
+            "ARGUS_AUTO=1 did not enable calibrated autonomous levers");
+    const ArgusHardwareProfile hw = argus_probe_hardware(1750ULL << 20, 3824ULL << 20);
+    require(hw.cpu_logical_cores >= 1 && hw.ram_total_bytes > 0, "Hardware probe returned invalid host metrics");
+    const ArgusOpPlacementCost c1 = argus_evaluate_moe_cost(hw, 1, 489000000ULL, 256, 8);
+    const ArgusOpPlacementCost c32 = argus_evaluate_moe_cost(hw, 32, 489000000ULL, 256, 8);
+    require(!c1.prefer_gpu && c1.overlap_with_cpu && c32.prefer_gpu,
+            "Heterogeneous MoE cost model did not switch from CPU token-major (bs=1) to GPU P3 (bs=32)");
+    require(argus_hetero_select_ubatch(2048, 32768, 1750ULL << 20, 3824ULL << 20, false) == 512,
+            "Adaptive ubatch did not cap 32K P3 ubatch at 512");
+    unsetenv("ARGUS_AUTO");
+    argus_reset_config();
+
+    // 3. E1 Bounded-Mass Approximate Skipping: Stage 2 (Pass 1 V skip) + Stage 1 (Pass 2 K+V bounding-box skip).
+    const int64_t d = 128, n_head = 8, n_head_kv = 2, n_kv = 1024;
+    const float scale = 1.0f / std::sqrt(float(d));
+    ggml_backend_t backend = ggml_backend_cpu_init();
+    ggml_backend_cpu_set_n_threads(backend, 2);
+    ggml_context * ctx = ggml_init({ggml_tensor_overhead() * 16, nullptr, true});
+    auto * q = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, d, n_head, 1);
+    auto * k = ggml_new_tensor_3d(ctx, GGML_TYPE_F16, d, n_head_kv, n_kv);
+    auto * v = ggml_new_tensor_3d(ctx, GGML_TYPE_F16, d, n_head_kv, n_kv);
+    auto * mask = ggml_new_tensor_2d(ctx, GGML_TYPE_F16, n_kv, 1);
+    ggml_backend_buffer_t buffer = ggml_backend_alloc_ctx_tensors(ctx, backend);
+
+    std::mt19937 rng(99);
+    std::normal_distribution<float> noise(0.0f, 0.15f);
+    std::vector<float> qv(d * n_head, 1.5f), kf(d * n_head_kv * n_kv), vf(d * n_head_kv * n_kv);
+    for (int64_t cell = 0; cell < n_kv; ++cell) {
+        const float boost = (cell < 4 || cell >= n_kv - 4) ? 2.5f : -1.5f;
+        for (int64_t i = 0; i < d * n_head_kv; ++i) {
+            kf[cell * d * n_head_kv + i] = boost + noise(rng);
+            vf[cell * d * n_head_kv + i] = noise(rng) * 4.0f;
+        }
+    }
+    std::vector<ggml_fp16_t> kh(kf.size()), vh(vf.size()), mh(n_kv, ggml_fp32_to_fp16(0.0f));
+    ggml_fp32_to_fp16_row(kf.data(), kh.data(), kf.size());
+    ggml_fp32_to_fp16_row(vf.data(), vh.data(), vf.size());
+    ggml_backend_tensor_set(q, qv.data(), 0, ggml_nbytes(q));
+    ggml_backend_tensor_set(k, kh.data(), 0, ggml_nbytes(k));
+    ggml_backend_tensor_set(v, vh.data(), 0, ggml_nbytes(v));
+    ggml_backend_tensor_set(mask, mh.data(), 0, ggml_nbytes(mask));
+
+    auto eval_once = [&]() {
+        ggml_context * gctx = ggml_init({ggml_tensor_overhead() * 16 + ggml_graph_overhead(), nullptr, true});
+        ggml_tensor * out = argus_ggml_decode_attention(gctx, q, k, v, mask, false, scale);
+        ggml_cgraph * graph = ggml_new_graph(gctx);
+        ggml_build_forward_expand(graph, out);
+        ggml_gallocr_t alloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(backend));
+        ggml_gallocr_alloc_graph(alloc, graph);
+        ggml_backend_graph_compute(backend, graph);
+        std::vector<float> res = read(out);
+        ggml_gallocr_free(alloc);
+        ggml_free(gctx);
+        return res;
+    };
+
+    const std::vector<float> exact = eval_once();
+    ArgusConfig skip_cfg = argus_get_config();
+    skip_cfg.skip_eps = 1e-3f;
+    argus_set_config(skip_cfg);
+    argus_k1_reset_stats();
+    const std::vector<float> pass1 = eval_once();
+    const ArgusK1Stats s1 = argus_k1_stats();
+    require(s1.skipped_v_blocks > 0, "E1 Stage 2 did not skip cold V blocks on Pass 1");
+    const std::vector<float> pass2 = eval_once();
+    const ArgusK1Stats s2 = argus_k1_stats();
+    require(s2.skipped_k_blocks > 0, "E1 Stage 1 did not skip cold K+V blocks via cached bounding boxes on Pass 2");
+    require(max_error(pass1, exact) < 1e-3 && max_error(pass2, exact) < 1e-3, "E1 skip exceeded error bound");
+    std::printf("certified_skip pass1_v_skipped=%llu pass2_k_skipped=%llu total_blocks=%llu skip_err=%.3g\n",
+                (unsigned long long) s1.skipped_v_blocks, (unsigned long long) s2.skipped_k_blocks,
+                (unsigned long long) s2.total_blocks, max_error(pass2, exact));
+
+    argus_k1_reset_stats();
+    argus_reset_config();
+    ggml_backend_buffer_free(buffer);
+    ggml_free(ctx);
+    ggml_backend_free(backend);
+}
 } // namespace
 
 int main() try {
@@ -170,6 +264,7 @@ int main() try {
                     "K1 result depends on the thread count");
         }
     }
+    test_certified_skip_and_config();
     // Declines: disabled, too many tokens for decode, unsupported features.
     ggml_context * ctx = ggml_init({ggml_tensor_overhead() * 8, nullptr, true});
     auto * q = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, 64, 4, 32);

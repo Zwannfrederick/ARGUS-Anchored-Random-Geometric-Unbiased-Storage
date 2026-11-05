@@ -1,11 +1,13 @@
 # Experimental llama.cpp host KV ownership seam
 
 Pinned upstream revision: `54315813269112dd0baed7112ec87ad93a8218ca`.
-Patches (in order): `host-kv.patch`, `cuda-kv.patch`, then `v08-kv.patch` (v0.8 KV tiers over
-llama.cpp's own KV with `-nkvo`: K1 CPU decode attention `ARGUS_KV_CPU_ATTENTION=k1`, a
-write-through device mirror of the first cells `ARGUS_KV_VRAM_BYTES`, split decode attention,
-prefill on the GPU `ARGUS_KV_PREFILL=gpu`, recurrent and sliding-window state kept on the GPU).
-Implementation: `argus_cache/csrc/ggml_*`.
+Patches (in order): `host-kv.patch`, `cuda-kv.patch`, then `v08-kv.patch` (or the single combined `argus.patch` — v0.8 `libargus` resource orchestrator over
+llama.cpp's own KV with `-nkvo`: zero-config autonomous mode `ARGUS_AUTO=1`, K1 CPU decode attention
+`ARGUS_KV_CPU_ATTENTION=k1` with E1 + Multipole bounded-mass approximate skipping `ARGUS_KV_SKIP_EPS` / `ARGUS_MULTIPOLE`, a write-through F16 device mirror
+of the first cells `ARGUS_KV_VRAM_BYTES` supporting F16/Q8_0/Q4_0 host KV, S1 split decode attention,
+prefill on the GPU `ARGUS_KV_PREFILL=gpu`, P3 layer-major MoE prefill `ARGUS_PREFILL=layers` with phase-shared VRAM arena
+scaling to 128K+, sparse MoE `MADV_RANDOM` + opt-in Hot-Expert Cache `ARGUS_MOE_CACHE=1`, and recurrent/sliding-window state kept on the GPU).
+Implementation: `argus_cache/csrc/ggml_*` and `argus_cache/csrc/argus_config.h`.
 
 The patch routes `llama_kv_cache` tensor allocation to ARGUS-owned, file-backed
 host buffers when `ARGUS_KV_DIR` is set. The existing GGML tensor layout and
@@ -20,7 +22,47 @@ attention remains GGML's. The direct disk mode below is the budgeted path.
 Other memory implementations may not use `llama_kv_cache`; no support is claimed
 without observing allocation and real inference using the buffer.
 
-## Current datapath (v0.7.0)
+## Current datapath (v0.8.0 — `libargus` in-memory & MoE orchestrator)
+
+When `v08-kv.patch` is applied, `libargus` operates directly on `llama.cpp`'s own
+`-nkvo` host KV cache without requiring `ARGUS_KV_DIR`:
+
+- **Unified Autonomous Mode (`ARGUS_AUTO=1`, `argus_config.h`, `argus_hetero.h`):** Enables
+  `ARGUS_KV_CPU_ATTENTION=k1`, `ARGUS_KV_VRAM_BYTES=auto`, `ARGUS_KV_PREFILL=gpu`,
+  `ARGUS_PREFILL=layers`, `ARGUS_MADV_RANDOM=1`, `ARGUS_HETERO_SCHED=1`, and `ARGUS_HETERO_OVERLAP=1` (while keeping `ARGUS_KV_SKIP_EPS=0.0`, `ARGUS_MULTIPOLE=0`, `ARGUS_TOP_R=0`, and `ARGUS_MOE_CACHE=0` opt-in). Any explicit environment variable overrides its
+  specific knob.
+- **Heterogeneous CPU/GPU Execution Scheduler & Adaptive RAM/VRAM Manager (`argus_hetero.h`, `ggml_layer_prefill.cpp`, `llama-context.cpp`, `llama-graph.cpp`, `qwen35moe.cpp`, `ggml-backend.cpp`):**
+  Probes CPU/GPU/PCIe/RAM/VRAM hardware capabilities at runtime, selects an analytic coupon-collector MoE placement threshold ($N \ge 32$ for GPU layer-major P3, $N < 32$ for CPU token-major AVX2/AVX-512), caps `n_ubatch = 512` (`n_ctx >= 16384`) and `n_outputs_max = 16` (dynamically expanding when needed), binds dummy device pointers during `sched_reserve()` to eliminate `150 MiB` of dead MoE compute-buffer copies, reserves a 2-layer P3 envelope (`-80%` to `-85%` `CUDA0` compute buffer at 32K, fitting 100% of 64K KV cells in `S1` GPU memory on 4 GB VRAM), reclaims `1,521.9 MiB` of duplicate non-host GGUF `mmap` pages while protecting resident MoE pages via `mincore()`, and overlaps GPU `ffn_shexp` execution asynchronously with CPU `RoutedExperts` across batched async PCIe transfers.
+- **K1 Grouped SIMD CPU Decode + E1 & Multipole Bounded-Mass Skipping (`ggml_decode_attention.cpp`, `ggml_decode_e1.h`, `ggml_decode_simd.h`):**
+  Reads each KV head once across its GQA query group using AVX2/AVX-512 in-register
+  decoding (`f32`, `f16`, `q8_0`, `q4_0`), including integer SIMD offset subtraction
+  for `q4_0`. When `ARGUS_KV_SKIP_EPS > 0`, caches 32-cell multipole boxes
+  `[mu_k[d], rad_k[d], mu_v[d]]` (using 64-bit splitmix hash indexing across 32,768 slots, where `rad_k[d] = max(hi - mu, mu - lo)`) and
+  seeds a read-only sink watermark from cell `0` so cold interior K-blocks and V-cells whose bounded
+  softmax contribution is below `ARGUS_KV_SKIP_EPS` are skipped and compensated with `W_skip * mu_v`.
+- **S1 Split Decode Attention & C1 Mixed-Precision Write-Through (`ggml_split_attention.cu`, `ggml_kv_tiers.cpp`):**
+  Mirrors the first `G` KV cells per layer in `F16` on the GPU while keeping the full
+  context in pinned host RAM in `F16`, `Q8_0`, or `Q4_0` (including asymmetric
+  `-ctk q8_0 -ctv q4_0`). A single CUDA write-through kernel updates the `F16` GPU
+  mirror and encodes `F16`/`Q8_0`/`Q4_0` into pinned host memory. During decode, the
+  GPU computes softmax partials over `[0, G)` concurrently with K1 on the CPU over
+  `[G, n_kv)`, merging by exact log-sum-exp reduction.
+- **P2 GPU Prefill, P3 Layer-Major MoE Prefill & Sparse MoE `MADV_RANDOM` (`ggml_layer_prefill.cpp`):**
+  Streams host KV views to the GPU once per batch for FlashAttention (`P2`),
+  executes multi-ubatch MoE prefill outer-loop-over-layers (`P3`) using the
+  phase-shared VRAM arena (detaching KV mirrors before prefill, caching each layer's
+  `--cpu-moe` experts on the GPU across all ubatches, and refilling the `F16` KV
+  mirrors from host RAM before decode), and applies `POSIX_MADV_RANDOM` to host MoE expert tensors (with opt-in inward-page-aligned `mlock`/`MADV_COLD` hot-expert tracking via `ARGUS_MOE_CACHE=1`). `argus_plan_vram_budget` adapts the VRAM
+  margin down to a `64 MiB` safety floor when needed to fit the shared expert cache at
+  128K+.
+
+Measured v0.8 records:
+- [M1 long-context tiers (`Qwen3.6-35B-A3B` 32K–128K)](../../docs/measurements/v080-m1-2026-09-27/README.md)
+- [P3 layer-major MoE prefill (`Qwen3.6-35B-A3B` 5.3K–64K)](../../docs/measurements/v080-prefill-2026-09-28/README.md)
+- [v0.8 `libargus` levers & SOTA-3 real `Qwen3.6-35B-A3B` ablation (`ARGUS_AUTO=1`, `C1`, `E1`, `Multipole`, `MADV_RANDOM`)](../../docs/measurements/v080-libargus-2026-10-27/README.md)
+- [v0.8 Heterogeneous CPU/GPU Execution Scheduler & Adaptive RAM/VRAM Manager (`Qwen3.6-35B-A3B` 8K, 32K, 64K)](../../docs/measurements/v080-libargus-2026-10-27/hetero_architecture_report.md)
+
+## Direct-disk datapath (v0.7.0)
 
 This is the behaviour of the shipped sources. The sections further down record how
 each mechanism was introduced (v0.5–v0.6) and keep their original measurements;
@@ -160,6 +202,8 @@ git -C /path/to/llama.cpp apply --check /path/to/ARGUS/integrations/llama.cpp/ho
 git -C /path/to/llama.cpp apply /path/to/ARGUS/integrations/llama.cpp/host-kv.patch
 git -C /path/to/llama.cpp apply --check /path/to/ARGUS/integrations/llama.cpp/cuda-kv.patch
 git -C /path/to/llama.cpp apply /path/to/ARGUS/integrations/llama.cpp/cuda-kv.patch
+git -C /path/to/llama.cpp apply --check /path/to/ARGUS/integrations/llama.cpp/v08-kv.patch
+git -C /path/to/llama.cpp apply /path/to/ARGUS/integrations/llama.cpp/v08-kv.patch
 cmake -S /path/to/llama.cpp -B /path/to/llama.cpp/build \
   -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=86 \
   -DLLAMA_BUILD_UI=OFF -DLLAMA_USE_PREBUILT_UI=OFF \

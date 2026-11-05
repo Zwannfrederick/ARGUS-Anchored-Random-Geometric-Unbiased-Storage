@@ -48,9 +48,14 @@ void argus_kv_mirrors_attach();
 ggml_backend_buffer_type_t argus_kv_host_buffer_type();
 
 // Appends of `rows` into `host` at `indices` when `host` has a mirror: in pinned host storage
-// one GPU node writes both (no CPU work on the decode path); otherwise, and for P2 prefill
-// batches, llama.cpp's set_rows followed by the mirror's. nullptr when `host` has no mirror.
-ggml_tensor * argus_kv_append(ggml_context * ctx, ggml_tensor * host, ggml_tensor * rows, ggml_tensor * indices);
+// one GPU node writes both (for decode and for prefill batches that fit inside the mirror);
+// otherwise llama.cpp's set_rows followed by the mirror's (when min_idx < mirror.cells).
+ggml_tensor * argus_kv_append(ggml_context * ctx, ggml_tensor * host, ggml_tensor * rows, ggml_tensor * indices,
+                              int64_t n_kv = 0, int64_t min_idx = 0);
+
+// Replace host K/V views with F16 GPU mirror views during prefill when [0, n_kv) fits in the mirror.
+bool argus_kv_prefill_mirror_views(ggml_context * ctx, const ggml_tensor * q, ggml_tensor * & k, ggml_tensor * & v,
+                                   bool unsupported_features);
 
 // Host cells were rewritten outside appends: copy host rows [0, G) of `host` to its mirror.
 void argus_kv_mirror_refresh(const ggml_tensor * host);
