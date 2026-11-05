@@ -12,6 +12,12 @@
   Studio UI and an OpenAI-compatible API; it no longer touches `~/.claude/settings.json`.
 - The telemetry UI's per-request panel, whose only data source was the gateway.
 
+### Fixed
+- Studio credited chat timestamps and read ticks as messages ("16:03 ✓✓" read as
+  "Siz: 160347") and gave a reply's quoted text to the replier. Lines with fewer than
+  two letters are dropped from the chat view, and text repeating an earlier line
+  (also truncated, or a letter apart in OCR) is marked `↪ alıntı`.
+
 ## v0.8.0 — Long context on a 4 GB card, and a local stack that stays out of the way
 
 v0.8 moves `libargus` from paging KV to managing it across GPU and CPU at once, and

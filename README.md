@@ -90,7 +90,7 @@ not been measured says **Not measured**.
 | End-to-end 32K–128K runs on `Gemma-4-26B-A4B` and `UI-Mate-9B` | **Not measured** (kernel geometries verified in `K1`/`S1`) | — |
 | Quality under INT4, INT2, 1-bit or JL tiers on the HuggingFace research path | **Not measured**; only FP8 was reached | [Quality](#quality-huggingface-path) |
 
-Local verification suites on the development machine (Python 3.14): Python **368 passed, 27 skipped**
+Local verification suites on the development machine (Python 3.14): Python **369 passed, 27 skipped**
 (import/repo hygiene included); native `llama.cpp` K1 (`simd` + `scalar`) and S1/C1
 CUDA split-attention suites **all passed**.
 

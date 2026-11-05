@@ -695,3 +695,23 @@ def test_compaction_counts_the_tool_output_that_history_replays():
     assert estimate_active_tokens(sess) > 6 * 3 * 2000 // 4
     assert 6 * 3 * 2000 >= AUTO_COMPACT_CHAR_THRESHOLD
     assert should_auto_compact(sess)
+
+
+def test_chat_lines_drop_timestamps_and_mark_quoted_replies():
+    """WhatsApp OCR read "16:03 ✓✓" as a message ("Siz: 160347") and gave a reply's
+    quoted text to the replier ("Yusuf: Sınavdan çıktım yatıyorum")."""
+    from argus_cache.webui.hermes_vision import annotate_chat_lines
+
+    lines = [
+        "[Sağ] 160347", "[Sağ] Sınavdan çıktım yatıyorum", "[Sağ] 03 y",
+        "Yusuf", "Siz", "Sınavdan çıktım yatıyorum", "go 16:05",
+        "Yusuf", "Siz", "Sınavdan çıktım yat…", "adam benden önce çıkacaktı djslsmsimsis",
+        "[Sağ] Yusuf", "[Sağ] adam benden önce çıkacaktı dislsmsimsis", "[Sağ] Amcı",
+        "[Sağ] 1609",
+    ]
+    assert annotate_chat_lines(lines) == [
+        "[Sağ] Sınavdan çıktım yatıyorum",
+        "Yusuf", "Siz", "↪ alıntı: Sınavdan çıktım yatıyorum", "go 16:05",
+        "Yusuf", "Siz", "↪ alıntı: Sınavdan çıktım yat…", "adam benden önce çıkacaktı djslsmsimsis",
+        "[Sağ] Yusuf", "[Sağ] ↪ alıntı: adam benden önce çıkacaktı dislsmsimsis", "[Sağ] Amcı",
+    ]

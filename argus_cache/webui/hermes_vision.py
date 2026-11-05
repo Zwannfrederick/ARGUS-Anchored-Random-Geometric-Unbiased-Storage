@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import difflib
 import functools
 import json
 import os
@@ -359,6 +360,42 @@ def group_words_into_lines(words: List[Dict[str, Any]]) -> List[List[Dict[str, A
     return lines
 
 
+def _chat_key(line: str) -> str:
+    text = line.removeprefix("[Sağ] ").strip().lower()
+    return text.rstrip(" .…").strip()
+
+
+def annotate_chat_lines(lines: List[str]) -> List[str]:
+    """Clean a chat view's OCR lines for the model, keeping their order.
+
+    * Lines with fewer than two letters are timestamps and read ticks
+      ("16:03 ✓✓" OCRs as "160347"); they are dropped, not shown as messages.
+    * A line repeating (or truncating) earlier text is a reply's quote box, so
+      it is marked as a quote instead of being credited to the replier.
+    """
+    seen: List[str] = []
+    out: List[str] = []
+    for line in lines:
+        key = _chat_key(line)
+        if sum(ch.isalpha() for ch in key) < 2:
+            continue
+        is_quote = len(key) >= 8 and any(
+            prev == key
+            or prev.startswith(key)
+            # OCR reads the same text a letter apart in the quote box ("djsl" / "disl").
+            or (len(key) >= 20 and difflib.SequenceMatcher(None, prev, key).ratio() >= 0.9)
+            for prev in seen
+        )
+        if is_quote:
+            side = "[Sağ] " if line.startswith("[Sağ] ") else ""
+            out.append(f"{side}↪ alıntı: {line.removeprefix('[Sağ] ').strip()}")
+        else:
+            out.append(line)
+            if len(key) >= 8:
+                seen.append(key)
+    return out
+
+
 def find_sidebar_split(boxes: List[List[int]], *, width: int, height: int) -> int:
     """x of the widest text-free vertical gutter between 20% and 50% of the width.
 
@@ -541,6 +578,8 @@ def fast_read_screen_text(
         merged = "\n".join(txt for _z, _y, _x, txt in lines_out)
         return merged[:max_chars]
 
+    if 2 in sections:
+        sections[2] = annotate_chat_lines(sections[2])
     blocks: List[str] = []
     for z in (0, 1, 2):
         if z in sections:

@@ -96,7 +96,7 @@ koşudur; her davranışın arkasında, o davranış bozulursa kırılan bir tes
 | `Gemma-4-26B-A4B` ve `UI-Mate-9B` üzerinde 32K–128K uçtan uca koşular | **Ölçülmedi** (kernel geometrileri `K1`/`S1` içinde doğrulandı) | — |
 | HuggingFace araştırma yolunda INT4, INT2, 1-bit veya JL katmanlarında model kalitesi | **Ölçülmedi**; yalnızca FP8 katmanına ulaşıldı | [Kalite](#kalite-huggingface-yolu) |
 
-Geliştirme makinesindeki yerel doğrulama paketleri (Python 3.14): Python **368 geçti, 27 atlandı**
+Geliştirme makinesindeki yerel doğrulama paketleri (Python 3.14): Python **369 geçti, 27 atlandı**
 (import/depo hijyeni dahil); native `llama.cpp` K1 (`simd` + `scalar`) ve S1/C1
 CUDA bölünmüş attention testleri **tamamı geçti**.
 
