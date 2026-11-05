@@ -6,9 +6,11 @@ import difflib
 import functools
 import json
 import os
+import re
 import subprocess
 import tempfile
 import time
+from collections import Counter
 from contextlib import contextmanager
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
@@ -20,6 +22,7 @@ HEADLESS_WS = 9
 OCR_UPSCALE_BELOW_WIDTH = 2000
 #: Text in the bottom strip of the conversation is the message box: typed, not sent.
 COMPOSER_LABEL = "[Yazma Kutusu — GÖNDERİLMEDİ]"
+COMPOSER_EMPTY_LABEL = "[Yazma Kutusu — boş]"
 COMPOSER_TOP_FRACTION = 0.92
 
 _GPU_HEAVY_APPS = {
@@ -382,12 +385,15 @@ def group_words_into_lines(words: List[Dict[str, Any]]) -> List[List[Dict[str, A
     return lines
 
 
+_LABEL_RE = re.compile(r"^\[[^\]]*\]\s*")
+
+
 def _chat_key(line: str) -> str:
-    text = line.removeprefix("[Sağ] ").strip().lower()
+    text = _LABEL_RE.sub("", line).strip().lower()
     return text.rstrip(" .…").strip()
 
 
-def annotate_chat_lines(lines: List[str]) -> List[str]:
+def annotate_chat_lines(lines: List[str], *, mark_quotes: bool = True) -> List[str]:
     """Clean a chat view's OCR lines for the model, keeping their order.
 
     * Lines with fewer than two letters are timestamps and read ticks
@@ -398,10 +404,13 @@ def annotate_chat_lines(lines: List[str]) -> List[str]:
     seen: List[str] = []
     out: List[str] = []
     for line in lines:
+        if line == COMPOSER_EMPTY_LABEL:
+            out.append(line)
+            continue
         key = _chat_key(line)
         if sum(ch.isalpha() for ch in key) < 2:
             continue
-        is_quote = len(key) >= 8 and any(
+        is_quote = mark_quotes and len(key) >= 8 and any(
             prev == key
             or prev.startswith(key)
             # OCR reads the same text a letter apart in the quote box ("djsl" / "disl").
@@ -416,6 +425,76 @@ def annotate_chat_lines(lines: List[str]) -> List[str]:
             if len(key) >= 8:
                 seen.append(key)
     return out
+
+
+#: Line roles inside a two-sided chat, as shown to the model.
+ROLE_LABELS = {
+    "siz": "[Siz]",
+    "siz_alinti": "[Siz ↪ alıntı]",
+    "gelen": "[Gelen]",
+    "gelen_alinti": "[Gelen ↪ alıntı]",
+}
+
+
+def line_background(pixels: Any, box: List[int], margin: int = 4) -> Tuple[int, int, int]:
+    """Dominant colour around an OCR line: the bubble (or quote box) it sits on."""
+    import numpy as np
+
+    x0, y0, x1, y1 = box
+    h, w = pixels.shape[:2]
+    patch = pixels[max(0, y0 - margin):min(h, y1 + margin), max(0, x0 - margin):min(w, x1 + margin)]
+    if patch.size == 0:
+        return (0, 0, 0)
+    colours, counts = np.unique((patch.reshape(-1, 3) // 6) * 6, axis=0, return_counts=True)
+    return tuple(int(v) for v in colours[counts.argmax()])
+
+
+def _distance(a: Tuple[int, ...], b: Tuple[int, ...]) -> float:
+    return sum((x - y) ** 2 for x, y in zip(a, b)) ** 0.5
+
+
+def _luma(c: Tuple[int, ...]) -> float:
+    return 0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2]
+
+
+def bubble_roles(x0s: List[int], colours: List[Tuple[int, int, int]], *, right_x: int) -> List[Optional[str]]:
+    """Who wrote each chat line, from the colour it sits on.
+
+    Learned per screen rather than hard-coded: the colour whose lines are mostly
+    right-aligned is the user's bubble, the mostly left-aligned one is incoming,
+    and a darker shade close to either is that side's quote box (true in
+    WhatsApp's dark and light themes alike). Without two distinct sides there
+    are no roles and the caller keeps its position-based labels.
+    """
+    palette: List[Tuple[int, int, int]] = []
+    index: List[int] = []
+    for c in colours:
+        hit = next((i for i, p in enumerate(palette) if _distance(c, p) < 8), None)
+        if hit is None:
+            palette.append(tuple(c))
+            hit = len(palette) - 1
+        index.append(hit)
+
+    right, left = Counter(), Counter()
+    for i, x in zip(index, x0s):
+        (right if x >= right_x else left)[i] += 1
+    side = {i: ("siz" if right[i] > left[i] else "gelen") for i in set(index)}
+
+    role: Dict[int, str] = {}
+    for name in ("siz", "gelen"):
+        mine = sorted((i for i in side if side[i] == name), key=lambda i: -(right[i] + left[i]))
+        if not mine:
+            return [None] * len(colours)
+        family = [i for i in mine if _distance(palette[i], palette[mine[0]]) < 30]
+        bubble = max(family, key=lambda i: _luma(palette[i]))
+        role[bubble] = name
+        for i in family:
+            if i != bubble:
+                role[i] = f"{name}_alinti"
+    bubbles = [i for i, r in role.items() if r in ("siz", "gelen")]
+    if _distance(palette[bubbles[0]], palette[bubbles[1]]) < 12:
+        return [None] * len(colours)
+    return [role.get(i) for i in index]
 
 
 def find_sidebar_split(boxes: List[List[int]], *, width: int, height: int) -> int:
@@ -530,6 +609,82 @@ def fast_detect_elements(wayland_ui: Any, image_path: str, max_elements: int = 8
     return elements[:max_elements]
 
 
+def _load_pixels(image_path: str) -> Any:
+    try:
+        import numpy as np
+        from PIL import Image
+
+        return np.asarray(Image.open(image_path).convert("RGB")).astype(int)
+    except (OSError, ValueError, ImportError):
+        return None
+
+
+def _text_contrast(gray: Any, box: List[int]) -> float:
+    import numpy as np
+
+    x0, y0, x1, y1 = box
+    patch = gray[y0:y1, x0:x1]
+    if patch.size == 0:
+        return 0.0
+    return float(abs(np.percentile(patch, 97) - np.percentile(patch, 50)) if np.percentile(patch, 50) < 128
+                 else abs(np.percentile(patch, 50) - np.percentile(patch, 3)))
+
+
+def composer_is_placeholder(gray: Any, box: List[int], chat_boxes: List[List[int]]) -> bool:
+    """Whether message-box text is the dim placeholder rather than a typed draft.
+
+    Placeholders are drawn faint: measured contrast 131 for "Bir mesaj yazın"
+    against 213 for a typed draft and for chat text on the same screen.
+    """
+    # Message text is the brightest thing in a chat; timestamps and names are dimmer,
+    # so the reference is the top of the range, not the median.
+    reference = sorted(_text_contrast(gray, b) for b in chat_boxes)
+    if not reference:
+        return False
+    return _text_contrast(gray, box) < 0.8 * reference[int(len(reference) * 0.9)]
+
+
+def _label_composer(
+    lines_out: List[Tuple[int, int, int, str]],
+    composer_lines: List[Tuple[int, List[int]]],
+    chat_boxes: List[List[int]],
+    gray: Any,
+) -> None:
+    """Typed text keeps the unsent-draft label; a placeholder becomes one 'empty' line; icon noise goes."""
+    empty_done = False
+    for pos, box in composer_lines:
+        zone, order, x0, label = lines_out[pos]
+        text = label.removeprefix(COMPOSER_LABEL).strip()
+        if sum(ch.isalpha() for ch in text) < 3:
+            lines_out[pos] = (zone, order, x0, "")
+        elif gray is not None and composer_is_placeholder(gray, box, chat_boxes):
+            lines_out[pos] = (zone, order, x0, "" if empty_done else COMPOSER_EMPTY_LABEL)
+            empty_done = True
+
+
+def _apply_bubble_roles(
+    lines_out: List[Tuple[int, int, int, str]],
+    chat_lines: List[Tuple[int, List[int]]],
+    pixels: Any,
+    right_x: int,
+) -> bool:
+    """Relabel conversation lines by bubble colour; False (labels untouched) when no sides are found."""
+    if pixels is None or len(chat_lines) < 3:
+        return False
+    roles = bubble_roles(
+        [box[0] for _, box in chat_lines],
+        [line_background(pixels, box) for _, box in chat_lines],
+        right_x=right_x,
+    )
+    if not any(roles):
+        return False
+    for (pos, _box), role in zip(chat_lines, roles):
+        zone, order, x0, label = lines_out[pos]
+        text = label.removeprefix("[Sağ] ")
+        lines_out[pos] = (zone, order, x0, f"{ROLE_LABELS[role]} {text}" if role else text)
+    return True
+
+
 def fast_read_screen_text(
     wayland_ui: Any,
     image_path: str,
@@ -550,6 +705,8 @@ def fast_read_screen_text(
     ) if use_zones else 0
     right_bubble_x = int(width * 0.56)
     header_y = int(height * 0.12)
+    chat_lines: List[Tuple[int, List[int]]] = []  # (index in lines_out, box) of conversation lines
+    composer_lines: List[Tuple[int, List[int]]] = []
 
     for order, words in enumerate(ocr_lines):
         text = " ".join(w["text"] for w in words).strip()
@@ -574,9 +731,19 @@ def fast_read_screen_text(
             zone = 2  # Ana İçerik (tam genişlik kronolojik akış; sağa yaslı balonlar işaretli)
             if y0 >= height * COMPOSER_TOP_FRACTION:
                 label = f"{COMPOSER_LABEL} {text}"
+                composer_lines.append((len(lines_out), [x0, y0, x1, max(w["box"][3] for w in words)]))
             else:
                 label = f"[Sağ] {text}" if x0 >= right_bubble_x else text
+                chat_lines.append((len(lines_out), [x0, y0, x1, max(w["box"][3] for w in words)]))
         lines_out.append((zone, order, x0, label))
+
+    pixels = _load_pixels(image_path) if use_zones and (chat_lines or composer_lines) else None
+    roles_found = _apply_bubble_roles(lines_out, chat_lines, pixels, right_bubble_x)
+    _label_composer(
+        lines_out, composer_lines, [box for _, box in chat_lines],
+        None if pixels is None else pixels.mean(axis=2),
+    )
+    lines_out = [ln for ln in lines_out if ln[3]]
 
     if not lines_out:
         return "(Ekranda OCR ile okunabilir metin bulunamadı.)"
@@ -598,7 +765,12 @@ def fast_read_screen_text(
         return merged[:max_chars]
 
     if 2 in sections:
-        sections[2] = annotate_chat_lines(sections[2])
+        sections[2] = annotate_chat_lines(sections[2], mark_quotes=not roles_found)
+    if roles_found:
+        zone_titles[2] = (
+            "Ana İçerik (Şu An Açık Olan Sohbet — yukarıdan aşağıya kronolojik; `[Siz]` kullanıcının gönderdiği, "
+            "`[Gelen]` karşı taraf (grupta ilk satır gönderen adı), `↪ alıntı` yanıtlanan mesajın kutusu)"
+        )
     blocks: List[str] = []
     for z in (0, 1, 2):
         if z in sections:

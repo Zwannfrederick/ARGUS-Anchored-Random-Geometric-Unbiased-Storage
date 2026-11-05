@@ -758,3 +758,49 @@ def test_unsent_draft_in_the_composer_is_labelled_not_listed_as_a_message(monkey
     assert "[Sağ] Sınavdan çıktım yatıyorum" in main
     assert "\ngo\n" in main + "\n"
     assert f"{hermes_vision.COMPOSER_LABEL} naber moruklar" in main
+
+
+def test_bubble_roles_come_from_the_colours_on_screen():
+    """Measured on the kardemir coo capture: outgoing (18,72,54), its quote box
+    (12,60,42), incoming (36,36,36), its quote box (24,30,30). Roles are learned
+    from alignment and shade, not hard-coded colours."""
+    from argus_cache.webui.hermes_vision import bubble_roles
+
+    out, out_q, inc, inc_q = (18, 72, 54), (12, 60, 42), (36, 36, 36), (24, 30, 30)
+    lines = [  # (x0, background) in reading order
+        (1572, out), (746, inc), (752, inc_q), (752, inc_q), (746, inc), (1319, out_q), (1319, out_q),
+        (1312, out), (1670, out), (746, inc), (752, inc_q), (746, inc), (1559, out_q), (1553, out),
+    ]
+    roles = bubble_roles([x for x, _ in lines], [c for _, c in lines], right_x=1046)
+    assert roles == [
+        "siz", "gelen", "gelen_alinti", "gelen_alinti", "gelen", "siz_alinti", "siz_alinti",
+        "siz", "siz", "gelen", "gelen_alinti", "gelen", "siz_alinti", "siz",
+    ]
+
+
+def test_bubble_roles_fall_back_when_there_are_no_two_sided_bubbles():
+    """A chat without outgoing/incoming bubbles (e.g. a plain list) gets no roles."""
+    from argus_cache.webui.hermes_vision import bubble_roles
+
+    grey = (36, 36, 36)
+    assert bubble_roles([100, 120, 140], [grey, grey, grey], right_x=1046) == [None, None, None]
+
+
+def test_composer_placeholder_is_told_apart_from_a_typed_draft():
+    """Measured: WhatsApp's "Bir mesaj yazın" placeholder has text contrast 131,
+    a typed draft and chat text 213. An empty box must not read as an unsent draft."""
+    import numpy as np
+
+    from argus_cache.webui.hermes_vision import composer_is_placeholder
+
+    gray = np.full((100, 400), 37)
+    gray[10:20, 10:200:3] = 250      # chat text
+    gray[50:60, 10:200:3] = 168      # placeholder
+    gray[80:90, 10:200:3] = 250      # typed draft
+    chat = [[10, 10, 200, 20]]
+    assert composer_is_placeholder(gray, [10, 50, 200, 60], chat)
+    assert not composer_is_placeholder(gray, [10, 80, 200, 90], chat)
+
+    from argus_cache.webui.hermes_vision import COMPOSER_EMPTY_LABEL, annotate_chat_lines
+
+    assert annotate_chat_lines(["[Siz] Abo", COMPOSER_EMPTY_LABEL]) == ["[Siz] Abo", COMPOSER_EMPTY_LABEL]

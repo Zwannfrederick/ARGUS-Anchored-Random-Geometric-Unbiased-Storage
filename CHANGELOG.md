@@ -23,6 +23,14 @@
   took 1.7 s instead of ~3 s.
 - Text in the conversation's message box is labelled as an unsent draft, so the model
   no longer reports a typed-but-unsent message as sent.
+- **Chat lines say who wrote them.** The colour behind each line is sampled and roles are
+  learned per screen: the mostly right-aligned bubble colour is `[Siz]`, the left one
+  `[Gelen]`, and a darker shade of either is that side's `↪ alıntı` box. On both test
+  captures every line was attributed correctly in ~1.8 s, where a vision-language read
+  of the same screen took 40 s and still mixed up authors. Without two bubble colours
+  (apps without bubbles) the position-based labels stay.
+- An empty message box is reported as empty: the faint placeholder ("Bir mesaj yazın",
+  measured contrast 131 against 213 for typed text) is no longer read as an unsent draft.
 
 ## v0.8.0 — Long context on a 4 GB card, and a local stack that stays out of the way
 
