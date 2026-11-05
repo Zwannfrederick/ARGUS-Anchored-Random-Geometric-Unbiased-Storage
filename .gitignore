@@ -25,19 +25,20 @@ scratch/
 !scratch/README.md
 .venv-vllm/
 
-# Neo (deney, 2026-09-05 duraklatıldı)
-hermes/hermes-agent/
-hermes/*.log
-hermes/*.pid
-neo-mobile/node_modules/
-neo-mobile/android/build/
-neo-mobile/android/app/build/
-neo-mobile/.expo/
+# Experiments & Neo archive (deneysel arşiv)
+experiments/hermes/hermes-agent/
+experiments/hermes/*.log
+experiments/hermes/*.pid
+experiments/neo-mobile/node_modules/
+experiments/neo-mobile/android/build/
+experiments/neo-mobile/android/app/build/
+experiments/neo-mobile/.expo/
+experiments/neo-mobile/credentials.json
 *.apk
 screenshots/
-
-# Signing secrets never belong in git
-neo-mobile/credentials.json
 *.keystore
 *.jks
 .pytest-cache/
+
+# PyPI upload token (local only)
+pypi.txt

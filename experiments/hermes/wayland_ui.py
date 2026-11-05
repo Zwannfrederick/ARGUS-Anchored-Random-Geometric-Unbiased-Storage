@@ -501,6 +501,13 @@ for _i, _c in enumerate("1234567890"):
 for _i in range(1, 11):
     KEYCODES[f"f{_i}"] = 58 + _i
 KEYCODES["f11"], KEYCODES["f12"] = 87, 88
+# Keys Hyprland binds that are not on the letter/digit block (linux/input-event-codes.h).
+KEYCODES.update({
+    "print": 99, "sysrq": 99,
+    "xf86audioraisevolume": 115, "xf86audiolowervolume": 114, "xf86audiomute": 113,
+    "xf86audiomicmute": 248, "xf86audioplay": 164, "xf86audionext": 163, "xf86audioprev": 165,
+    "xf86monbrightnessup": 225, "xf86monbrightnessdown": 224,
+})
 
 MODCODES = {"ctrl": 29, "control": 29, "shift": 42, "alt": 56,
             "logo": 125, "super": 125, "meta": 125}
